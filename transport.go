@@ -38,6 +38,7 @@ type RPCEnsureCollectionRequest struct {
 
 type RPCPutRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	ID         string
 	Entry      Entry
@@ -45,6 +46,7 @@ type RPCPutRequest struct {
 
 type RPCPutVectorRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	ID         string
 	Vector     []float32
@@ -54,6 +56,7 @@ type RPCPutVectorRequest struct {
 
 type RPCDeleteRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	ID         string
 }
@@ -65,6 +68,7 @@ type RPCFilter struct {
 
 type RPCSearchRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	Query      string
 	K          int
@@ -75,6 +79,7 @@ type RPCSearchRequest struct {
 
 type RPCSearchVectorRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	Query      []float32
 	K          int
@@ -89,6 +94,7 @@ type RPCSearchResponse struct {
 
 type RPCHistoryRequest struct {
 	Token      string
+	Internal   bool
 	Collection string
 	ID         string
 	UseAt      bool
@@ -151,6 +157,7 @@ func (db *DB) Serve(listener net.Listener) error {
 	if err := server.RegisterName(rpcServiceName, &rpcServer{db: db}); err != nil {
 		return err
 	}
+	db.registerServeAddr(listener.Addr().String())
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -236,18 +243,20 @@ func (c *rpcClient) EnsureCollection(name string, bitWidth int) error {
 	}, &RPCEmpty{})
 }
 
-func (c *rpcClient) Put(collection, id string, entry Entry) error {
+func (c *rpcClient) Put(collection, id string, entry Entry, internal bool) error {
 	return c.call("Put", RPCPutRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		ID:         id,
 		Entry:      entry,
 	}, &RPCEmpty{})
 }
 
-func (c *rpcClient) PutVector(collection, id string, vector []float32, text string, metadata map[string]string) error {
+func (c *rpcClient) PutVector(collection, id string, vector []float32, text string, metadata map[string]string, internal bool) error {
 	return c.call("PutVector", RPCPutVectorRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		ID:         id,
 		Vector:     cloneVector(vector),
@@ -256,10 +265,11 @@ func (c *rpcClient) PutVector(collection, id string, vector []float32, text stri
 	}, &RPCEmpty{})
 }
 
-func (c *rpcClient) Search(collection, query string, k int, filters []FilterOption, useAt bool, atLamport uint64) ([]SearchResult, error) {
+func (c *rpcClient) Search(collection, query string, k int, filters []FilterOption, useAt bool, atLamport uint64, internal bool) ([]SearchResult, error) {
 	var resp RPCSearchResponse
 	err := c.call("Search", RPCSearchRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		Query:      query,
 		K:          k,
@@ -270,10 +280,11 @@ func (c *rpcClient) Search(collection, query string, k int, filters []FilterOpti
 	return resp.Results, err
 }
 
-func (c *rpcClient) SearchVector(collection string, query []float32, k int, filters []FilterOption, useAt bool, atLamport uint64) ([]SearchResult, error) {
+func (c *rpcClient) SearchVector(collection string, query []float32, k int, filters []FilterOption, useAt bool, atLamport uint64, internal bool) ([]SearchResult, error) {
 	var resp RPCSearchResponse
 	err := c.call("SearchVector", RPCSearchVectorRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		Query:      cloneVector(query),
 		K:          k,
@@ -284,10 +295,11 @@ func (c *rpcClient) SearchVector(collection string, query []float32, k int, filt
 	return resp.Results, err
 }
 
-func (c *rpcClient) History(collection, id string, useAt bool, atLamport uint64) ([]Version, error) {
+func (c *rpcClient) History(collection, id string, useAt bool, atLamport uint64, internal bool) ([]Version, error) {
 	var resp RPCHistoryResponse
 	err := c.call("History", RPCHistoryRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		ID:         id,
 		UseAt:      useAt,
@@ -296,9 +308,10 @@ func (c *rpcClient) History(collection, id string, useAt bool, atLamport uint64)
 	return resp.Versions, err
 }
 
-func (c *rpcClient) Delete(collection, id string) error {
+func (c *rpcClient) Delete(collection, id string, internal bool) error {
 	return c.call("Delete", RPCDeleteRequest{
 		Token:      c.token,
+		Internal:   internal,
 		Collection: collection,
 		ID:         id,
 	}, &RPCEmpty{})
@@ -333,7 +346,7 @@ func (s *rpcServer) Put(req RPCPutRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return s.db.Collection(req.Collection).Put(req.ID, req.Entry)
+	return s.db.Collection(req.Collection).put(req.ID, req.Entry, !req.Internal)
 }
 
 func (s *rpcServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error {
@@ -347,7 +360,7 @@ func (s *rpcServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error {
 	if len(req.Metadata) > 0 {
 		opts = append(opts, WithMetadata(req.Metadata))
 	}
-	return s.db.Collection(req.Collection).PutVector(req.ID, req.Vector, opts...)
+	return s.db.Collection(req.Collection).putVectorRequest(req.ID, req.Vector, collectPutVectorOptions(opts), !req.Internal)
 }
 
 func (s *rpcServer) Search(req RPCSearchRequest, resp *RPCSearchResponse) error {
@@ -360,7 +373,7 @@ func (s *rpcServer) Search(req RPCSearchRequest, resp *RPCSearchResponse) error 
 		resp.Results = results
 		return err
 	}
-	results, err := coll.Search(req.Query, req.K, fromRPCFilters(req.Filters)...)
+	results, err := coll.search(req.Query, req.K, fromRPCFilters(req.Filters), !req.Internal)
 	resp.Results = results
 	return err
 }
@@ -375,7 +388,7 @@ func (s *rpcServer) SearchVector(req RPCSearchVectorRequest, resp *RPCSearchResp
 		resp.Results = results
 		return err
 	}
-	results, err := coll.SearchVector(req.Query, req.K, fromRPCFilters(req.Filters)...)
+	results, err := coll.searchVector(req.Query, req.K, fromRPCFilters(req.Filters), !req.Internal)
 	resp.Results = results
 	return err
 }
@@ -390,7 +403,7 @@ func (s *rpcServer) History(req RPCHistoryRequest, resp *RPCHistoryResponse) err
 		resp.Versions = versions
 		return err
 	}
-	versions, err := coll.History(req.ID)
+	versions, err := coll.historyFor(req.ID, !req.Internal)
 	resp.Versions = versions
 	return err
 }
@@ -399,7 +412,7 @@ func (s *rpcServer) Delete(req RPCDeleteRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return s.db.Collection(req.Collection).Delete(req.ID)
+	return s.db.Collection(req.Collection).delete(req.ID, !req.Internal)
 }
 
 func (s *rpcServer) authorize(token string) error {

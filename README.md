@@ -15,7 +15,7 @@ Phase 1 ships the single-process core:
 
 ## Status
 
-`v0.1.0-dev` is still pre-cluster. Embedded mode is complete enough to use, and single-node remote access works over the built-in RPC transport. Sharding, replication, and scatter-gather search are not implemented yet.
+`v0.1.0-dev` is still pre-cluster. Embedded mode is complete enough to use, single-node remote access works over the built-in RPC transport, and embedded nodes can fan out searches and route writes across configured peers. Replication and durable multi-node WAL streaming are not implemented yet.
 
 ## Install
 
@@ -86,9 +86,9 @@ if err := db.ListenAndServe("127.0.0.1:4040"); err != nil {
 }
 ```
 
-## Future Cluster Surface
+## Embedded Federation
 
-The spec-facing option surface for embedded federation config is still present:
+Embedded nodes can also work with configured peers:
 
 ```go
 db, err := corkscrewdb.Open(
@@ -98,7 +98,18 @@ db, err := corkscrewdb.Open(
 )
 ```
 
-`WithPeers(...)` and `WithToken(...)` are persisted/configured now, but multi-peer routing, sharding, replication, and gRPC transport are still ahead.
+Current behavior:
+
+- text and vector searches fan out across the local node and configured peers
+- writes and deletes route to a hash-selected owner across the local node plus peers
+- history lookups route to the owning node
+
+Still ahead:
+
+- replication
+- gRPC transport
+- explicit shard metadata and rebalancing
+- cluster-wide WAL streaming
 
 ## Development
 

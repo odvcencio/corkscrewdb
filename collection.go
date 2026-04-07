@@ -46,11 +46,25 @@ type CollectionView struct {
 }
 
 func (c *Collection) Put(id string, entry Entry) error {
+	return c.put(id, entry, true)
+}
+
+func (c *Collection) put(id string, entry Entry, federated bool) error {
 	if err := c.usable(); err != nil {
 		return err
 	}
 	if c.remote != nil {
-		return c.remote.Put(c.name, id, entry)
+		return c.remote.Put(c.name, id, entry, false)
+	}
+	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		if err := client.EnsureCollection(c.name, c.bitWidth); err != nil {
+			return err
+		}
+		return client.Put(c.name, id, entry, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -69,16 +83,30 @@ func (c *Collection) Put(id string, entry Entry) error {
 		}
 		vector = encoded
 	}
-	return c.putVector(id, vector, text, metadata)
+	return c.putVector(id, vector, text, metadata, federated)
 }
 
 func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOption) error {
+	cfg := collectPutVectorOptions(opts)
+	return c.putVectorRequest(id, vector, cfg, true)
+}
+
+func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVectorConfig, federated bool) error {
 	if err := c.usable(); err != nil {
 		return err
 	}
 	if c.remote != nil {
-		cfg := collectPutVectorOptions(opts)
-		return c.remote.PutVector(c.name, id, vector, cfg.text, cfg.metadata)
+		return c.remote.PutVector(c.name, id, vector, cfg.text, cfg.metadata, false)
+	}
+	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		if err := client.EnsureCollection(c.name, c.bitWidth); err != nil {
+			return err
+		}
+		return client.PutVector(c.name, id, vector, cfg.text, cfg.metadata, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -86,30 +114,73 @@ func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOpt
 	if len(vector) == 0 {
 		return errors.New("corkscrewdb: vector is required")
 	}
-	cfg := collectPutVectorOptions(opts)
-	return c.putVector(id, cloneVector(vector), cfg.text, cfg.metadata)
+	return c.putVector(id, cloneVector(vector), cfg.text, cfg.metadata, federated)
 }
 
 func (c *Collection) Search(query string, k int, filters ...FilterOption) ([]SearchResult, error) {
+	return c.search(query, k, filters, true)
+}
+
+func (c *Collection) search(query string, k int, filters []FilterOption, federated bool) ([]SearchResult, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
 	if c.remote != nil {
-		return c.remote.Search(c.name, query, k, filters, false, 0)
+		return c.remote.Search(c.name, query, k, filters, false, 0, false)
+	}
+	if federated && c.db.shouldFederate() {
+		vector, err := c.encoder.Encode(query)
+		if err != nil {
+			return nil, err
+		}
+		return c.searchVector(vector, k, filters, true)
 	}
 	vector, err := c.encoder.Encode(query)
 	if err != nil {
 		return nil, err
 	}
-	return c.SearchVector(vector, k, filters...)
+	return c.searchVector(vector, k, filters, false)
 }
 
 func (c *Collection) SearchVector(query []float32, k int, filters ...FilterOption) ([]SearchResult, error) {
+	return c.searchVector(query, k, filters, true)
+}
+
+func (c *Collection) searchVector(query []float32, k int, filters []FilterOption, federated bool) ([]SearchResult, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
 	if c.remote != nil {
-		return c.remote.SearchVector(c.name, query, k, filters, false, 0)
+		return c.remote.SearchVector(c.name, query, k, filters, false, 0, false)
+	}
+	if federated && c.db.shouldFederate() {
+		local, err := c.searchVectorLocal(query, k, filters)
+		if err != nil {
+			return nil, err
+		}
+		sets := [][]SearchResult{local}
+		for _, peer := range c.db.peers {
+			if peer == "" || peer == c.db.localMemberID() {
+				continue
+			}
+			client, err := c.db.peerClient(peer)
+			if err != nil {
+				return nil, err
+			}
+			results, err := client.SearchVector(c.name, query, k, filters, false, 0, true)
+			if err != nil {
+				return nil, err
+			}
+			sets = append(sets, results)
+		}
+		return mergeSearchResultSets(k, sets...), nil
+	}
+	return c.searchVectorLocal(query, k, filters)
+}
+
+func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterOption) ([]SearchResult, error) {
+	if err := c.usable(); err != nil {
+		return nil, err
 	}
 	c.mu.RLock()
 	idx := c.index
@@ -125,11 +196,22 @@ func (c *Collection) SearchVector(query []float32, k int, filters ...FilterOptio
 }
 
 func (c *Collection) History(id string) ([]Version, error) {
+	return c.historyFor(id, true)
+}
+
+func (c *Collection) historyFor(id string, federated bool) ([]Version, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
 	if c.remote != nil {
-		return c.remote.History(c.name, id, false, 0)
+		return c.remote.History(c.name, id, false, 0, false)
+	}
+	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return nil, err
+		}
+		return client.History(c.name, id, false, 0, true)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -142,11 +224,22 @@ func (c *Collection) History(id string) ([]Version, error) {
 }
 
 func (c *Collection) Delete(id string) error {
+	return c.delete(id, true)
+}
+
+func (c *Collection) delete(id string, federated bool) error {
 	if err := c.usable(); err != nil {
 		return err
 	}
 	if c.remote != nil {
-		return c.remote.Delete(c.name, id)
+		return c.remote.Delete(c.name, id, false)
+	}
+	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		return client.Delete(c.name, id, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -247,7 +340,7 @@ func (v *CollectionView) Search(query string, k int, filters ...FilterOption) ([
 		return nil, v.err
 	}
 	if v.remote != nil {
-		return v.remote.Search(v.name, query, k, filters, v.useAt, v.atClock)
+		return v.remote.Search(v.name, query, k, filters, v.useAt, v.atClock, false)
 	}
 	vector, err := v.encoder.Encode(query)
 	if err != nil {
@@ -261,7 +354,7 @@ func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterO
 		return nil, v.err
 	}
 	if v.remote != nil {
-		return v.remote.SearchVector(v.name, query, k, filters, v.useAt, v.atClock)
+		return v.remote.SearchVector(v.name, query, k, filters, v.useAt, v.atClock, false)
 	}
 	if v.index == nil {
 		return nil, nil
@@ -277,7 +370,7 @@ func (v *CollectionView) History(id string) ([]Version, error) {
 		return nil, v.err
 	}
 	if v.remote != nil {
-		return v.remote.History(v.name, id, v.useAt, v.atClock)
+		return v.remote.History(v.name, id, v.useAt, v.atClock, false)
 	}
 	versions := v.history[id]
 	out := make([]Version, len(versions))
@@ -303,7 +396,7 @@ func (c *Collection) usable() error {
 	return nil
 }
 
-func (c *Collection) putVector(id string, vector []float32, text string, metadata map[string]string) error {
+func (c *Collection) putVector(id string, vector []float32, text string, metadata map[string]string, federated bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

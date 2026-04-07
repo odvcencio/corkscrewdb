@@ -69,9 +69,6 @@ func WithToken(token string) Option {
 	})
 }
 
-// ErrClusterModeUnimplemented is returned by Connect until remote transport lands.
-var ErrClusterModeUnimplemented = errors.New("corkscrewdb: cluster client mode is not implemented yet")
-
 // DB is an embedded CorkScrewDB instance.
 type DB struct {
 	path           string
@@ -81,10 +78,12 @@ type DB struct {
 	peers          []string
 	token          string
 	remote         *rpcClient
+	serveAddr      string
 
 	mu          sync.RWMutex
 	manifest    manifest
 	collections map[string]*Collection
+	peerClients map[string]*rpcClient
 	closed      bool
 }
 
@@ -153,6 +152,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		token:          cfg.token,
 		manifest:       manifestData,
 		collections:    make(map[string]*Collection),
+		peerClients:    make(map[string]*rpcClient),
 	}
 	if err := db.saveManifest(); err != nil {
 		return nil, err
@@ -263,6 +263,9 @@ func (db *DB) Close() error {
 		if err := coll.close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := db.closePeerClients(); err != nil {
+		errs = append(errs, err)
 	}
 	if err := db.encoder.Close(); err != nil {
 		errs = append(errs, err)

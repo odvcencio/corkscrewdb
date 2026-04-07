@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -310,6 +311,107 @@ func TestConnectRequiresToken(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPeersRouteWritesAndFanoutSearch(t *testing.T) {
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerA.Close()
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerB.Close()
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+
+	dbA, err := Open(filepath.Join(t.TempDir(), "a.csdb"), WithProvider(&mockProvider{dim: 16}), WithToken("secret"), WithPeers(addrB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	dbB, err := Open(filepath.Join(t.TempDir(), "b.csdb"), WithProvider(&mockProvider{dim: 16}), WithToken("secret"), WithPeers(addrA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+	t.Cleanup(func() {
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Errorf("serve B: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve B did not exit")
+		}
+	})
+
+	localID, remoteID := pickPeerOwnedIDs(t, dbA, "docs", addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+
+	if err := collA.Put(localID, Entry{Text: "alpha federation", Metadata: map[string]string{"source": "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(remoteID, Entry{Text: "beta federation", Metadata: map[string]string{"source": "remote"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := collA.Search("alpha", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(results, localID) {
+		t.Fatalf("expected local result %q in %v", localID, results)
+	}
+	results, err = collA.Search("beta", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(results, remoteID) {
+		t.Fatalf("expected remote result %q in %v", remoteID, results)
+	}
+
+	owner := dbA.ownerFor("docs", remoteID)
+	var ownerDB *DB
+	if owner == addrA {
+		ownerDB = dbA
+	} else {
+		ownerDB = dbB
+	}
+	history, err := ownerDB.Collection("docs").historyFor(remoteID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("owner history len = %d, want 1", len(history))
+	}
+
+	if err := collA.Delete(remoteID); err != nil {
+		t.Fatal(err)
+	}
+	results, err = dbB.Collection("docs").Search("beta", 10, Filter("source", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("deleted federated entry still searchable: %v", results)
+	}
+}
+
 func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
 	t.Helper()
 
@@ -339,4 +441,35 @@ func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
 		}
 	})
 	return db, listener.Addr().String()
+}
+
+func pickPeerOwnedIDs(t *testing.T, db *DB, collection, localOwner, remoteOwner string) (string, string) {
+	t.Helper()
+	var localID, remoteID string
+	for i := 0; i < 1000 && (localID == "" || remoteID == ""); i++ {
+		candidate := "doc-peer-" + strconv.Itoa(i)
+		switch db.ownerFor(collection, candidate) {
+		case localOwner:
+			if localID == "" {
+				localID = candidate
+			}
+		case remoteOwner:
+			if remoteID == "" {
+				remoteID = candidate
+			}
+		}
+	}
+	if localID == "" || remoteID == "" {
+		t.Fatalf("could not find both local and remote ids: local=%q remote=%q", localID, remoteID)
+	}
+	return localID, remoteID
+}
+
+func hasResult(results []SearchResult, id string) bool {
+	for _, result := range results {
+		if result.ID == id {
+			return true
+		}
+	}
+	return false
 }
