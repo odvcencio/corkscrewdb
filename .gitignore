@@ -1,0 +1,6 @@
+*.csdb
+*.csdb/
+*.out
+*.test
+.DS_Store
+/tmp/
