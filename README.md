@@ -9,11 +9,13 @@ Phase 1 ships the single-process core:
 - TurboQuant-backed quantized flat search
 - Append-only WAL persistence
 - Snapshot recovery on reopen
+- Quantized index persistence to `collections/<name>/index/quantized.tqi`
+- Embedding-space config enforcement in `manifest.json`
 - Metadata filters and point-in-time collection views
 
 ## Status
 
-`v0.1.0-dev` is the embedded-core milestone. There is no networking, sharding, or replication in this repo yet.
+`v0.1.0-dev` is the embedded-core milestone. Cluster/federation transport is not implemented yet, but the API/config surface is being laid down for it.
 
 ## Install
 
@@ -65,6 +67,22 @@ func main() {
 ```go
 db, err := corkscrewdb.Open("./prod.csdb", corkscrewdb.WithProvider(myProvider))
 ```
+
+Embedding config is persisted in `manifest.json`. Reopening a database with a different embedding space is rejected to keep search results coherent.
+
+## Future Cluster Surface
+
+The spec-facing option surface already exists for embedded federation config:
+
+```go
+db, err := corkscrewdb.Open(
+    "./vectors.csdb",
+    corkscrewdb.WithPeers("corkscrewdb-0.corkscrewdb.svc:4040"),
+    corkscrewdb.WithToken("agent-token-xxx"),
+)
+```
+
+`Connect(...)` is reserved for the future cluster client mode and currently returns an unimplemented error.
 
 ## Development
 

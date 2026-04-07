@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ type dbConfig struct {
 	providerSet    bool
 	defaultBits    int
 	walSegmentSize int64
+	peers          []string
+	token          string
 }
 
 // Option configures Open.
@@ -52,12 +55,31 @@ func WithWALSegmentSize(size int64) Option {
 	})
 }
 
+// WithPeers records remote peer seed addresses for future federation/cluster use.
+func WithPeers(peers ...string) Option {
+	return dbOptionFunc(func(cfg *dbConfig) {
+		cfg.peers = sanitizePeers(peers)
+	})
+}
+
+// WithToken configures the in-memory auth token used for future remote access.
+func WithToken(token string) Option {
+	return dbOptionFunc(func(cfg *dbConfig) {
+		cfg.token = token
+	})
+}
+
+// ErrClusterModeUnimplemented is returned by Connect until remote transport lands.
+var ErrClusterModeUnimplemented = errors.New("corkscrewdb: cluster client mode is not implemented yet")
+
 // DB is an embedded CorkScrewDB instance.
 type DB struct {
 	path           string
 	provider       EmbeddingProvider
 	encoder        *encoder
 	walSegmentSize int64
+	peers          []string
+	token          string
 
 	mu          sync.RWMutex
 	manifest    manifest
@@ -70,15 +92,34 @@ type manifest struct {
 	ModuleVersion   string                    `json:"module_version"`
 	ActorID         string                    `json:"actor_id"`
 	DefaultBitWidth int                       `json:"default_bit_width"`
+	Peers           []string                  `json:"peers,omitempty"`
+	Embedding       embeddingConfig           `json:"embedding"`
 	Collections     map[string]collectionMeta `json:"collections"`
 	CreatedAt       time.Time                 `json:"created_at"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
+}
+
+type embeddingConfig struct {
+	ID  string `json:"id"`
+	Dim int    `json:"dim"`
 }
 
 type collectionMeta struct {
 	BitWidth int   `json:"bit_width"`
 	Seed     int64 `json:"seed"`
 	Dim      int   `json:"dim"`
+}
+
+type providerIdentifier interface {
+	ProviderID() string
+}
+
+// Connect will open a cluster client once gRPC transport lands.
+func Connect(addr string, opts ...Option) (*DB, error) {
+	if strings.TrimSpace(addr) == "" {
+		return nil, errors.New("corkscrewdb: address is required")
+	}
+	return nil, ErrClusterModeUnimplemented
 }
 
 // Open creates or opens an embedded CorkScrewDB at path.
@@ -106,14 +147,22 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := applyRuntimeConfig(&manifestData, cfg.provider, cfg.peers); err != nil {
+		return nil, err
+	}
 
 	db := &DB{
 		path:           cleanPath,
 		provider:       cfg.provider,
 		encoder:        newEncoder(cfg.provider),
 		walSegmentSize: cfg.walSegmentSize,
+		peers:          append([]string(nil), manifestData.Peers...),
+		token:          cfg.token,
 		manifest:       manifestData,
 		collections:    make(map[string]*Collection),
+	}
+	if err := db.saveManifest(); err != nil {
+		return nil, err
 	}
 
 	for name, meta := range manifestData.Collections {
@@ -216,6 +265,12 @@ func (db *DB) Close() error {
 	db.closed = true
 	db.mu.Unlock()
 	return errors.Join(errs...)
+}
+
+func (db *DB) saveManifest() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.saveManifestLocked()
 }
 
 func (db *DB) isClosed() bool {
@@ -341,6 +396,14 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			}
 		}
 		snapshotMax = data.MaxLamport
+		if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
+			coll.mu.Lock()
+			coll.index = restored
+			if coll.dim == 0 {
+				coll.dim = restored.Dim()
+			}
+			coll.mu.Unlock()
+		}
 	}
 
 	segments, err := walpkg.ListSegments(db.collectionWALDir(name))
@@ -435,6 +498,14 @@ func (db *DB) collectionDir(name string) string {
 	return filepath.Join(db.path, "collections", name)
 }
 
+func (db *DB) collectionIndexDir(name string) string {
+	return filepath.Join(db.collectionDir(name), "index")
+}
+
+func (db *DB) collectionIndexPath(name string) string {
+	return filepath.Join(db.collectionIndexDir(name), "quantized.tqi")
+}
+
 func (db *DB) collectionWALDir(name string) string {
 	return filepath.Join(db.collectionDir(name), "wal")
 }
@@ -445,4 +516,62 @@ func validCollectionName(name string) bool {
 		return false
 	}
 	return !strings.Contains(name, string(os.PathSeparator))
+}
+
+func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string) error {
+	if m.Collections == nil {
+		m.Collections = make(map[string]collectionMeta)
+	}
+	desired := describeEmbeddingProvider(provider)
+	switch {
+	case m.Embedding.ID == "":
+		m.Embedding = desired
+	case m.Embedding != desired:
+		return fmt.Errorf("corkscrewdb: embedding config mismatch: manifest=%s/%d runtime=%s/%d", m.Embedding.ID, m.Embedding.Dim, desired.ID, desired.Dim)
+	}
+	if len(peers) > 0 {
+		m.Peers = append([]string(nil), peers...)
+	}
+	return nil
+}
+
+func describeEmbeddingProvider(provider EmbeddingProvider) embeddingConfig {
+	if provider == nil {
+		return embeddingConfig{ID: "none", Dim: 0}
+	}
+	if named, ok := provider.(providerIdentifier); ok {
+		return embeddingConfig{ID: named.ProviderID(), Dim: provider.Dim()}
+	}
+	return embeddingConfig{ID: reflect.TypeOf(provider).String(), Dim: provider.Dim()}
+}
+
+func sanitizePeers(peers []string) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(peers))
+	seen := make(map[string]struct{}, len(peers))
+	for _, peer := range peers {
+		peer = strings.TrimSpace(peer)
+		if peer == "" {
+			continue
+		}
+		if _, ok := seen[peer]; ok {
+			continue
+		}
+		seen[peer] = struct{}{}
+		out = append(out, peer)
+	}
+	return out
+}
+
+func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
+	path := db.collectionIndexPath(name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	return loadIndexFile(path)
 }

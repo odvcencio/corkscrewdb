@@ -55,6 +55,10 @@ func (p *builtinProvider) Close() error {
 	return nil
 }
 
+func (p *builtinProvider) ProviderID() string {
+	return "builtin-deterministic-v1"
+}
+
 func normalizeText(text string) string {
 	text = strings.ToLower(text)
 	text = strings.Map(func(r rune) rune {

@@ -31,6 +31,9 @@ func (m *mockProvider) EncodeBatch(texts []string) ([][]float32, error) {
 
 func (m *mockProvider) Dim() int     { return m.dim }
 func (m *mockProvider) Close() error { return nil }
+func (m *mockProvider) ProviderID() string {
+	return "mock-provider"
+}
 
 func TestEncoderWithProvider(t *testing.T) {
 	enc := newEncoder(&mockProvider{dim: 32})

@@ -1,7 +1,10 @@
 package corkscrewdb
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +72,54 @@ func TestOpenDefaultProviderSupportsTextSearch(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsEmbeddingConfigMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mismatch.csdb")
+
+	db, err := Open(path, WithProvider(&mockProvider{dim: 32}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path, WithProvider(&mockProvider{dim: 16})); err == nil {
+		t.Fatal("expected embedding config mismatch error")
+	}
+}
+
+func TestOpenPersistsPeerConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers.csdb")
+	db, err := Open(path, WithPeers("node-a:4040", "node-b:4040"), WithToken("secret-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestPath := filepath.Join(path, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "" || !containsAll(string(data), "node-a:4040", "node-b:4040") {
+		t.Fatalf("manifest missing peers: %s", string(data))
+	}
+	if containsAll(string(data), "secret-token") {
+		t.Fatalf("token should not be persisted in manifest: %s", string(data))
+	}
+}
+
+func TestConnectUnimplemented(t *testing.T) {
+	_, err := Connect("corkscrewdb.default.svc:4040")
+	if !errors.Is(err, ErrClusterModeUnimplemented) {
+		t.Fatalf("err = %v, want %v", err, ErrClusterModeUnimplemented)
+	}
+}
+
 func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tail.csdb")
@@ -109,6 +160,27 @@ func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].ID != "doc-2" {
 		t.Fatalf("results = %v, want doc-2 from WAL tail replay", results)
+	}
+}
+
+func TestCloseWritesQuantizedIndexFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index-file.csdb")
+	db, err := Open(path, WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("docs")
+	if err := coll.Put("doc-1", Entry{Text: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	indexPath := filepath.Join(path, "collections", "docs", "index", "quantized.tqi")
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("expected quantized index file: %v", err)
 	}
 }
 
@@ -167,4 +239,13 @@ func TestEmbeddedLifecycle(t *testing.T) {
 	if len(history) != 2 || !history[1].Tombstone {
 		t.Fatalf("history after reopen = %+v", history)
 	}
+}
+
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }

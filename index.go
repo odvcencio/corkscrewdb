@@ -35,21 +35,7 @@ func (idx *index) BitWidth() int { return idx.quantizer.BitWidth() }
 
 func (idx *index) Add(id string, vec []float32, text string, metadata map[string]string, version uint64) {
 	qv := idx.quantizer.Quantize(vec)
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	entry := indexEntry{
-		id:       id,
-		qv:       qv,
-		text:     text,
-		metadata: cloneMetadata(metadata),
-		version:  version,
-	}
-	if pos, ok := idx.idIndex[id]; ok {
-		idx.entries[pos] = entry
-		return
-	}
-	idx.idIndex[id] = len(idx.entries)
-	idx.entries = append(idx.entries, entry)
+	idx.addQuantized(id, qv, text, metadata, version)
 }
 
 func (idx *index) AddBatch(ids []string, vecs [][]float32, texts []string, metas []map[string]string, versions []uint64) {
@@ -91,6 +77,48 @@ func (idx *index) Remove(id string) bool {
 	idx.entries = idx.entries[:last]
 	delete(idx.idIndex, id)
 	return true
+}
+
+func (idx *index) addQuantized(id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	entry := indexEntry{
+		id:       id,
+		qv:       cloneQuantized(qv),
+		text:     text,
+		metadata: cloneMetadata(metadata),
+		version:  version,
+	}
+	if pos, ok := idx.idIndex[id]; ok {
+		idx.entries[pos] = entry
+		return
+	}
+	idx.idIndex[id] = len(idx.entries)
+	idx.entries = append(idx.entries, entry)
+}
+
+func (idx *index) snapshotEntries() []indexEntry {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	out := make([]indexEntry, len(idx.entries))
+	for i, entry := range idx.entries {
+		out[i] = indexEntry{
+			id:       entry.id,
+			qv:       cloneQuantized(entry.qv),
+			text:     entry.text,
+			metadata: cloneMetadata(entry.metadata),
+			version:  entry.version,
+		}
+	}
+	return out
+}
+
+func cloneQuantized(qv turboquant.IPQuantized) turboquant.IPQuantized {
+	return turboquant.IPQuantized{
+		MSE:     append([]byte(nil), qv.MSE...),
+		Signs:   append([]byte(nil), qv.Signs...),
+		ResNorm: qv.ResNorm,
+	}
 }
 
 func (idx *index) Search(query []float32, k int, filters []FilterOption) []SearchResult {

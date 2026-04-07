@@ -420,6 +420,9 @@ func (c *Collection) persistSnapshot() error {
 	if err := snap.WriteFile(path, data); err != nil {
 		return err
 	}
+	if err := saveIndexFile(c.db.collectionIndexPath(c.name), c.index, maxLamport); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	if c.clock.Current() == maxLamport {
 		c.dirty = false
