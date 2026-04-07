@@ -15,7 +15,7 @@ Phase 1 ships the single-process core:
 
 ## Status
 
-`v0.1.0-dev` is the embedded-core milestone. Cluster/federation transport is not implemented yet, but the API/config surface is being laid down for it.
+`v0.1.0-dev` is still pre-cluster. Embedded mode is complete enough to use, and single-node remote access works over the built-in RPC transport. Sharding, replication, and scatter-gather search are not implemented yet.
 
 ## Install
 
@@ -70,9 +70,25 @@ db, err := corkscrewdb.Open("./prod.csdb", corkscrewdb.WithProvider(myProvider))
 
 Embedding config is persisted in `manifest.json`. Reopening a database with a different embedding space is rejected to keep search results coherent.
 
+## Remote Mode
+
+`Connect(...)` now works for single-node remote access using the same collection API over the wire:
+
+```go
+db, err := corkscrewdb.Connect("127.0.0.1:4040", corkscrewdb.WithToken("agent-token-xxx"))
+```
+
+Expose an embedded DB over TCP with:
+
+```go
+if err := db.ListenAndServe("127.0.0.1:4040"); err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Future Cluster Surface
 
-The spec-facing option surface already exists for embedded federation config:
+The spec-facing option surface for embedded federation config is still present:
 
 ```go
 db, err := corkscrewdb.Open(
@@ -82,7 +98,7 @@ db, err := corkscrewdb.Open(
 )
 ```
 
-`Connect(...)` is reserved for the future cluster client mode and currently returns an unimplemented error.
+`WithPeers(...)` and `WithToken(...)` are persisted/configured now, but multi-peer routing, sharding, replication, and gRPC transport are still ahead.
 
 ## Development
 

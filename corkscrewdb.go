@@ -80,6 +80,7 @@ type DB struct {
 	walSegmentSize int64
 	peers          []string
 	token          string
+	remote         *rpcClient
 
 	mu          sync.RWMutex
 	manifest    manifest
@@ -112,14 +113,6 @@ type collectionMeta struct {
 
 type providerIdentifier interface {
 	ProviderID() string
-}
-
-// Connect will open a cluster client once gRPC transport lands.
-func Connect(addr string, opts ...Option) (*DB, error) {
-	if strings.TrimSpace(addr) == "" {
-		return nil, errors.New("corkscrewdb: address is required")
-	}
-	return nil, ErrClusterModeUnimplemented
 }
 
 // Open creates or opens an embedded CorkScrewDB at path.
@@ -186,6 +179,9 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if !validCollectionName(name) {
 		return &Collection{err: fmt.Errorf("corkscrewdb: invalid collection name %q", name), db: db, encoder: db.encoder}
 	}
+	if db.remote != nil {
+		return db.remoteCollection(name, opts...)
+	}
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -250,9 +246,19 @@ func (db *DB) Close() error {
 	for _, coll := range db.collections {
 		collections = append(collections, coll)
 	}
+	remote := db.remote
 	db.mu.RUnlock()
 
 	var errs []error
+	if remote != nil {
+		if err := remote.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		db.mu.Lock()
+		db.closed = true
+		db.mu.Unlock()
+		return errors.Join(errs...)
+	}
 	for _, coll := range collections {
 		if err := coll.close(); err != nil {
 			errs = append(errs, err)

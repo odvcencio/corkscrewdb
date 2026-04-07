@@ -1,11 +1,12 @@
 package corkscrewdb
 
 import (
-	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCloseRoundTrip(t *testing.T) {
@@ -110,13 +111,6 @@ func TestOpenPersistsPeerConfig(t *testing.T) {
 	}
 	if containsAll(string(data), "secret-token") {
 		t.Fatalf("token should not be persisted in manifest: %s", string(data))
-	}
-}
-
-func TestConnectUnimplemented(t *testing.T) {
-	_, err := Connect("corkscrewdb.default.svc:4040")
-	if !errors.Is(err, ErrClusterModeUnimplemented) {
-		t.Fatalf("err = %v, want %v", err, ErrClusterModeUnimplemented)
 	}
 }
 
@@ -248,4 +242,101 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestConnectRemoteLifecycle(t *testing.T) {
+	serverDB, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
+	_ = serverDB
+
+	client, err := Connect(addr, WithToken("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	coll := client.Collection("docs", WithBitWidth(2))
+	if err := coll.Put("doc-1", Entry{Text: "alpha remote", Metadata: map[string]string{"source": "review"}}); err != nil {
+		t.Fatal(err)
+	}
+	history, err := coll.History("doc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history len = %d, want 1", len(history))
+	}
+	firstClock := history[0].LamportClock
+
+	if err := coll.Put("doc-1", Entry{Text: "beta remote", Metadata: map[string]string{"source": "review"}}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := coll.Search("beta", 5, Filter("source", "review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "doc-1" {
+		t.Fatalf("results = %v, want doc-1", results)
+	}
+
+	view := coll.At(firstClock)
+	viewResults, err := view.Search("alpha", 5, Filter("source", "review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(viewResults) != 1 || viewResults[0].Text != "alpha remote" {
+		t.Fatalf("viewResults = %v, want alpha version", viewResults)
+	}
+
+	if err := coll.Delete("doc-1"); err != nil {
+		t.Fatal(err)
+	}
+	results, err = coll.Search("beta", 5, Filter("source", "review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("deleted remote result survived: %v", results)
+	}
+}
+
+func TestConnectRequiresToken(t *testing.T) {
+	_, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 8}), WithToken("secret"))
+	client, err := Connect(addr, WithToken("wrong"))
+	if err == nil || err.Error() != ErrUnauthorized.Error() {
+		if client != nil {
+			_ = client.Close()
+		}
+		t.Fatalf("err = %v, want %v", err, ErrUnauthorized)
+	}
+}
+
+func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "remote.csdb")
+	db, err := Open(path, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- db.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = db.Close()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve did not exit")
+		}
+	})
+	return db, listener.Addr().String()
 }

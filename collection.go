@@ -20,6 +20,7 @@ type Collection struct {
 	bitWidth int
 	seed     int64
 	encoder  *encoder
+	remote   *rpcClient
 
 	mu      sync.RWMutex
 	index   *index
@@ -39,11 +40,17 @@ type CollectionView struct {
 	history map[string][]Version
 	err     error
 	dim     int
+	remote  *rpcClient
+	useAt   bool
+	atClock uint64
 }
 
 func (c *Collection) Put(id string, entry Entry) error {
 	if err := c.usable(); err != nil {
 		return err
+	}
+	if c.remote != nil {
+		return c.remote.Put(c.name, id, entry)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -69,6 +76,10 @@ func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOpt
 	if err := c.usable(); err != nil {
 		return err
 	}
+	if c.remote != nil {
+		cfg := collectPutVectorOptions(opts)
+		return c.remote.PutVector(c.name, id, vector, cfg.text, cfg.metadata)
+	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
 	}
@@ -83,6 +94,9 @@ func (c *Collection) Search(query string, k int, filters ...FilterOption) ([]Sea
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
+	if c.remote != nil {
+		return c.remote.Search(c.name, query, k, filters, false, 0)
+	}
 	vector, err := c.encoder.Encode(query)
 	if err != nil {
 		return nil, err
@@ -93,6 +107,9 @@ func (c *Collection) Search(query string, k int, filters ...FilterOption) ([]Sea
 func (c *Collection) SearchVector(query []float32, k int, filters ...FilterOption) ([]SearchResult, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
+	}
+	if c.remote != nil {
+		return c.remote.SearchVector(c.name, query, k, filters, false, 0)
 	}
 	c.mu.RLock()
 	idx := c.index
@@ -111,6 +128,9 @@ func (c *Collection) History(id string) ([]Version, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
+	if c.remote != nil {
+		return c.remote.History(c.name, id, false, 0)
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	versions := c.history[id]
@@ -124,6 +144,9 @@ func (c *Collection) History(id string) ([]Version, error) {
 func (c *Collection) Delete(id string) error {
 	if err := c.usable(); err != nil {
 		return err
+	}
+	if c.remote != nil {
+		return c.remote.Delete(c.name, id)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -164,6 +187,20 @@ func (c *Collection) Delete(id string) error {
 }
 
 func (c *Collection) At(maxLamport uint64) *CollectionView {
+	if c == nil {
+		return &CollectionView{err: errors.New("corkscrewdb: nil collection")}
+	}
+	if c.err != nil {
+		return &CollectionView{err: c.err}
+	}
+	if c.remote != nil {
+		return &CollectionView{
+			name:    c.name,
+			remote:  c.remote,
+			useAt:   true,
+			atClock: maxLamport,
+		}
+	}
 	view := &CollectionView{
 		name:    c.name,
 		encoder: c.encoder,
@@ -209,6 +246,9 @@ func (v *CollectionView) Search(query string, k int, filters ...FilterOption) ([
 	if v.err != nil {
 		return nil, v.err
 	}
+	if v.remote != nil {
+		return v.remote.Search(v.name, query, k, filters, v.useAt, v.atClock)
+	}
 	vector, err := v.encoder.Encode(query)
 	if err != nil {
 		return nil, err
@@ -219,6 +259,9 @@ func (v *CollectionView) Search(query string, k int, filters ...FilterOption) ([
 func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterOption) ([]SearchResult, error) {
 	if v.err != nil {
 		return nil, v.err
+	}
+	if v.remote != nil {
+		return v.remote.SearchVector(v.name, query, k, filters, v.useAt, v.atClock)
 	}
 	if v.index == nil {
 		return nil, nil
@@ -232,6 +275,9 @@ func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterO
 func (v *CollectionView) History(id string) ([]Version, error) {
 	if v.err != nil {
 		return nil, v.err
+	}
+	if v.remote != nil {
+		return v.remote.History(v.name, id, v.useAt, v.atClock)
 	}
 	versions := v.history[id]
 	out := make([]Version, len(versions))
