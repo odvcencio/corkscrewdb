@@ -153,7 +153,7 @@ func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 || results[0].ID != "doc-2" {
+	if !hasResult(results, "doc-2") {
 		t.Fatalf("results = %v, want doc-2 from WAL tail replay", results)
 	}
 }

@@ -273,6 +273,9 @@ func (c *Collection) delete(id string, federated bool) error {
 	if err := c.wal.Append(entry); err != nil {
 		return err
 	}
+	if c.db.streamer != nil {
+		c.db.streamer.Record(c.name, entry)
+	}
 	if _, err := c.applyVersionLocked(id, version, true); err != nil {
 		return err
 	}
@@ -424,6 +427,9 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 	}
 	if err := c.wal.Append(entry); err != nil {
 		return err
+	}
+	if c.db.streamer != nil {
+		c.db.streamer.Record(c.name, entry)
 	}
 	createdDim, err := c.applyVersionLocked(id, version, true)
 	if err != nil {

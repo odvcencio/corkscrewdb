@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/odvcencio/corkscrewdb/replica"
 	snap "github.com/odvcencio/corkscrewdb/snapshot"
 	walpkg "github.com/odvcencio/corkscrewdb/wal"
 )
@@ -84,6 +85,7 @@ type DB struct {
 	manifest    manifest
 	collections map[string]*Collection
 	peerClients map[string]*rpcClient
+	streamer    *replica.Streamer
 	closed      bool
 }
 
@@ -153,6 +155,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		manifest:       manifestData,
 		collections:    make(map[string]*Collection),
 		peerClients:    make(map[string]*rpcClient),
+		streamer:       replica.NewStreamer(),
 	}
 	if err := db.saveManifest(); err != nil {
 		return nil, err

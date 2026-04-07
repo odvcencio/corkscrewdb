@@ -1,21 +1,23 @@
 # CorkScrewDB
 
-CorkScrewDB is an embedded, versioned vector database in pure Go.
-
-Phase 1 ships the single-process core:
+CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 - Text-in and vector-in collection APIs
 - Version history per ID with Lamport clocks
 - TurboQuant-backed quantized flat search
-- Append-only WAL persistence
-- Snapshot recovery on reopen
-- Quantized index persistence to `collections/<name>/index/quantized.tqi`
-- Embedding-space config enforcement in `manifest.json`
+- Append-only WAL persistence with snapshot recovery
+- Quantized index persistence (`.tqi`)
+- Embedding-space config enforcement
 - Metadata filters and point-in-time collection views
+- Built-in RPC transport with `Connect(...)` and `Serve(...)`
+- Embedded federation with hash-based write routing and fan-out search
+- WAL streaming replication (primary → follower with catch-up)
+- Cold storage offload (sealed WAL segments + snapshots)
+- Standalone server binary (`cmd/corkscrewdb`)
 
 ## Status
 
-`v0.1.0-dev` is still pre-cluster. Embedded mode is complete enough to use, single-node remote access works over the built-in RPC transport, and embedded nodes can fan out searches and route writes across configured peers. Replication and durable multi-node WAL streaming are not implemented yet.
+`v0.1.0-dev` covers the full spec breadth: embedded core, remote access, federation, replication, and cold storage offload. gRPC transport, explicit shard rebalancing, and cross-region replication are deferred to v0.2.0.
 
 ## Install
 
@@ -104,12 +106,27 @@ Current behavior:
 - writes and deletes route to a hash-selected owner across the local node plus peers
 - history lookups route to the owning node
 
-Still ahead:
+## Replication
 
-- replication
+WAL entries stream from primary to followers via pull-based RPC. Followers apply entries through CRDT merge (last-writer-wins by Lamport clock). New followers catch up via snapshot transfer + WAL tail replay.
+
+## Cold Storage Offload
+
+Sealed WAL segments and snapshots push to a configurable backend on a schedule. A filesystem backend ships for testing; S3/GCS backends are planned behind build tags.
+
+## Server Binary
+
+```bash
+go build ./cmd/corkscrewdb/
+./corkscrewdb -data ./my-data -addr 0.0.0.0:4040 -token secret
+```
+
+Still ahead (v0.2.0):
+
 - gRPC transport
 - explicit shard metadata and rebalancing
-- cluster-wide WAL streaming
+- cross-region replication
+- pluggable storage backends
 
 ## Development
 

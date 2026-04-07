@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/rpc"
 	"strings"
+	"time"
 )
 
 var ErrUnauthorized = errors.New("corkscrewdb: unauthorized")
@@ -445,6 +446,141 @@ func fromRPCFilters(filters []RPCFilter) []FilterOption {
 		out[i] = Filter(filter.Key, filter.Value)
 	}
 	return out
+}
+
+// RPC methods for replication pull.
+
+type RPCPullEntriesRequest struct {
+	Token      string
+	Collection string
+	SinceClock uint64
+	MaxEntries int
+}
+
+type RPCPullEntriesResponse struct {
+	Entries     []RPCReplicaEntry
+	LatestClock uint64
+	HasMore     bool
+}
+
+type RPCReplicaEntry struct {
+	Kind         uint8
+	CollectionID string
+	VectorID     string
+	Embedding    []float32
+	Text         string
+	Metadata     map[string]string
+	LamportClock uint64
+	ActorID      string
+	WallClock    time.Time
+}
+
+type RPCPullSnapshotRequest struct {
+	Token      string
+	Collection string
+}
+
+type RPCPullSnapshotResponse struct {
+	Collection string
+	BitWidth   int
+	Seed       int64
+	Dim        int
+	MaxLamport uint64
+	Records    []RPCSnapshotRecord
+}
+
+type RPCSnapshotRecord struct {
+	ID       string
+	Versions []RPCSnapshotVersion
+}
+
+type RPCSnapshotVersion struct {
+	Embedding    []float32
+	Text         string
+	Metadata     map[string]string
+	LamportClock uint64
+	ActorID      string
+	WallClock    time.Time
+	Tombstone    bool
+}
+
+func (s *rpcServer) PullEntries(req RPCPullEntriesRequest, resp *RPCPullEntriesResponse) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	if s.db.streamer == nil {
+		return nil
+	}
+	pulled := s.db.streamer.Pull(req.Collection, req.SinceClock, req.MaxEntries)
+	resp.LatestClock = pulled.LatestClock
+	resp.HasMore = pulled.HasMore
+	resp.Entries = make([]RPCReplicaEntry, len(pulled.Entries))
+	for i, e := range pulled.Entries {
+		resp.Entries[i] = RPCReplicaEntry{
+			Kind:         e.Kind,
+			CollectionID: e.CollectionID,
+			VectorID:     e.VectorID,
+			Embedding:    cloneVector(e.Embedding),
+			Text:         e.Text,
+			Metadata:     cloneMetadata(e.Metadata),
+			LamportClock: e.LamportClock,
+			ActorID:      e.ActorID,
+			WallClock:    e.WallClock,
+		}
+	}
+	return nil
+}
+
+func (s *rpcServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPullSnapshotResponse) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	s.db.mu.RLock()
+	coll, ok := s.db.collections[req.Collection]
+	s.db.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("corkscrewdb: collection %q not found", req.Collection)
+	}
+
+	coll.mu.RLock()
+	defer coll.mu.RUnlock()
+
+	resp.Collection = coll.name
+	resp.BitWidth = coll.bitWidth
+	resp.Seed = coll.seed
+	resp.Dim = coll.dim
+	resp.MaxLamport = coll.clock.Current()
+	resp.Records = make([]RPCSnapshotRecord, 0, len(coll.history))
+	for id, versions := range coll.history {
+		record := RPCSnapshotRecord{ID: id, Versions: make([]RPCSnapshotVersion, len(versions))}
+		for i, v := range versions {
+			record.Versions[i] = RPCSnapshotVersion{
+				Embedding:    cloneVector(v.Embedding),
+				Text:         v.Text,
+				Metadata:     cloneMetadata(v.Metadata),
+				LamportClock: v.LamportClock,
+				ActorID:      v.ActorID,
+				WallClock:    v.WallClock,
+				Tombstone:    v.Tombstone,
+			}
+		}
+		resp.Records = append(resp.Records, record)
+	}
+	return nil
+}
+
+func (c *rpcClient) PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesResponse, error) {
+	var resp RPCPullEntriesResponse
+	req.Token = c.token
+	err := c.call("PullEntries", req, &resp)
+	return resp, err
+}
+
+func (c *rpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error) {
+	var resp RPCPullSnapshotResponse
+	req.Token = c.token
+	err := c.call("PullSnapshot", req, &resp)
+	return resp, err
 }
 
 var _ io.Closer = (*rpcClient)(nil)
