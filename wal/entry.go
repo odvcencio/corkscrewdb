@@ -13,7 +13,7 @@ import (
 
 const (
 	walMagic   = uint16(0x4357)
-	walVersion = uint8(1)
+	walVersion = uint8(2)
 )
 
 const (
@@ -140,7 +140,7 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	if err := read(&version); err != nil {
 		return entry, err
 	}
-	if version != walVersion {
+	if version != 1 && version != 2 {
 		return entry, fmt.Errorf("wal: unsupported version %d", version)
 	}
 	if err := read(&entry.Kind); err != nil {
