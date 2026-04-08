@@ -513,7 +513,7 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		seed:     meta.Seed,
 		encoder:  db.encoder,
 		history:  make(map[string][]Version),
-		clock:    newLamportClock(db.manifest.ActorID),
+		clock:    newHLC(db.manifest.ActorID),
 		wal:      manager,
 	}, nil
 }

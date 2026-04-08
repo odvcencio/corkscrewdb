@@ -25,7 +25,7 @@ type Collection struct {
 	mu      sync.RWMutex
 	index   *index
 	history map[string][]Version
-	clock   *lamportClock
+	clock   *HLC
 	wal     *walpkg.Manager
 	dirty   bool
 	err     error
@@ -255,7 +255,7 @@ func (c *Collection) delete(id string, federated bool) error {
 	version := Version{
 		Text:         latest.Text,
 		Metadata:     cloneMetadata(latest.Metadata),
-		LamportClock: c.clock.Tick(),
+		LamportClock: c.clock.Now(),
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
 		Tombstone:    true,
@@ -280,6 +280,12 @@ func (c *Collection) delete(id string, federated bool) error {
 		return err
 	}
 	return nil
+}
+
+// AtTime returns a point-in-time view of the collection at the given wall-clock time.
+func (c *Collection) AtTime(t time.Time) *CollectionView {
+	hlc := packHLC(uint64(t.UnixMilli()), 0)
+	return c.At(hlc)
 }
 
 func (c *Collection) At(maxLamport uint64) *CollectionView {
@@ -322,7 +328,7 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 				continue
 			}
 			visible = append(visible, cloneVersion(version))
-			if !ok || lamportBefore(latest.LamportClock, latest.ActorID, version.LamportClock, version.ActorID) {
+			if !ok || latest.LamportClock < version.LamportClock || (latest.LamportClock == version.LamportClock && latest.ActorID < version.ActorID) {
 				latest = version
 				ok = true
 			}
@@ -407,7 +413,7 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		Embedding:    cloneVector(vector),
 		Text:         text,
 		Metadata:     cloneMetadata(metadata),
-		LamportClock: c.clock.Tick(),
+		LamportClock: c.clock.Now(),
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
 	}
@@ -584,6 +590,9 @@ func (c *Collection) persistSnapshot() error {
 
 func sortVersions(versions []Version) {
 	sort.Slice(versions, func(i, j int) bool {
-		return lamportBefore(versions[i].LamportClock, versions[i].ActorID, versions[j].LamportClock, versions[j].ActorID)
+		if versions[i].LamportClock != versions[j].LamportClock {
+			return versions[i].LamportClock < versions[j].LamportClock
+		}
+		return versions[i].ActorID < versions[j].ActorID
 	})
 }
