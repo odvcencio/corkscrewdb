@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -52,7 +53,11 @@ func WriteFile(path string, data Data) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func marshal(data Data) ([]byte, error) {
@@ -110,7 +115,7 @@ func marshal(data Data) ([]byte, error) {
 		for _, version := range record.Versions {
 			embedding := make([]byte, len(version.Embedding)*4)
 			for i, value := range version.Embedding {
-				binary.LittleEndian.PutUint32(embedding[i*4:], mathFloat32bits(value))
+				binary.LittleEndian.PutUint32(embedding[i*4:], math.Float32bits(value))
 			}
 			if err := writeBytes(embedding); err != nil {
 				return nil, err

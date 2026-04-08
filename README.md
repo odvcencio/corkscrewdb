@@ -17,7 +17,7 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 ## Status
 
-`v0.1.0-dev` covers the full spec breadth: embedded core, remote access, federation, replication, and cold storage offload. gRPC transport, explicit shard rebalancing, and cross-region replication are deferred to v0.2.0.
+`v0.1.1` — embedded core, remote access, federation, replication, and cold storage offload. gRPC transport, explicit shard rebalancing, and cross-region replication are deferred to v0.2.0.
 
 ## Install
 
@@ -121,12 +121,37 @@ go build ./cmd/corkscrewdb/
 ./corkscrewdb -data ./my-data -addr 0.0.0.0:4040 -token secret
 ```
 
-Still ahead (v0.2.0):
+## Benchmarks
+
+384-dimensional vectors, 2-bit TurboQuant IP quantization, Intel Core Ultra 9 285:
+
+| Operation | Time | Allocs | Notes |
+|-----------|------|--------|-------|
+| **Put (vector + WAL)** | 933us | 34 | quantize + WAL append + fsync |
+| **Put (text + WAL)** | 942us | 35 | encode + quantize + WAL + fsync |
+| **Search top-10 (1K vectors)** | 82us | 23 | prepared-query LUT scoring |
+| **Search top-10 (10K vectors)** | 546us | 23 | |
+| **Search top-10 (100K vectors)** | 5.5ms | 23 | |
+| **Search parallel (10K, 20 cores)** | 49us | 23 | linear scaling under concurrency |
+| **Search with filter (10K)** | 719us | 5023 | metadata match + quantized scoring |
+| **History (100 versions)** | 32us | 101 | full version clone |
+| **Open + Close (1K vectors)** | 31ms | 69607 | snapshot load + WAL replay + snapshot write |
+
+Memory per vector at 384-dim, 2-bit: ~144 bytes (96B MSE + 48B signs + metadata).
+
+Recall@10 at 64-dim, 4-bit: 0.80 (vs exact brute-force).
+
+```bash
+go test -bench=. -benchmem -run=^$ .
+```
+
+## Roadmap (v0.2.0)
 
 - gRPC transport
-- explicit shard metadata and rebalancing
-- cross-region replication
-- pluggable storage backends
+- Explicit shard metadata and rebalancing
+- Cross-region replication
+- Pluggable S3/GCS storage backends
+- HNSW index for sub-linear search
 
 ## Development
 

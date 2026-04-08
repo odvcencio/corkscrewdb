@@ -123,7 +123,19 @@ func mergeSearchResultSets(k int, sets ...[]SearchResult) []SearchResult {
 	if k <= 0 {
 		return nil
 	}
-	merged := make(map[string]SearchResult)
+	// Fast path: single shard, no merge needed.
+	if len(sets) == 1 {
+		if len(sets[0]) > k {
+			return sets[0][:k]
+		}
+		return sets[0]
+	}
+	// Merge with dedup by ID, keeping the highest-scoring version.
+	total := 0
+	for _, set := range sets {
+		total += len(set)
+	}
+	merged := make(map[string]SearchResult, total)
 	for _, set := range sets {
 		for _, result := range set {
 			if current, ok := merged[result.ID]; ok {

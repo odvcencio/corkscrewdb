@@ -8,6 +8,12 @@ import (
 
 const defaultEmbeddingDim = 384
 
+// builtinProvider produces deterministic keyword-based embeddings using FNV
+// hashing. Word unigrams and bigrams are hashed into sparse feature vectors.
+// This enables text-in/results-out with zero configuration but provides
+// keyword matching, not semantic similarity. "dog" and "canine" produce
+// unrelated vectors. For semantic search, configure an external provider via
+// WithProvider.
 type builtinProvider struct {
 	dim int
 }

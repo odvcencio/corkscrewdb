@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -123,7 +124,7 @@ func read(r io.Reader) (Data, error) {
 			}
 			version := Version{Embedding: make([]float32, len(embeddingBytes)/4)}
 			for i := range version.Embedding {
-				version.Embedding[i] = mathFloat32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
+				version.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
 			}
 			version.Text, err = readString()
 			if err != nil {

@@ -337,6 +337,11 @@ func TestEmbeddedPeersRouteWritesAndFanoutSearch(t *testing.T) {
 	}
 	defer dbB.Close()
 
+	// Register serve addresses before starting goroutines so the hash ring
+	// is stable when pickPeerOwnedIDs runs.
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
 	doneA := make(chan error, 1)
 	go func() { doneA <- dbA.Serve(listenerA) }()
 	doneB := make(chan error, 1)

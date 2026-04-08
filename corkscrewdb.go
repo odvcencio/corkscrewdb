@@ -235,6 +235,34 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	return coll
 }
 
+// DropCollection removes a named collection and all its data from disk.
+func (db *DB) DropCollection(name string) error {
+	if db == nil {
+		return errors.New("corkscrewdb: nil database")
+	}
+	if db.isClosed() {
+		return errors.New("corkscrewdb: database is closed")
+	}
+	if db.remote != nil {
+		return db.remote.DropCollection(name)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	coll, ok := db.collections[name]
+	if !ok {
+		return nil
+	}
+	if err := coll.close(); err != nil {
+		return err
+	}
+	delete(db.collections, name)
+	delete(db.manifest.Collections, name)
+	if err := db.saveManifestLocked(); err != nil {
+		return err
+	}
+	return os.RemoveAll(db.collectionDir(name))
+}
+
 // Close flushes snapshots and closes all active WAL writers.
 func (db *DB) Close() error {
 	if db == nil {

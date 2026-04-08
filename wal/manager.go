@@ -17,32 +17,48 @@ type Manager struct {
 	mu              sync.Mutex
 	dir             string
 	maxSegmentBytes int64
+	syncMode        SyncMode
 	activeNumber    int
 	activePath      string
 	activeSize      int64
 	writer          *Writer
 }
 
+// ManagerConfig configures WAL segment management.
+type ManagerConfig struct {
+	Dir             string
+	MaxSegmentBytes int64
+	SyncMode        SyncMode
+}
+
 func NewManager(dir string, maxSegmentBytes int64) (*Manager, error) {
-	if maxSegmentBytes <= 0 {
-		maxSegmentBytes = defaultSegmentBytes
+	return NewManagerWithConfig(ManagerConfig{
+		Dir:             dir,
+		MaxSegmentBytes: maxSegmentBytes,
+	})
+}
+
+func NewManagerWithConfig(cfg ManagerConfig) (*Manager, error) {
+	if cfg.MaxSegmentBytes <= 0 {
+		cfg.MaxSegmentBytes = defaultSegmentBytes
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return nil, err
 	}
-	segments, err := ListSegments(dir)
+	segments, err := ListSegments(cfg.Dir)
 	if err != nil {
 		return nil, err
 	}
 	next := nextSegmentNumber(segments)
-	path := segmentPath(dir, next)
-	writer, err := NewWriter(path)
+	path := segmentPath(cfg.Dir, next)
+	writer, err := NewWriterWithSync(path, cfg.SyncMode)
 	if err != nil {
 		return nil, err
 	}
 	return &Manager{
-		dir:             dir,
-		maxSegmentBytes: maxSegmentBytes,
+		dir:             cfg.Dir,
+		maxSegmentBytes: cfg.MaxSegmentBytes,
+		syncMode:        cfg.SyncMode,
 		activeNumber:    next,
 		activePath:      path,
 		writer:          writer,
@@ -123,7 +139,7 @@ func (m *Manager) rotateLocked() error {
 	}
 	m.activeNumber++
 	m.activePath = segmentPath(m.dir, m.activeNumber)
-	writer, err := NewWriter(m.activePath)
+	writer, err := NewWriterWithSync(m.activePath, m.syncMode)
 	if err != nil {
 		return err
 	}

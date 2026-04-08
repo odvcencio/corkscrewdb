@@ -6,14 +6,30 @@ import (
 	"sync"
 )
 
+// SyncMode controls when the WAL writer calls fsync.
+type SyncMode int
+
+const (
+	// SyncEvery fsyncs after every append. Safe but slower.
+	SyncEvery SyncMode = iota
+	// SyncOnRotate fsyncs only on segment rotation and close. Faster but
+	// the last few entries can be lost on crash.
+	SyncOnRotate
+)
+
 // Writer appends WAL entries to a single segment.
 type Writer struct {
-	mu     sync.Mutex
-	file   *os.File
-	closed bool
+	mu       sync.Mutex
+	file     *os.File
+	syncMode SyncMode
+	closed   bool
 }
 
 func NewWriter(path string) (*Writer, error) {
+	return NewWriterWithSync(path, SyncEvery)
+}
+
+func NewWriterWithSync(path string, mode SyncMode) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -21,7 +37,7 @@ func NewWriter(path string) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{file: file}, nil
+	return &Writer{file: file, syncMode: mode}, nil
 }
 
 func (w *Writer) Append(entry Entry) error {
@@ -38,8 +54,13 @@ func (w *Writer) appendEncoded(data []byte) error {
 	if w.closed {
 		return os.ErrClosed
 	}
-	_, err := w.file.Write(data)
-	return err
+	if _, err := w.file.Write(data); err != nil {
+		return err
+	}
+	if w.syncMode == SyncEvery {
+		return w.file.Sync()
+	}
+	return nil
 }
 
 func (w *Writer) Sync() error {

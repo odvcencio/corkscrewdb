@@ -458,6 +458,12 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	if err := c.validateVersionLocked(version); err != nil {
 		return false, err
 	}
+	// Dedup: skip if we already have this exact (actorID, lamportClock) for this ID.
+	for _, existing := range c.history[id] {
+		if existing.LamportClock == version.LamportClock && existing.ActorID == version.ActorID {
+			return false, nil
+		}
+	}
 	createdDim := false
 	if !version.Tombstone && c.dim == 0 {
 		c.dim = len(version.Embedding)

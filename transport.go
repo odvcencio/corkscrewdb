@@ -318,6 +318,13 @@ func (c *rpcClient) Delete(collection, id string, internal bool) error {
 	}, &RPCEmpty{})
 }
 
+func (c *rpcClient) DropCollection(name string) error {
+	return c.call("DropCollection", RPCEnsureCollectionRequest{
+		Token: c.token,
+		Name:  name,
+	}, &RPCEmpty{})
+}
+
 func (s *rpcServer) Info(req RPCInfoRequest, resp *RPCInfoResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
@@ -328,6 +335,13 @@ func (s *rpcServer) Info(req RPCInfoRequest, resp *RPCInfoResponse) error {
 		Peers:          append([]string(nil), s.db.peers...),
 	}
 	return nil
+}
+
+func (s *rpcServer) DropCollection(req RPCEnsureCollectionRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return s.db.DropCollection(req.Name)
 }
 
 func (s *rpcServer) EnsureCollection(req RPCEnsureCollectionRequest, _ *RPCEmpty) error {
