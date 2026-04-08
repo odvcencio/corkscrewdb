@@ -27,6 +27,7 @@ type dbConfig struct {
 	defaultBits    int
 	walSegmentSize int64
 	peers          []string
+	shards         []ShardAssignment
 	token          string
 }
 
@@ -63,6 +64,13 @@ func WithPeers(peers ...string) Option {
 	})
 }
 
+// WithShards configures explicit shard ownership ranges for federation routing.
+func WithShards(shards ...ShardAssignment) Option {
+	return dbOptionFunc(func(cfg *dbConfig) {
+		cfg.shards = cloneShardAssignments(shards)
+	})
+}
+
 // WithToken configures the in-memory auth token used for future remote access.
 func WithToken(token string) Option {
 	return dbOptionFunc(func(cfg *dbConfig) {
@@ -95,6 +103,7 @@ type manifest struct {
 	ActorID         string                    `json:"actor_id"`
 	DefaultBitWidth int                       `json:"default_bit_width"`
 	Peers           []string                  `json:"peers,omitempty"`
+	Shards          []ShardAssignment         `json:"shards,omitempty"`
 	Embedding       embeddingConfig           `json:"embedding"`
 	Collections     map[string]collectionMeta `json:"collections"`
 	CreatedAt       time.Time                 `json:"created_at"`
@@ -141,7 +150,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := applyRuntimeConfig(&manifestData, cfg.provider, cfg.peers); err != nil {
+	if err := applyRuntimeConfig(&manifestData, cfg.provider, cfg.peers, cfg.shards); err != nil {
 		return nil, err
 	}
 
@@ -567,7 +576,7 @@ func validCollectionName(name string) bool {
 	return !strings.Contains(name, string(os.PathSeparator))
 }
 
-func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string) error {
+func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string, shards []ShardAssignment) error {
 	if m.Collections == nil {
 		m.Collections = make(map[string]collectionMeta)
 	}
@@ -578,8 +587,24 @@ func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string)
 	case m.Embedding != desired:
 		return fmt.Errorf("corkscrewdb: embedding config mismatch: manifest=%s/%d runtime=%s/%d", m.Embedding.ID, m.Embedding.Dim, desired.ID, desired.Dim)
 	}
+	if len(m.Shards) > 0 || len(shards) > 0 {
+		activeShards := m.Shards
+		if len(shards) > 0 {
+			activeShards = shards
+		}
+		normalized, err := normalizeShardAssignments(activeShards)
+		if err != nil {
+			return err
+		}
+		m.Shards = normalized
+	}
+	activePeers := m.Peers
 	if len(peers) > 0 {
-		m.Peers = append([]string(nil), peers...)
+		activePeers = peers
+	}
+	activePeers = sanitizePeers(append(append([]string(nil), activePeers...), peersFromShardAssignments(m.Shards)...))
+	if len(activePeers) > 0 {
+		m.Peers = activePeers
 	}
 	return nil
 }

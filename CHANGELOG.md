@@ -9,12 +9,14 @@ All notable changes to CorkScrewDB are documented here.
 - **gRPC transport** — `Connect(...)`, `Serve(...)`, and `ListenAndServe(...)` now run over generated protobuf stubs instead of `net/rpc`, with larger message limits for snapshot and replication traffic
 - **HNSW index persistence** — approximate nearest-neighbor search now survives restarts alongside the existing quantized flat index
 - **Proto definitions** — `proto/corkscrewdb.proto` and generated `grpc/` stubs define the remote DB and replication pull surface
+- **Explicit shard metadata** — `WithShards(...)` persists contiguous ownership ranges in `manifest.json`, replacing peer-list hashing when configured
 
 ### Changed
 
 - **Hybrid logical clocks** — HLC now backs version ordering while preserving the existing clock-shaped API and stored fields
 - **Format version bump** — WAL, snapshot, and index formats moved to v2 for the HLC/HNSW line
 - **Transport abstraction** — remote DB operations now flow through the extracted `remoteClient` interface so transport and cluster work can evolve independently
+- **Federation routing** — write ownership and scatter-gather fanout now prefer explicit shard assignments, falling back to the older peer-hash behavior only when shard metadata is absent
 
 ## v0.1.1 — 2026-04-07
 

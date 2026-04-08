@@ -115,6 +115,43 @@ func TestOpenPersistsPeerConfig(t *testing.T) {
 	}
 }
 
+func TestOpenPersistsShardConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shards.csdb")
+	db, err := Open(path, WithPeers("node-b:4040"), WithShards(
+		ShardAssignment{ID: "shard-a", Owner: LocalShardOwner, Start: 0, End: (^uint64(0)) / 2},
+		ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))/2 + 1, End: ^uint64(0)},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestPath := filepath.Join(path, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !containsAll(text, "\"shards\"", "\"shard-a\"", "\"shard-b\"", "\"owner\": \"self\"", "\"owner\": \"node-b:4040\"") {
+		t.Fatalf("manifest missing shard config: %s", text)
+	}
+}
+
+func TestOpenRejectsInvalidShardLayout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid-shards.csdb")
+	_, err := Open(path, WithShards(
+		ShardAssignment{ID: "shard-a", Owner: LocalShardOwner, Start: 0, End: 10},
+		ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: 10, End: ^uint64(0)},
+	))
+	if err == nil || !strings.Contains(err.Error(), "starts at 10, want 11") {
+		t.Fatalf("err = %v, want contiguous shard layout error", err)
+	}
+}
+
 func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tail.csdb")
@@ -417,6 +454,107 @@ func TestEmbeddedPeersRouteWritesAndFanoutSearch(t *testing.T) {
 	}
 }
 
+func TestExplicitShardsRouteWritesAndFanoutSearch(t *testing.T) {
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerA.Close()
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerB.Close()
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+
+	dbA, err := Open(
+		filepath.Join(t.TempDir(), "a-explicit.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrB),
+		WithShards(twoNodeShardLayout(LocalShardOwner, addrB)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	dbB, err := Open(
+		filepath.Join(t.TempDir(), "b-explicit.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrA),
+		WithShards(twoNodeShardLayout(addrA, LocalShardOwner)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+	t.Cleanup(func() {
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Errorf("serve B: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve B did not exit")
+		}
+	})
+
+	localID, remoteID := pickPeerOwnedIDs(t, dbA, "docs", addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+
+	if err := collA.Put(localID, Entry{Text: "alpha explicit", Metadata: map[string]string{"source": "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(remoteID, Entry{Text: "beta explicit", Metadata: map[string]string{"source": "remote"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := collA.Search("alpha", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(results, localID) {
+		t.Fatalf("expected local result %q in %v", localID, results)
+	}
+	results, err = collA.Search("beta", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(results, remoteID) {
+		t.Fatalf("expected remote result %q in %v", remoteID, results)
+	}
+
+	if err := collA.Delete(remoteID); err != nil {
+		t.Fatal(err)
+	}
+	results, err = dbB.Collection("docs").Search("beta", 10, Filter("source", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("deleted explicit-shard entry still searchable: %v", results)
+	}
+}
+
 func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
 	t.Helper()
 
@@ -468,6 +606,14 @@ func pickPeerOwnedIDs(t *testing.T, db *DB, collection, localOwner, remoteOwner 
 		t.Fatalf("could not find both local and remote ids: local=%q remote=%q", localID, remoteID)
 	}
 	return localID, remoteID
+}
+
+func twoNodeShardLayout(localOwner, remoteOwner string) []ShardAssignment {
+	mid := (^uint64(0)) / 2
+	return []ShardAssignment{
+		{ID: "shard-a", Owner: localOwner, Start: 0, End: mid},
+		{ID: "shard-b", Owner: remoteOwner, Start: mid + 1, End: ^uint64(0)},
+	}
 }
 
 func hasResult(results []SearchResult, id string) bool {

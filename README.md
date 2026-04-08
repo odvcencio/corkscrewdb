@@ -11,13 +11,14 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Metadata filters and point-in-time collection views
 - gRPC transport with `Connect(...)` and `Serve(...)`
 - Embedded federation with hash-based write routing and fan-out search
+- Explicit shard metadata with persisted ownership ranges
 - WAL streaming replication (primary → follower with catch-up)
 - Cold storage offload (sealed WAL segments + snapshots)
 - Standalone server binary (`cmd/corkscrewdb`)
 
 ## Status
 
-`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, and gRPC transport are in on the dev branch. Remaining roadmap work is shard metadata/rebalancing, richer replication, pluggable cloud offload backends, and the bundled model.
+`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, and explicit shard metadata are in on the dev branch. Remaining roadmap work is shard rebalancing/handoff, richer replication, pluggable cloud offload backends, and the bundled model.
 
 ## Install
 
@@ -106,6 +107,21 @@ Current behavior:
 - writes and deletes route to a hash-selected owner across the local node plus peers
 - history lookups route to the owning node
 
+For explicit ownership, persist shard ranges instead of relying on peer-list hashing:
+
+```go
+db, err := corkscrewdb.Open(
+    "./vectors.csdb",
+    corkscrewdb.WithPeers("node-b:4040"),
+    corkscrewdb.WithShards(
+        corkscrewdb.ShardAssignment{ID: "shard-a", Owner: corkscrewdb.LocalShardOwner, Start: 0, End: (^uint64(0)) / 2},
+        corkscrewdb.ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))/2 + 1, End: ^uint64(0)},
+    ),
+)
+```
+
+When `WithShards(...)` is present, routed writes and point ownership come from the persisted shard ranges. `WithPeers(...)` remains the legacy fallback and the remote seed list for shard owners.
+
 ## Replication
 
 WAL entries stream from primary to followers via pull-based gRPC. Followers apply entries through CRDT merge (last-writer-wins by HLC value). New followers catch up via snapshot transfer + WAL tail replay.
@@ -147,7 +163,7 @@ go test -bench=. -benchmem -run=^$ .
 
 ## Roadmap (v0.2.0)
 
-- Explicit shard metadata and rebalancing
+- Shard rebalancing and handoff
 - Cross-region replication
 - Pluggable S3/GCS storage backends
 - Bundled embedding model

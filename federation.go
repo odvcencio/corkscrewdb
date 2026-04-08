@@ -4,10 +4,11 @@ import (
 	"errors"
 	"hash/fnv"
 	"sort"
+	"strings"
 )
 
 func (db *DB) shouldFederate() bool {
-	return db != nil && db.remote == nil && len(db.peers) > 0
+	return db != nil && db.remote == nil && len(db.remoteShardTargets()) > 0
 }
 
 func (db *DB) registerServeAddr(addr string) {
@@ -28,7 +29,7 @@ func (db *DB) localMemberID() string {
 	return "local://" + db.path
 }
 
-func (db *DB) shardMembers() []string {
+func (db *DB) legacyShardMembers() []string {
 	members := make([]string, 0, len(db.peers)+1)
 	members = append(members, db.localMemberID())
 	members = append(members, db.peers...)
@@ -45,20 +46,87 @@ func (db *DB) shardMembers() []string {
 	return out
 }
 
-func (db *DB) ownerFor(collection, id string) string {
-	members := db.shardMembers()
-	if len(members) == 0 {
-		return ""
-	}
+func shardKey(collection, id string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(collection))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(id))
-	return members[h.Sum64()%uint64(len(members))]
+	return h.Sum64()
+}
+
+func (db *DB) shardAssignments() []ShardAssignment {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return cloneShardAssignments(db.manifest.Shards)
+}
+
+func (db *DB) resolveShardOwner(owner string) string {
+	owner = strings.TrimSpace(owner)
+	if owner == LocalShardOwner {
+		return db.localMemberID()
+	}
+	return owner
+}
+
+func (db *DB) ownerFor(collection, id string) string {
+	key := shardKey(collection, id)
+	if owner, ok := db.explicitOwnerForKey(key); ok {
+		return owner
+	}
+	members := db.legacyShardMembers()
+	if len(members) == 0 {
+		return ""
+	}
+	return members[key%uint64(len(members))]
+}
+
+func (db *DB) explicitOwnerForKey(key uint64) (string, bool) {
+	shards := db.shardAssignments()
+	if len(shards) == 0 {
+		return "", false
+	}
+	for _, shard := range shards {
+		if key < shard.Start || key > shard.End {
+			continue
+		}
+		return db.resolveShardOwner(shard.Owner), true
+	}
+	return "", false
 }
 
 func (db *DB) isLocalOwner(collection, id string) bool {
 	return db.ownerFor(collection, id) == db.localMemberID()
+}
+
+func (db *DB) remoteShardTargets() []string {
+	shards := db.shardAssignments()
+	if len(shards) == 0 {
+		local := db.localMemberID()
+		out := make([]string, 0, len(db.peers))
+		for _, peer := range db.peers {
+			if peer == "" || peer == local {
+				continue
+			}
+			out = append(out, peer)
+		}
+		return out
+	}
+	local := db.localMemberID()
+	out := make([]string, 0, len(shards))
+	seen := make(map[string]struct{}, len(shards))
+	for _, shard := range shards {
+		owner := db.resolveShardOwner(shard.Owner)
+		if owner == "" || owner == local {
+			continue
+		}
+		if _, ok := seen[owner]; ok {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (db *DB) peerClient(addr string) (remoteClient, error) {

@@ -159,10 +159,7 @@ func (c *Collection) searchVector(query []float32, k int, filters []FilterOption
 			return nil, err
 		}
 		sets := [][]SearchResult{local}
-		for _, peer := range c.db.peers {
-			if peer == "" || peer == c.db.localMemberID() {
-				continue
-			}
+		for _, peer := range c.db.remoteShardTargets() {
 			client, err := c.db.peerClient(peer)
 			if err != nil {
 				return nil, err
