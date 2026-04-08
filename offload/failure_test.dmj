@@ -1,0 +1,44 @@
+package offload
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"testing"
+)
+
+type failBackend struct {
+	pushErr error
+	listErr error
+}
+
+func (b *failBackend) Push(key string, reader io.Reader) error { return b.pushErr }
+func (b *failBackend) List(prefix string) ([]string, error)   { return nil, b.listErr }
+func (b *failBackend) Pull(key string, writer io.Writer) error { return nil }
+func (b *failBackend) Delete(key string) error                 { return nil }
+
+unit "BackendPushError" {
+	then "push returns configured error" {
+		fb := &failBackend{pushErr: errors.New("disk full")}
+		err := fb.Push("some/key", bytes.NewReader([]byte("data")))
+		expect err != nil
+		if err != nil && err.Error() != "disk full" {
+			t.Errorf("expected 'disk full', got: %v", err)
+		}
+	}
+}
+
+unit "IdempotentPush" {
+	then "pushing same key twice yields exactly one list entry" {
+		root := t.TempDir()
+		b := NewFSBackend(root)
+		data := []byte("payload")
+		err := b.Push("seg/000001.wal", bytes.NewReader(data))
+		expect err == nil
+		err = b.Push("seg/000001.wal", bytes.NewReader(data))
+		expect err == nil
+		keys, err := b.List("seg/000001.wal")
+		expect err == nil
+		expect len(keys) == 1
+	}
+}
