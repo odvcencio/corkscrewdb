@@ -401,6 +401,11 @@ type RPCSnapshotVersion struct {
 	Tombstone    bool
 }
 
+type RPCRebalanceRequest struct {
+	Token  string
+	Shards []ShardAssignment
+}
+
 func (s *transportServer) PullEntries(req RPCPullEntriesRequest, resp *RPCPullEntriesResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
@@ -464,4 +469,33 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPull
 		resp.Records = append(resp.Records, record)
 	}
 	return nil
+}
+
+func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return s.db.prepareRebalanceShards(req.Shards)
+}
+
+func (s *transportServer) CommitRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	normalized, err := normalizeShardAssignments(req.Shards)
+	if err != nil {
+		return err
+	}
+	return s.db.applyShardLayout(normalized)
+}
+
+func (s *transportServer) PruneRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	normalized, err := normalizeShardAssignments(req.Shards)
+	if err != nil {
+		return err
+	}
+	return s.db.pruneUnownedData(normalized)
 }

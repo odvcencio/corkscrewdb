@@ -1866,6 +1866,58 @@ func (x *PullSnapshotResponse) GetRecords() []*SnapshotRecord {
 	return nil
 }
 
+type RebalanceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Shards        []*ShardAssignment     `protobuf:"bytes,2,rep,name=shards,proto3" json:"shards,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebalanceRequest) Reset() {
+	*x = RebalanceRequest{}
+	mi := &file_corkscrewdb_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebalanceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebalanceRequest) ProtoMessage() {}
+
+func (x *RebalanceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebalanceRequest.ProtoReflect.Descriptor instead.
+func (*RebalanceRequest) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *RebalanceRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *RebalanceRequest) GetShards() []*ShardAssignment {
+	if x != nil {
+		return x.Shards
+	}
+	return nil
+}
+
 var File_corkscrewdb_proto protoreflect.FileDescriptor
 
 const file_corkscrewdb_proto_rawDesc = "" +
@@ -2052,7 +2104,11 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\x03dim\x18\x04 \x01(\x05R\x03dim\x12\x1f\n" +
 	"\vmax_lamport\x18\x05 \x01(\x04R\n" +
 	"maxLamport\x12B\n" +
-	"\arecords\x18\x06 \x03(\v2(.corkscrewdb.transport.v1.SnapshotRecordR\arecords2\xad\b\n" +
+	"\arecords\x18\x06 \x03(\v2(.corkscrewdb.transport.v1.SnapshotRecordR\arecords\"k\n" +
+	"\x10RebalanceRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12A\n" +
+	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards2\xcd\n" +
+	"\n" +
 	"\vCorkScrewDB\x12U\n" +
 	"\x04Info\x12%.corkscrewdb.transport.v1.InfoRequest\x1a&.corkscrewdb.transport.v1.InfoResponse\x12f\n" +
 	"\x10EnsureCollection\x121.corkscrewdb.transport.v1.EnsureCollectionRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12b\n" +
@@ -2064,7 +2120,10 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\fSearchVector\x12-.corkscrewdb.transport.v1.SearchVectorRequest\x1a(.corkscrewdb.transport.v1.SearchResponse\x12^\n" +
 	"\aHistory\x12(.corkscrewdb.transport.v1.HistoryRequest\x1a).corkscrewdb.transport.v1.HistoryResponse\x12j\n" +
 	"\vPullEntries\x12,.corkscrewdb.transport.v1.PullEntriesRequest\x1a-.corkscrewdb.transport.v1.PullEntriesResponse\x12m\n" +
-	"\fPullSnapshot\x12-.corkscrewdb.transport.v1.PullSnapshotRequest\x1a..corkscrewdb.transport.v1.PullSnapshotResponseB/Z-github.com/odvcencio/corkscrewdb/grpc;grpcapib\x06proto3"
+	"\fPullSnapshot\x12-.corkscrewdb.transport.v1.PullSnapshotRequest\x1a..corkscrewdb.transport.v1.PullSnapshotResponse\x12_\n" +
+	"\x10PrepareRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12^\n" +
+	"\x0fCommitRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12]\n" +
+	"\x0ePruneRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.EmptyB/Z-github.com/odvcencio/corkscrewdb/grpc;grpcapib\x06proto3"
 
 var (
 	file_corkscrewdb_proto_rawDescOnce sync.Once
@@ -2078,7 +2137,7 @@ func file_corkscrewdb_proto_rawDescGZIP() []byte {
 	return file_corkscrewdb_proto_rawDescData
 }
 
-var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_corkscrewdb_proto_goTypes = []any{
 	(*Empty)(nil),                   // 0: corkscrewdb.transport.v1.Empty
 	(*EmbeddingConfig)(nil),         // 1: corkscrewdb.transport.v1.EmbeddingConfig
@@ -2107,62 +2166,70 @@ var file_corkscrewdb_proto_goTypes = []any{
 	(*SnapshotVersion)(nil),         // 24: corkscrewdb.transport.v1.SnapshotVersion
 	(*SnapshotRecord)(nil),          // 25: corkscrewdb.transport.v1.SnapshotRecord
 	(*PullSnapshotResponse)(nil),    // 26: corkscrewdb.transport.v1.PullSnapshotResponse
-	nil,                             // 27: corkscrewdb.transport.v1.Entry.MetadataEntry
-	nil,                             // 28: corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	nil,                             // 29: corkscrewdb.transport.v1.Version.MetadataEntry
-	nil,                             // 30: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
-	nil,                             // 31: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	nil,                             // 32: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	(*timestamppb.Timestamp)(nil),   // 33: google.protobuf.Timestamp
+	(*RebalanceRequest)(nil),        // 27: corkscrewdb.transport.v1.RebalanceRequest
+	nil,                             // 28: corkscrewdb.transport.v1.Entry.MetadataEntry
+	nil,                             // 29: corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	nil,                             // 30: corkscrewdb.transport.v1.Version.MetadataEntry
+	nil,                             // 31: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	nil,                             // 32: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	nil,                             // 33: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	(*timestamppb.Timestamp)(nil),   // 34: google.protobuf.Timestamp
 }
 var file_corkscrewdb_proto_depIdxs = []int32{
-	27, // 0: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
-	28, // 1: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	29, // 2: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
-	33, // 3: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
+	28, // 0: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
+	29, // 1: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	30, // 2: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
+	34, // 3: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
 	1,  // 4: corkscrewdb.transport.v1.InfoResponse.embedding:type_name -> corkscrewdb.transport.v1.EmbeddingConfig
 	2,  // 5: corkscrewdb.transport.v1.InfoResponse.collections:type_name -> corkscrewdb.transport.v1.CollectionInfo
 	3,  // 6: corkscrewdb.transport.v1.InfoResponse.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
 	4,  // 7: corkscrewdb.transport.v1.PutRequest.entry:type_name -> corkscrewdb.transport.v1.Entry
-	30, // 8: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	31, // 8: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
 	5,  // 9: corkscrewdb.transport.v1.SearchRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
 	5,  // 10: corkscrewdb.transport.v1.SearchVectorRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
 	6,  // 11: corkscrewdb.transport.v1.SearchResponse.results:type_name -> corkscrewdb.transport.v1.SearchResult
 	7,  // 12: corkscrewdb.transport.v1.HistoryResponse.versions:type_name -> corkscrewdb.transport.v1.Version
-	31, // 13: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	33, // 14: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
+	32, // 13: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	34, // 14: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
 	21, // 15: corkscrewdb.transport.v1.PullEntriesResponse.entries:type_name -> corkscrewdb.transport.v1.ReplicaEntry
-	32, // 16: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	33, // 17: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
+	33, // 16: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	34, // 17: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
 	24, // 18: corkscrewdb.transport.v1.SnapshotRecord.versions:type_name -> corkscrewdb.transport.v1.SnapshotVersion
 	25, // 19: corkscrewdb.transport.v1.PullSnapshotResponse.records:type_name -> corkscrewdb.transport.v1.SnapshotRecord
-	8,  // 20: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
-	10, // 21: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
-	11, // 22: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
-	12, // 23: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
-	13, // 24: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
-	14, // 25: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
-	15, // 26: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
-	16, // 27: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
-	18, // 28: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
-	20, // 29: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
-	23, // 30: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
-	9,  // 31: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
-	0,  // 32: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 33: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 34: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 35: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 36: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
-	17, // 37: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
-	17, // 38: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
-	19, // 39: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
-	22, // 40: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
-	26, // 41: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
-	31, // [31:42] is the sub-list for method output_type
-	20, // [20:31] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	3,  // 20: corkscrewdb.transport.v1.RebalanceRequest.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
+	8,  // 21: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
+	10, // 22: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
+	11, // 23: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
+	12, // 24: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
+	13, // 25: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
+	14, // 26: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
+	15, // 27: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
+	16, // 28: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
+	18, // 29: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
+	20, // 30: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
+	23, // 31: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
+	27, // 32: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	27, // 33: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	27, // 34: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	9,  // 35: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
+	0,  // 36: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 37: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 38: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 39: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 40: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
+	17, // 41: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
+	17, // 42: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
+	19, // 43: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
+	22, // 44: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	26, // 45: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
+	0,  // 46: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 47: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 48: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	35, // [35:49] is the sub-list for method output_type
+	21, // [21:35] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_corkscrewdb_proto_init() }
@@ -2176,7 +2243,7 @@ func file_corkscrewdb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_corkscrewdb_proto_rawDesc), len(file_corkscrewdb_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

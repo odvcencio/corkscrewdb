@@ -203,6 +203,30 @@ func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotRe
 	return fromProtoPullSnapshotResponse(resp), nil
 }
 
+func (c *grpcClient) PrepareRebalance(shards []ShardAssignment) error {
+	_, err := c.client.PrepareRebalance(context.Background(), &grpcapi.RebalanceRequest{
+		Token:  c.token,
+		Shards: toProtoShardAssignments(shards),
+	})
+	return normalizeTransportError(err)
+}
+
+func (c *grpcClient) CommitRebalance(shards []ShardAssignment) error {
+	_, err := c.client.CommitRebalance(context.Background(), &grpcapi.RebalanceRequest{
+		Token:  c.token,
+		Shards: toProtoShardAssignments(shards),
+	})
+	return normalizeTransportError(err)
+}
+
+func (c *grpcClient) PruneRebalance(shards []ShardAssignment) error {
+	_, err := c.client.PruneRebalance(context.Background(), &grpcapi.RebalanceRequest{
+		Token:  c.token,
+		Shards: toProtoShardAssignments(shards),
+	})
+	return normalizeTransportError(err)
+}
+
 type grpcServer struct {
 	handler *transportServer
 }
@@ -365,6 +389,36 @@ func (s *grpcServer) PullSnapshot(_ context.Context, req *grpcapi.PullSnapshotRe
 		return nil, grpcStatusError(err)
 	}
 	return toProtoPullSnapshotResponse(resp), nil
+}
+
+func (s *grpcServer) PrepareRebalance(_ context.Context, req *grpcapi.RebalanceRequest) (*grpcapi.Empty, error) {
+	if err := s.handler.PrepareRebalance(RPCRebalanceRequest{
+		Token:  req.GetToken(),
+		Shards: fromProtoShardAssignments(req.GetShards()),
+	}, &RPCEmpty{}); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.Empty{}, nil
+}
+
+func (s *grpcServer) CommitRebalance(_ context.Context, req *grpcapi.RebalanceRequest) (*grpcapi.Empty, error) {
+	if err := s.handler.CommitRebalance(RPCRebalanceRequest{
+		Token:  req.GetToken(),
+		Shards: fromProtoShardAssignments(req.GetShards()),
+	}, &RPCEmpty{}); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.Empty{}, nil
+}
+
+func (s *grpcServer) PruneRebalance(_ context.Context, req *grpcapi.RebalanceRequest) (*grpcapi.Empty, error) {
+	if err := s.handler.PruneRebalance(RPCRebalanceRequest{
+		Token:  req.GetToken(),
+		Shards: fromProtoShardAssignments(req.GetShards()),
+	}, &RPCEmpty{}); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.Empty{}, nil
 }
 
 func int32FromInt(v int, label string) (int32, error) {

@@ -30,6 +30,9 @@ const (
 	CorkScrewDB_History_FullMethodName          = "/corkscrewdb.transport.v1.CorkScrewDB/History"
 	CorkScrewDB_PullEntries_FullMethodName      = "/corkscrewdb.transport.v1.CorkScrewDB/PullEntries"
 	CorkScrewDB_PullSnapshot_FullMethodName     = "/corkscrewdb.transport.v1.CorkScrewDB/PullSnapshot"
+	CorkScrewDB_PrepareRebalance_FullMethodName = "/corkscrewdb.transport.v1.CorkScrewDB/PrepareRebalance"
+	CorkScrewDB_CommitRebalance_FullMethodName  = "/corkscrewdb.transport.v1.CorkScrewDB/CommitRebalance"
+	CorkScrewDB_PruneRebalance_FullMethodName   = "/corkscrewdb.transport.v1.CorkScrewDB/PruneRebalance"
 )
 
 // CorkScrewDBClient is the client API for CorkScrewDB service.
@@ -47,6 +50,9 @@ type CorkScrewDBClient interface {
 	History(ctx context.Context, in *HistoryRequest, opts ...grpc.CallOption) (*HistoryResponse, error)
 	PullEntries(ctx context.Context, in *PullEntriesRequest, opts ...grpc.CallOption) (*PullEntriesResponse, error)
 	PullSnapshot(ctx context.Context, in *PullSnapshotRequest, opts ...grpc.CallOption) (*PullSnapshotResponse, error)
+	PrepareRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
+	CommitRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
+	PruneRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type corkScrewDBClient struct {
@@ -167,6 +173,36 @@ func (c *corkScrewDBClient) PullSnapshot(ctx context.Context, in *PullSnapshotRe
 	return out, nil
 }
 
+func (c *corkScrewDBClient) PrepareRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, CorkScrewDB_PrepareRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *corkScrewDBClient) CommitRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, CorkScrewDB_CommitRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *corkScrewDBClient) PruneRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, CorkScrewDB_PruneRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CorkScrewDBServer is the server API for CorkScrewDB service.
 // All implementations should embed UnimplementedCorkScrewDBServer
 // for forward compatibility.
@@ -182,6 +218,9 @@ type CorkScrewDBServer interface {
 	History(context.Context, *HistoryRequest) (*HistoryResponse, error)
 	PullEntries(context.Context, *PullEntriesRequest) (*PullEntriesResponse, error)
 	PullSnapshot(context.Context, *PullSnapshotRequest) (*PullSnapshotResponse, error)
+	PrepareRebalance(context.Context, *RebalanceRequest) (*Empty, error)
+	CommitRebalance(context.Context, *RebalanceRequest) (*Empty, error)
+	PruneRebalance(context.Context, *RebalanceRequest) (*Empty, error)
 }
 
 // UnimplementedCorkScrewDBServer should be embedded to have
@@ -223,6 +262,15 @@ func (UnimplementedCorkScrewDBServer) PullEntries(context.Context, *PullEntriesR
 }
 func (UnimplementedCorkScrewDBServer) PullSnapshot(context.Context, *PullSnapshotRequest) (*PullSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PullSnapshot not implemented")
+}
+func (UnimplementedCorkScrewDBServer) PrepareRebalance(context.Context, *RebalanceRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PrepareRebalance not implemented")
+}
+func (UnimplementedCorkScrewDBServer) CommitRebalance(context.Context, *RebalanceRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CommitRebalance not implemented")
+}
+func (UnimplementedCorkScrewDBServer) PruneRebalance(context.Context, *RebalanceRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PruneRebalance not implemented")
 }
 func (UnimplementedCorkScrewDBServer) testEmbeddedByValue() {}
 
@@ -442,6 +490,60 @@ func _CorkScrewDB_PullSnapshot_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CorkScrewDB_PrepareRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).PrepareRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_PrepareRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).PrepareRebalance(ctx, req.(*RebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CorkScrewDB_CommitRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).CommitRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_CommitRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).CommitRebalance(ctx, req.(*RebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CorkScrewDB_PruneRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).PruneRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_PruneRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).PruneRebalance(ctx, req.(*RebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CorkScrewDB_ServiceDesc is the grpc.ServiceDesc for CorkScrewDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -492,6 +594,18 @@ var CorkScrewDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PullSnapshot",
 			Handler:    _CorkScrewDB_PullSnapshot_Handler,
+		},
+		{
+			MethodName: "PrepareRebalance",
+			Handler:    _CorkScrewDB_PrepareRebalance_Handler,
+		},
+		{
+			MethodName: "CommitRebalance",
+			Handler:    _CorkScrewDB_CommitRebalance_Handler,
+		},
+		{
+			MethodName: "PruneRebalance",
+			Handler:    _CorkScrewDB_PruneRebalance_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

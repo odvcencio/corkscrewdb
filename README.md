@@ -13,13 +13,14 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Embedded federation with hash-based write routing and fan-out search
 - Explicit shard metadata with persisted ownership ranges
 - Manual shard rebalance and handoff via snapshot + WAL catch-up
+- Coordinated cluster rebalance orchestration over gRPC
 - WAL streaming replication (primary → follower with catch-up)
 - Cold storage offload (sealed WAL segments + snapshots)
 - Standalone server binary (`cmd/corkscrewdb`)
 
 ## Status
 
-`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, and manual shard handoff are in on the dev branch. Remaining roadmap work is coordinated rebalance orchestration, richer replication, pluggable cloud offload backends, and the bundled model.
+`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, and coordinated rebalance orchestration are in on the dev branch. Remaining roadmap work is richer replication, pluggable cloud offload backends, and the bundled model.
 
 ## Install
 
@@ -139,7 +140,24 @@ Current behavior:
 - a gaining node pulls snapshot data plus WAL tail from the old owner for the ranges it is taking over
 - the new shard layout is then persisted locally
 - IDs no longer owned by the node are pruned from local search/history after the cutover
-- callers should run rebalance on gaining nodes before losing nodes; cluster-wide orchestration is still a roadmap item
+- `RebalanceShards(...)` is still the single-node/manual form when you want to drive the phases yourself
+
+For cluster-wide cutover, coordinate the same phases from one node:
+
+```go
+err := db.OrchestrateRebalance(
+    corkscrewdb.ShardAssignment{ID: "shard-a", Owner: "node-a:4040", Start: 0, End: (^uint64(0)) * 3 / 4},
+    corkscrewdb.ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))*3/4 + 1, End: ^uint64(0)},
+)
+```
+
+Current behavior:
+
+- the coordinator runs prepare, commit, and prune across the local node plus reachable peers
+- gaining nodes import data before the layout flips cluster-wide
+- routing changes once the commit phase runs
+- old owners prune handed-off data in the final phase
+- orchestration is sequential and best-effort; there is no distributed transaction or rollback yet
 
 ## Replication
 
@@ -182,7 +200,7 @@ go test -bench=. -benchmem -run=^$ .
 
 ## Roadmap (v0.2.0)
 
-- Coordinated rebalance orchestration and cutover
+- Stronger rebalance transactions and rollback semantics
 - Cross-region replication
 - Pluggable S3/GCS storage backends
 - Bundled embedding model

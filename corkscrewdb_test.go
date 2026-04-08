@@ -697,6 +697,133 @@ func TestRebalanceShardsMigratesOwnershipAndPrunesOldOwner(t *testing.T) {
 	}
 }
 
+func TestOrchestrateRebalanceCoordinatesClusterCutover(t *testing.T) {
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerA.Close()
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerB.Close()
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+	maxKey := ^uint64(0)
+	oldCut := maxKey / 2
+	newCut := (maxKey / 4) * 3
+
+	oldLayoutA := []ShardAssignment{
+		{ID: "shard-a", Owner: LocalShardOwner, Start: 0, End: oldCut},
+		{ID: "shard-b", Owner: addrB, Start: oldCut + 1, End: maxKey},
+	}
+	oldLayoutB := []ShardAssignment{
+		{ID: "shard-a", Owner: addrA, Start: 0, End: oldCut},
+		{ID: "shard-b", Owner: LocalShardOwner, Start: oldCut + 1, End: maxKey},
+	}
+	newLayout := []ShardAssignment{
+		{ID: "shard-a", Owner: addrA, Start: 0, End: newCut},
+		{ID: "shard-b", Owner: addrB, Start: newCut + 1, End: maxKey},
+	}
+
+	dbA, err := Open(
+		filepath.Join(t.TempDir(), "a-orchestrated.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrB),
+		WithShards(oldLayoutA...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	dbB, err := Open(
+		filepath.Join(t.TempDir(), "b-orchestrated.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrA),
+		WithShards(oldLayoutB...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+	t.Cleanup(func() {
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Errorf("serve B: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve B did not exit")
+		}
+	})
+
+	movingID, stayingRemoteID := pickIDsForRebalance(t, dbA, "docs", oldLayoutA, newLayout, addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+	if err := collA.Put(movingID, Entry{Text: "moving before orchestrated cutover"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(stayingRemoteID, Entry{Text: "stays remote after orchestrated cutover"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dbA.OrchestrateRebalance(newLayout...); err != nil {
+		t.Fatal(err)
+	}
+
+	newOwnerHistory, err := dbA.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newOwnerHistory) != 1 || newOwnerHistory[0].Text != "moving before orchestrated cutover" {
+		t.Fatalf("new owner history after orchestration = %+v", newOwnerHistory)
+	}
+	oldOwnerHistory, err := dbB.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldOwnerHistory) != 0 {
+		t.Fatalf("old owner retained handed-off id after orchestration: %+v", oldOwnerHistory)
+	}
+	stillRemote, err := dbB.Collection("docs").historyFor(stayingRemoteID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillRemote) != 1 {
+		t.Fatalf("stable remote id missing after orchestration: %+v", stillRemote)
+	}
+
+	if err := dbB.Collection("docs").Put(movingID, Entry{Text: "moving after orchestrated cutover"}); err != nil {
+		t.Fatal(err)
+	}
+	finalHistory, err := dbA.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finalHistory) != 2 || finalHistory[1].Text != "moving after orchestrated cutover" {
+		t.Fatalf("new owner history after orchestrated routed write = %+v", finalHistory)
+	}
+}
+
 func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
 	t.Helper()
 

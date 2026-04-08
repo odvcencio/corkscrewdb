@@ -18,6 +18,9 @@ service CorkScrewDB {
   rpc History(HistoryRequest) returns (HistoryResponse);
   rpc PullEntries(PullEntriesRequest) returns (PullEntriesResponse);
   rpc PullSnapshot(PullSnapshotRequest) returns (PullSnapshotResponse);
+  rpc PrepareRebalance(RebalanceRequest) returns (Empty);
+  rpc CommitRebalance(RebalanceRequest) returns (Empty);
+  rpc PruneRebalance(RebalanceRequest) returns (Empty);
 }
 
 message Empty {}
@@ -207,4 +210,9 @@ message PullSnapshotResponse {
   int32 dim = 4;
   uint64 max_lamport = 5;
   repeated SnapshotRecord records = 6;
+}
+
+message RebalanceRequest {
+  string token = 1;
+  repeated ShardAssignment shards = 2;
 }

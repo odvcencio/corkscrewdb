@@ -14,5 +14,8 @@ type remoteClient interface {
 	History(collection, id string, useAt bool, atLamport uint64, internal bool) ([]Version, error)
 	PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesResponse, error)
 	PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error)
+	PrepareRebalance(shards []ShardAssignment) error
+	CommitRebalance(shards []ShardAssignment) error
+	PruneRebalance(shards []ShardAssignment) error
 	Close() error
 }

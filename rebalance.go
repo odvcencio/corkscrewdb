@@ -3,6 +3,7 @@ package corkscrewdb
 import (
 	"errors"
 	"sort"
+	"strings"
 
 	walpkg "github.com/odvcencio/corkscrewdb/wal"
 )
@@ -11,17 +12,33 @@ import (
 // The gaining node should run this before the losing node so snapshot+WAL
 // handoff can pull the old owner's data before it gets pruned.
 func (db *DB) RebalanceShards(shards ...ShardAssignment) error {
+	normalized, err := db.normalizeLocalRebalanceShards(shards)
+	if err != nil {
+		return err
+	}
+	if err := db.prepareRebalanceShards(normalized); err != nil {
+		return err
+	}
+	if err := db.applyShardLayout(normalized); err != nil {
+		return err
+	}
+	return db.pruneUnownedData(normalized)
+}
+
+// OrchestrateRebalance coordinates a cluster-wide rebalance with a prepare,
+// commit, and prune phase over the remote control plane.
+func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 	if db == nil {
 		return errors.New("corkscrewdb: nil database")
 	}
 	if db.remote != nil {
-		return errors.New("corkscrewdb: remote clients cannot rebalance shards")
+		return errors.New("corkscrewdb: remote clients cannot orchestrate rebalances")
 	}
 	if db.isClosed() {
 		return errors.New("corkscrewdb: database is closed")
 	}
 
-	normalized, err := normalizeShardAssignments(shards)
+	normalized, err := db.normalizeClusterRebalanceShards(shards)
 	if err != nil {
 		return err
 	}
@@ -29,6 +46,94 @@ func (db *DB) RebalanceShards(shards ...ShardAssignment) error {
 		return errors.New("corkscrewdb: shard assignments are required")
 	}
 
+	targets := db.rebalanceTargets(normalized)
+	for _, target := range targets {
+		if target == db.localMemberID() {
+			if err := db.prepareRebalanceShards(normalized); err != nil {
+				return err
+			}
+			continue
+		}
+		client, err := db.peerClient(target)
+		if err != nil {
+			return err
+		}
+		if err := client.PrepareRebalance(normalized); err != nil {
+			return err
+		}
+	}
+	for _, target := range targets {
+		if target == db.localMemberID() {
+			if err := db.applyShardLayout(normalized); err != nil {
+				return err
+			}
+			continue
+		}
+		client, err := db.peerClient(target)
+		if err != nil {
+			return err
+		}
+		if err := client.CommitRebalance(normalized); err != nil {
+			return err
+		}
+	}
+	for _, target := range targets {
+		if target == db.localMemberID() {
+			if err := db.pruneUnownedData(normalized); err != nil {
+				return err
+			}
+			continue
+		}
+		client, err := db.peerClient(target)
+		if err != nil {
+			return err
+		}
+		if err := client.PruneRebalance(normalized); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) normalizeLocalRebalanceShards(shards []ShardAssignment) ([]ShardAssignment, error) {
+	if db == nil {
+		return nil, errors.New("corkscrewdb: nil database")
+	}
+	if db.remote != nil {
+		return nil, errors.New("corkscrewdb: remote clients cannot rebalance shards")
+	}
+	if db.isClosed() {
+		return nil, errors.New("corkscrewdb: database is closed")
+	}
+	return normalizeShardAssignments(shards)
+}
+
+func (db *DB) normalizeClusterRebalanceShards(shards []ShardAssignment) ([]ShardAssignment, error) {
+	normalized, err := db.normalizeLocalRebalanceShards(shards)
+	if err != nil {
+		return nil, err
+	}
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	local := db.localMemberID()
+	if strings.HasPrefix(local, "local://") {
+		return nil, errors.New("corkscrewdb: cluster rebalance requires a served local address or explicit owner addresses")
+	}
+	out := cloneShardAssignments(normalized)
+	for i := range out {
+		if out[i].Owner == LocalShardOwner {
+			out[i].Owner = local
+		}
+	}
+	return normalizeShardAssignments(out)
+}
+
+func (db *DB) prepareRebalanceShards(shards []ShardAssignment) error {
+	normalized, err := db.normalizeLocalRebalanceShards(shards)
+	if err != nil {
+		return err
+	}
 	oldShards := db.shardAssignments()
 	oldMembers := db.legacyShardMembers()
 	for _, peer := range db.rebalanceSources(oldShards, normalized) {
@@ -36,10 +141,35 @@ func (db *DB) RebalanceShards(shards ...ShardAssignment) error {
 			return err
 		}
 	}
-	if err := db.applyShardLayout(normalized); err != nil {
-		return err
+	return nil
+}
+
+func (db *DB) rebalanceTargets(newShards []ShardAssignment) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(target string) {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			return
+		}
+		if _, ok := seen[target]; ok {
+			return
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
 	}
-	return db.pruneUnownedData(normalized)
+	add(db.localMemberID())
+	for _, peer := range db.peers {
+		add(peer)
+	}
+	for _, shard := range db.shardAssignments() {
+		add(db.resolveShardOwner(shard.Owner))
+	}
+	for _, shard := range newShards {
+		add(db.resolveShardOwner(shard.Owner))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (db *DB) rebalanceSources(oldShards, newShards []ShardAssignment) []string {
@@ -201,11 +331,20 @@ func (db *DB) ownerForLayout(collection, id string, shards []ShardAssignment, le
 }
 
 func (db *DB) applyShardLayout(shards []ShardAssignment) error {
+	local := db.localMemberID()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	db.manifest.Shards = cloneShardAssignments(shards)
-	db.manifest.Peers = sanitizePeers(append(append([]string(nil), db.peers...), peersFromShardAssignments(shards)...))
+	peers := sanitizePeers(append(append([]string(nil), db.peers...), peersFromShardAssignments(shards)...))
+	filtered := peers[:0]
+	for _, peer := range peers {
+		if peer == local {
+			continue
+		}
+		filtered = append(filtered, peer)
+	}
+	db.manifest.Peers = append([]string(nil), filtered...)
 	db.peers = append([]string(nil), db.manifest.Peers...)
 	return db.saveManifestLocked()
 }
