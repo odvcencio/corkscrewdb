@@ -1,0 +1,54 @@
+package corkscrewdb
+
+import (
+	"bytes"
+	"os"
+	"testing"
+
+	walpkg "github.com/odvcencio/corkscrewdb/wal"
+)
+
+func FuzzWALEntryRoundTrip(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x43, 0x57, 0x02, 0x01})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		entry, err := walpkg.ReadEntry(bytes.NewReader(data))
+		if err != nil {
+			return
+		}
+		encoded, err := entry.MarshalBinary()
+		if err != nil {
+			return
+		}
+		_, err = walpkg.ReadEntry(bytes.NewReader(encoded))
+		if err != nil {
+			t.Errorf("round-trip re-decode failed: %v", err)
+		}
+	})
+}
+
+func FuzzIndexFileRoundTrip(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x00, 0x01, 0x02, 0x03})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		dir := t.TempDir()
+		path := dir + "/fuzz.tqi"
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return
+		}
+		_, _, _ = loadIndexFile(path)
+	})
+}
+
+func FuzzHNSWFileRoundTrip(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x00, 0x01, 0x02, 0x03})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		dir := t.TempDir()
+		path := dir + "/fuzz.hnsw"
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return
+		}
+		_, _ = loadHNSWFile(path, nil, defaultHNSWParams())
+	})
+}
