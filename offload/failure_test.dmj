@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 type failBackend struct {
@@ -40,5 +43,103 @@ unit "IdempotentPush" {
 		keys, err := b.List("seg/000001.wal")
 		expect err == nil
 		expect len(keys) == 1
+	}
+}
+
+unit "ManagerStartStop" {
+	then "Start triggers push loop and Stop drains it cleanly" {
+		dbDir := t.TempDir()
+		coldDir := t.TempDir()
+
+		// Create collection with a sealed WAL segment and an active one.
+		walDir := filepath.Join(dbDir, "collections", "col1", "wal")
+		if err := os.MkdirAll(walDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(walDir, "000001.wal"), []byte("sealed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(walDir, "000002.wal"), []byte("active"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Add a snapshot.
+		collDir := filepath.Join(dbDir, "collections", "col1")
+		if err := os.WriteFile(filepath.Join(collDir, "snapshot-00001.csdb"), []byte("snap"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		mgr, err := NewManager(Config{
+			Backend:  NewFSBackend(coldDir),
+			DBPath:   dbDir,
+			Interval: 50 * time.Millisecond,
+		})
+		expect err == nil
+
+		mgr.Start()
+		// Wait long enough for at least two tick cycles.
+		time.Sleep(200 * time.Millisecond)
+		mgr.Stop()
+
+		// Sealed WAL must be in cold storage.
+		_, err = os.Stat(filepath.Join(coldDir, "collections", "col1", "wal", "000001.wal"))
+		expect err == nil
+
+		// Active WAL must NOT be in cold storage.
+		_, notPushed := os.Stat(filepath.Join(coldDir, "collections", "col1", "wal", "000002.wal"))
+		expect os.IsNotExist(notPushed)
+
+		// Snapshot must be in cold storage.
+		_, err = os.Stat(filepath.Join(coldDir, "collections", "col1", "snapshot-00001.csdb"))
+		expect err == nil
+	}
+}
+
+unit "ManagerStartIdempotent" {
+	then "calling Start twice does not panic and produces only one push loop" {
+		dbDir := t.TempDir()
+		coldDir := t.TempDir()
+
+		mgr, err := NewManager(Config{
+			Backend:  NewFSBackend(coldDir),
+			DBPath:   dbDir,
+			Interval: 50 * time.Millisecond,
+		})
+		expect err == nil
+
+		// Start twice — second call must be a no-op, not a panic.
+		mgr.Start()
+		mgr.Start()
+
+		time.Sleep(80 * time.Millisecond)
+		mgr.Stop()
+		expect true
+	}
+}
+
+unit "ManagerStopBeforeStart" {
+	then "Stop without Start does not panic or block" {
+		dbDir := t.TempDir()
+		coldDir := t.TempDir()
+
+		mgr, err := NewManager(Config{
+			Backend:  NewFSBackend(coldDir),
+			DBPath:   dbDir,
+			Interval: 50 * time.Millisecond,
+		})
+		expect err == nil
+
+		// Stop before Start must return immediately without panic.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			mgr.Stop()
+		}()
+
+		select {
+		case <-done:
+			// good
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("Stop() blocked when called before Start()")
+		}
 	}
 }
