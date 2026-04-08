@@ -1,0 +1,47 @@
+package corkscrewdb
+
+import (
+	"testing"
+)
+
+// TODO: These chaos tests require:
+//   - k3d installed and a running k3d cluster named "corkscrewdb-chaos"
+//   - CorkScrewDB Docker image pushed to harbor.draco.quest/orchard/corkscrewdb:latest
+//   - k8s manifests in deploy/k8s/ (StatefulSet, Service, ConfigMap)
+//   - kubectl configured to target the k3d cluster
+
+e2e "NodeKillAndRecovery" {
+	// TODO: Deploy a 3-node CorkScrewDB StatefulSet in k3d.
+	//   kubectl apply -f deploy/k8s/
+	//   kubectl rollout status statefulset/corkscrewdb
+	// TODO: Write test data to the cluster via the gRPC transport.
+	// TODO: Kill one pod with --grace-period=0 and verify surviving nodes
+	//   continue to serve reads and writes on the majority partition.
+	// TODO: Wait for the killed pod to restart (kubectl wait --for=condition=Ready).
+	// TODO: Verify the restarted node catches up via WAL streaming replication.
+	t.Skip("requires k3d cluster — see TODO")
+}
+
+e2e "NetworkPartition" {
+	// TODO: Deploy a 3-node CorkScrewDB StatefulSet in k3d.
+	//   kubectl apply -f deploy/k8s/
+	//   kubectl rollout status statefulset/corkscrewdb
+	// TODO: Simulate a network partition by isolating one pod with a NetworkPolicy
+	//   or tc/iptables rules injected via a privileged debug container.
+	// TODO: Verify the majority partition (2 nodes) continues to serve requests.
+	// TODO: Heal the partition by removing the NetworkPolicy or iptables rules.
+	// TODO: Verify the isolated node converges with the majority (WAL catch-up).
+	t.Skip("requires k3d cluster — see TODO")
+}
+
+e2e "RollingRestart" {
+	// TODO: Deploy a 3-node CorkScrewDB StatefulSet in k3d.
+	//   kubectl apply -f deploy/k8s/
+	//   kubectl rollout status statefulset/corkscrewdb
+	// TODO: Write a known dataset to the cluster before restarting.
+	// TODO: Perform a rolling restart: kubectl rollout restart statefulset/corkscrewdb
+	//   and wait for each pod to become Ready before proceeding to the next.
+	// TODO: After all pods have restarted, query the cluster and verify the full
+	//   dataset is present with no missing entries.
+	t.Skip("requires k3d cluster — see TODO")
+}
