@@ -27,6 +27,18 @@ message EmbeddingConfig {
   int32 dim = 2;
 }
 
+message CollectionInfo {
+  string name = 1;
+  int32 bit_width = 2;
+}
+
+message ShardAssignment {
+  string id = 1;
+  string owner = 2;
+  uint64 start = 3;
+  uint64 end = 4;
+}
+
 message Entry {
   string text = 1;
   repeated float vector = 2;
@@ -64,6 +76,8 @@ message InfoResponse {
   string package_version = 1;
   EmbeddingConfig embedding = 2;
   repeated string peers = 3;
+  repeated CollectionInfo collections = 4;
+  repeated ShardAssignment shards = 5;
 }
 
 message EnsureCollectionRequest {

@@ -110,6 +110,126 @@ func (x *EmbeddingConfig) GetDim() int32 {
 	return 0
 }
 
+type CollectionInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	BitWidth      int32                  `protobuf:"varint,2,opt,name=bit_width,json=bitWidth,proto3" json:"bit_width,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CollectionInfo) Reset() {
+	*x = CollectionInfo{}
+	mi := &file_corkscrewdb_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionInfo) ProtoMessage() {}
+
+func (x *CollectionInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionInfo.ProtoReflect.Descriptor instead.
+func (*CollectionInfo) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CollectionInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CollectionInfo) GetBitWidth() int32 {
+	if x != nil {
+		return x.BitWidth
+	}
+	return 0
+}
+
+type ShardAssignment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	Start         uint64                 `protobuf:"varint,3,opt,name=start,proto3" json:"start,omitempty"`
+	End           uint64                 `protobuf:"varint,4,opt,name=end,proto3" json:"end,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShardAssignment) Reset() {
+	*x = ShardAssignment{}
+	mi := &file_corkscrewdb_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShardAssignment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShardAssignment) ProtoMessage() {}
+
+func (x *ShardAssignment) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShardAssignment.ProtoReflect.Descriptor instead.
+func (*ShardAssignment) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ShardAssignment) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ShardAssignment) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *ShardAssignment) GetStart() uint64 {
+	if x != nil {
+		return x.Start
+	}
+	return 0
+}
+
+func (x *ShardAssignment) GetEnd() uint64 {
+	if x != nil {
+		return x.End
+	}
+	return 0
+}
+
 type Entry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
@@ -121,7 +241,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_corkscrewdb_proto_msgTypes[2]
+	mi := &file_corkscrewdb_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -133,7 +253,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[2]
+	mi := &file_corkscrewdb_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -146,7 +266,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{2}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Entry) GetText() string {
@@ -180,7 +300,7 @@ type Filter struct {
 
 func (x *Filter) Reset() {
 	*x = Filter{}
-	mi := &file_corkscrewdb_proto_msgTypes[3]
+	mi := &file_corkscrewdb_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -192,7 +312,7 @@ func (x *Filter) String() string {
 func (*Filter) ProtoMessage() {}
 
 func (x *Filter) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[3]
+	mi := &file_corkscrewdb_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -205,7 +325,7 @@ func (x *Filter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Filter.ProtoReflect.Descriptor instead.
 func (*Filter) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{3}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Filter) GetKey() string {
@@ -235,7 +355,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_corkscrewdb_proto_msgTypes[4]
+	mi := &file_corkscrewdb_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -247,7 +367,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[4]
+	mi := &file_corkscrewdb_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -260,7 +380,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{4}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SearchResult) GetId() string {
@@ -313,7 +433,7 @@ type Version struct {
 
 func (x *Version) Reset() {
 	*x = Version{}
-	mi := &file_corkscrewdb_proto_msgTypes[5]
+	mi := &file_corkscrewdb_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -325,7 +445,7 @@ func (x *Version) String() string {
 func (*Version) ProtoMessage() {}
 
 func (x *Version) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[5]
+	mi := &file_corkscrewdb_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -338,7 +458,7 @@ func (x *Version) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Version.ProtoReflect.Descriptor instead.
 func (*Version) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{5}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Version) GetEmbedding() []float32 {
@@ -399,7 +519,7 @@ type InfoRequest struct {
 
 func (x *InfoRequest) Reset() {
 	*x = InfoRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[6]
+	mi := &file_corkscrewdb_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -411,7 +531,7 @@ func (x *InfoRequest) String() string {
 func (*InfoRequest) ProtoMessage() {}
 
 func (x *InfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[6]
+	mi := &file_corkscrewdb_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -424,7 +544,7 @@ func (x *InfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoRequest.ProtoReflect.Descriptor instead.
 func (*InfoRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{6}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *InfoRequest) GetToken() string {
@@ -439,13 +559,15 @@ type InfoResponse struct {
 	PackageVersion string                 `protobuf:"bytes,1,opt,name=package_version,json=packageVersion,proto3" json:"package_version,omitempty"`
 	Embedding      *EmbeddingConfig       `protobuf:"bytes,2,opt,name=embedding,proto3" json:"embedding,omitempty"`
 	Peers          []string               `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
+	Collections    []*CollectionInfo      `protobuf:"bytes,4,rep,name=collections,proto3" json:"collections,omitempty"`
+	Shards         []*ShardAssignment     `protobuf:"bytes,5,rep,name=shards,proto3" json:"shards,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *InfoResponse) Reset() {
 	*x = InfoResponse{}
-	mi := &file_corkscrewdb_proto_msgTypes[7]
+	mi := &file_corkscrewdb_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -457,7 +579,7 @@ func (x *InfoResponse) String() string {
 func (*InfoResponse) ProtoMessage() {}
 
 func (x *InfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[7]
+	mi := &file_corkscrewdb_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -470,7 +592,7 @@ func (x *InfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoResponse.ProtoReflect.Descriptor instead.
 func (*InfoResponse) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{7}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *InfoResponse) GetPackageVersion() string {
@@ -494,6 +616,20 @@ func (x *InfoResponse) GetPeers() []string {
 	return nil
 }
 
+func (x *InfoResponse) GetCollections() []*CollectionInfo {
+	if x != nil {
+		return x.Collections
+	}
+	return nil
+}
+
+func (x *InfoResponse) GetShards() []*ShardAssignment {
+	if x != nil {
+		return x.Shards
+	}
+	return nil
+}
+
 type EnsureCollectionRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
@@ -505,7 +641,7 @@ type EnsureCollectionRequest struct {
 
 func (x *EnsureCollectionRequest) Reset() {
 	*x = EnsureCollectionRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[8]
+	mi := &file_corkscrewdb_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -517,7 +653,7 @@ func (x *EnsureCollectionRequest) String() string {
 func (*EnsureCollectionRequest) ProtoMessage() {}
 
 func (x *EnsureCollectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[8]
+	mi := &file_corkscrewdb_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -530,7 +666,7 @@ func (x *EnsureCollectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureCollectionRequest.ProtoReflect.Descriptor instead.
 func (*EnsureCollectionRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{8}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *EnsureCollectionRequest) GetToken() string {
@@ -564,7 +700,7 @@ type DropCollectionRequest struct {
 
 func (x *DropCollectionRequest) Reset() {
 	*x = DropCollectionRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[9]
+	mi := &file_corkscrewdb_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -576,7 +712,7 @@ func (x *DropCollectionRequest) String() string {
 func (*DropCollectionRequest) ProtoMessage() {}
 
 func (x *DropCollectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[9]
+	mi := &file_corkscrewdb_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -589,7 +725,7 @@ func (x *DropCollectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropCollectionRequest.ProtoReflect.Descriptor instead.
 func (*DropCollectionRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{9}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DropCollectionRequest) GetToken() string {
@@ -619,7 +755,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[10]
+	mi := &file_corkscrewdb_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +767,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[10]
+	mi := &file_corkscrewdb_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,7 +780,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{10}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PutRequest) GetToken() string {
@@ -697,7 +833,7 @@ type PutVectorRequest struct {
 
 func (x *PutVectorRequest) Reset() {
 	*x = PutVectorRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[11]
+	mi := &file_corkscrewdb_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -709,7 +845,7 @@ func (x *PutVectorRequest) String() string {
 func (*PutVectorRequest) ProtoMessage() {}
 
 func (x *PutVectorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[11]
+	mi := &file_corkscrewdb_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -722,7 +858,7 @@ func (x *PutVectorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutVectorRequest.ProtoReflect.Descriptor instead.
 func (*PutVectorRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{11}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PutVectorRequest) GetToken() string {
@@ -786,7 +922,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[12]
+	mi := &file_corkscrewdb_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -798,7 +934,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[12]
+	mi := &file_corkscrewdb_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -811,7 +947,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{12}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DeleteRequest) GetToken() string {
@@ -858,7 +994,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[13]
+	mi := &file_corkscrewdb_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -870,7 +1006,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[13]
+	mi := &file_corkscrewdb_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -883,7 +1019,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{13}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SearchRequest) GetToken() string {
@@ -958,7 +1094,7 @@ type SearchVectorRequest struct {
 
 func (x *SearchVectorRequest) Reset() {
 	*x = SearchVectorRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[14]
+	mi := &file_corkscrewdb_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -970,7 +1106,7 @@ func (x *SearchVectorRequest) String() string {
 func (*SearchVectorRequest) ProtoMessage() {}
 
 func (x *SearchVectorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[14]
+	mi := &file_corkscrewdb_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -983,7 +1119,7 @@ func (x *SearchVectorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorRequest.ProtoReflect.Descriptor instead.
 func (*SearchVectorRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{14}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SearchVectorRequest) GetToken() string {
@@ -1051,7 +1187,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_corkscrewdb_proto_msgTypes[15]
+	mi := &file_corkscrewdb_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1063,7 +1199,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[15]
+	mi := &file_corkscrewdb_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1076,7 +1212,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{15}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -1100,7 +1236,7 @@ type HistoryRequest struct {
 
 func (x *HistoryRequest) Reset() {
 	*x = HistoryRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[16]
+	mi := &file_corkscrewdb_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1112,7 +1248,7 @@ func (x *HistoryRequest) String() string {
 func (*HistoryRequest) ProtoMessage() {}
 
 func (x *HistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[16]
+	mi := &file_corkscrewdb_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1125,7 +1261,7 @@ func (x *HistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryRequest.ProtoReflect.Descriptor instead.
 func (*HistoryRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{16}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *HistoryRequest) GetToken() string {
@@ -1179,7 +1315,7 @@ type HistoryResponse struct {
 
 func (x *HistoryResponse) Reset() {
 	*x = HistoryResponse{}
-	mi := &file_corkscrewdb_proto_msgTypes[17]
+	mi := &file_corkscrewdb_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1191,7 +1327,7 @@ func (x *HistoryResponse) String() string {
 func (*HistoryResponse) ProtoMessage() {}
 
 func (x *HistoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[17]
+	mi := &file_corkscrewdb_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1340,7 @@ func (x *HistoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryResponse.ProtoReflect.Descriptor instead.
 func (*HistoryResponse) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{17}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HistoryResponse) GetVersions() []*Version {
@@ -1226,7 +1362,7 @@ type PullEntriesRequest struct {
 
 func (x *PullEntriesRequest) Reset() {
 	*x = PullEntriesRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[18]
+	mi := &file_corkscrewdb_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1238,7 +1374,7 @@ func (x *PullEntriesRequest) String() string {
 func (*PullEntriesRequest) ProtoMessage() {}
 
 func (x *PullEntriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[18]
+	mi := &file_corkscrewdb_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1251,7 +1387,7 @@ func (x *PullEntriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullEntriesRequest.ProtoReflect.Descriptor instead.
 func (*PullEntriesRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{18}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PullEntriesRequest) GetToken() string {
@@ -1299,7 +1435,7 @@ type ReplicaEntry struct {
 
 func (x *ReplicaEntry) Reset() {
 	*x = ReplicaEntry{}
-	mi := &file_corkscrewdb_proto_msgTypes[19]
+	mi := &file_corkscrewdb_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1311,7 +1447,7 @@ func (x *ReplicaEntry) String() string {
 func (*ReplicaEntry) ProtoMessage() {}
 
 func (x *ReplicaEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[19]
+	mi := &file_corkscrewdb_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1324,7 +1460,7 @@ func (x *ReplicaEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaEntry.ProtoReflect.Descriptor instead.
 func (*ReplicaEntry) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{19}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReplicaEntry) GetKind() uint32 {
@@ -1401,7 +1537,7 @@ type PullEntriesResponse struct {
 
 func (x *PullEntriesResponse) Reset() {
 	*x = PullEntriesResponse{}
-	mi := &file_corkscrewdb_proto_msgTypes[20]
+	mi := &file_corkscrewdb_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1413,7 +1549,7 @@ func (x *PullEntriesResponse) String() string {
 func (*PullEntriesResponse) ProtoMessage() {}
 
 func (x *PullEntriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[20]
+	mi := &file_corkscrewdb_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1426,7 +1562,7 @@ func (x *PullEntriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullEntriesResponse.ProtoReflect.Descriptor instead.
 func (*PullEntriesResponse) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{20}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *PullEntriesResponse) GetEntries() []*ReplicaEntry {
@@ -1460,7 +1596,7 @@ type PullSnapshotRequest struct {
 
 func (x *PullSnapshotRequest) Reset() {
 	*x = PullSnapshotRequest{}
-	mi := &file_corkscrewdb_proto_msgTypes[21]
+	mi := &file_corkscrewdb_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1472,7 +1608,7 @@ func (x *PullSnapshotRequest) String() string {
 func (*PullSnapshotRequest) ProtoMessage() {}
 
 func (x *PullSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[21]
+	mi := &file_corkscrewdb_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1485,7 +1621,7 @@ func (x *PullSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*PullSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{21}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PullSnapshotRequest) GetToken() string {
@@ -1517,7 +1653,7 @@ type SnapshotVersion struct {
 
 func (x *SnapshotVersion) Reset() {
 	*x = SnapshotVersion{}
-	mi := &file_corkscrewdb_proto_msgTypes[22]
+	mi := &file_corkscrewdb_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1529,7 +1665,7 @@ func (x *SnapshotVersion) String() string {
 func (*SnapshotVersion) ProtoMessage() {}
 
 func (x *SnapshotVersion) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[22]
+	mi := &file_corkscrewdb_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1542,7 +1678,7 @@ func (x *SnapshotVersion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotVersion.ProtoReflect.Descriptor instead.
 func (*SnapshotVersion) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{22}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SnapshotVersion) GetEmbedding() []float32 {
@@ -1604,7 +1740,7 @@ type SnapshotRecord struct {
 
 func (x *SnapshotRecord) Reset() {
 	*x = SnapshotRecord{}
-	mi := &file_corkscrewdb_proto_msgTypes[23]
+	mi := &file_corkscrewdb_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1616,7 +1752,7 @@ func (x *SnapshotRecord) String() string {
 func (*SnapshotRecord) ProtoMessage() {}
 
 func (x *SnapshotRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[23]
+	mi := &file_corkscrewdb_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1629,7 +1765,7 @@ func (x *SnapshotRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRecord.ProtoReflect.Descriptor instead.
 func (*SnapshotRecord) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{23}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SnapshotRecord) GetId() string {
@@ -1660,7 +1796,7 @@ type PullSnapshotResponse struct {
 
 func (x *PullSnapshotResponse) Reset() {
 	*x = PullSnapshotResponse{}
-	mi := &file_corkscrewdb_proto_msgTypes[24]
+	mi := &file_corkscrewdb_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1672,7 +1808,7 @@ func (x *PullSnapshotResponse) String() string {
 func (*PullSnapshotResponse) ProtoMessage() {}
 
 func (x *PullSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_corkscrewdb_proto_msgTypes[24]
+	mi := &file_corkscrewdb_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1685,7 +1821,7 @@ func (x *PullSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*PullSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_corkscrewdb_proto_rawDescGZIP(), []int{24}
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *PullSnapshotResponse) GetCollection() string {
@@ -1738,7 +1874,15 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\x05Empty\"3\n" +
 	"\x0fEmbeddingConfig\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
-	"\x03dim\x18\x02 \x01(\x05R\x03dim\"\xbb\x01\n" +
+	"\x03dim\x18\x02 \x01(\x05R\x03dim\"A\n" +
+	"\x0eCollectionInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
+	"\tbit_width\x18\x02 \x01(\x05R\bbitWidth\"_\n" +
+	"\x0fShardAssignment\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
+	"\x05start\x18\x03 \x01(\x04R\x05start\x12\x10\n" +
+	"\x03end\x18\x04 \x01(\x04R\x03end\"\xbb\x01\n" +
 	"\x05Entry\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x16\n" +
 	"\x06vector\x18\x02 \x03(\x02R\x06vector\x12I\n" +
@@ -1771,11 +1915,13 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"#\n" +
 	"\vInfoRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"\x96\x01\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"\xa5\x02\n" +
 	"\fInfoResponse\x12'\n" +
 	"\x0fpackage_version\x18\x01 \x01(\tR\x0epackageVersion\x12G\n" +
 	"\tembedding\x18\x02 \x01(\v2).corkscrewdb.transport.v1.EmbeddingConfigR\tembedding\x12\x14\n" +
-	"\x05peers\x18\x03 \x03(\tR\x05peers\"`\n" +
+	"\x05peers\x18\x03 \x03(\tR\x05peers\x12J\n" +
+	"\vcollections\x18\x04 \x03(\v2(.corkscrewdb.transport.v1.CollectionInfoR\vcollections\x12A\n" +
+	"\x06shards\x18\x05 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards\"`\n" +
 	"\x17EnsureCollectionRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1b\n" +
@@ -1932,87 +2078,91 @@ func file_corkscrewdb_proto_rawDescGZIP() []byte {
 	return file_corkscrewdb_proto_rawDescData
 }
 
-var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_corkscrewdb_proto_goTypes = []any{
 	(*Empty)(nil),                   // 0: corkscrewdb.transport.v1.Empty
 	(*EmbeddingConfig)(nil),         // 1: corkscrewdb.transport.v1.EmbeddingConfig
-	(*Entry)(nil),                   // 2: corkscrewdb.transport.v1.Entry
-	(*Filter)(nil),                  // 3: corkscrewdb.transport.v1.Filter
-	(*SearchResult)(nil),            // 4: corkscrewdb.transport.v1.SearchResult
-	(*Version)(nil),                 // 5: corkscrewdb.transport.v1.Version
-	(*InfoRequest)(nil),             // 6: corkscrewdb.transport.v1.InfoRequest
-	(*InfoResponse)(nil),            // 7: corkscrewdb.transport.v1.InfoResponse
-	(*EnsureCollectionRequest)(nil), // 8: corkscrewdb.transport.v1.EnsureCollectionRequest
-	(*DropCollectionRequest)(nil),   // 9: corkscrewdb.transport.v1.DropCollectionRequest
-	(*PutRequest)(nil),              // 10: corkscrewdb.transport.v1.PutRequest
-	(*PutVectorRequest)(nil),        // 11: corkscrewdb.transport.v1.PutVectorRequest
-	(*DeleteRequest)(nil),           // 12: corkscrewdb.transport.v1.DeleteRequest
-	(*SearchRequest)(nil),           // 13: corkscrewdb.transport.v1.SearchRequest
-	(*SearchVectorRequest)(nil),     // 14: corkscrewdb.transport.v1.SearchVectorRequest
-	(*SearchResponse)(nil),          // 15: corkscrewdb.transport.v1.SearchResponse
-	(*HistoryRequest)(nil),          // 16: corkscrewdb.transport.v1.HistoryRequest
-	(*HistoryResponse)(nil),         // 17: corkscrewdb.transport.v1.HistoryResponse
-	(*PullEntriesRequest)(nil),      // 18: corkscrewdb.transport.v1.PullEntriesRequest
-	(*ReplicaEntry)(nil),            // 19: corkscrewdb.transport.v1.ReplicaEntry
-	(*PullEntriesResponse)(nil),     // 20: corkscrewdb.transport.v1.PullEntriesResponse
-	(*PullSnapshotRequest)(nil),     // 21: corkscrewdb.transport.v1.PullSnapshotRequest
-	(*SnapshotVersion)(nil),         // 22: corkscrewdb.transport.v1.SnapshotVersion
-	(*SnapshotRecord)(nil),          // 23: corkscrewdb.transport.v1.SnapshotRecord
-	(*PullSnapshotResponse)(nil),    // 24: corkscrewdb.transport.v1.PullSnapshotResponse
-	nil,                             // 25: corkscrewdb.transport.v1.Entry.MetadataEntry
-	nil,                             // 26: corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	nil,                             // 27: corkscrewdb.transport.v1.Version.MetadataEntry
-	nil,                             // 28: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
-	nil,                             // 29: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	nil,                             // 30: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	(*timestamppb.Timestamp)(nil),   // 31: google.protobuf.Timestamp
+	(*CollectionInfo)(nil),          // 2: corkscrewdb.transport.v1.CollectionInfo
+	(*ShardAssignment)(nil),         // 3: corkscrewdb.transport.v1.ShardAssignment
+	(*Entry)(nil),                   // 4: corkscrewdb.transport.v1.Entry
+	(*Filter)(nil),                  // 5: corkscrewdb.transport.v1.Filter
+	(*SearchResult)(nil),            // 6: corkscrewdb.transport.v1.SearchResult
+	(*Version)(nil),                 // 7: corkscrewdb.transport.v1.Version
+	(*InfoRequest)(nil),             // 8: corkscrewdb.transport.v1.InfoRequest
+	(*InfoResponse)(nil),            // 9: corkscrewdb.transport.v1.InfoResponse
+	(*EnsureCollectionRequest)(nil), // 10: corkscrewdb.transport.v1.EnsureCollectionRequest
+	(*DropCollectionRequest)(nil),   // 11: corkscrewdb.transport.v1.DropCollectionRequest
+	(*PutRequest)(nil),              // 12: corkscrewdb.transport.v1.PutRequest
+	(*PutVectorRequest)(nil),        // 13: corkscrewdb.transport.v1.PutVectorRequest
+	(*DeleteRequest)(nil),           // 14: corkscrewdb.transport.v1.DeleteRequest
+	(*SearchRequest)(nil),           // 15: corkscrewdb.transport.v1.SearchRequest
+	(*SearchVectorRequest)(nil),     // 16: corkscrewdb.transport.v1.SearchVectorRequest
+	(*SearchResponse)(nil),          // 17: corkscrewdb.transport.v1.SearchResponse
+	(*HistoryRequest)(nil),          // 18: corkscrewdb.transport.v1.HistoryRequest
+	(*HistoryResponse)(nil),         // 19: corkscrewdb.transport.v1.HistoryResponse
+	(*PullEntriesRequest)(nil),      // 20: corkscrewdb.transport.v1.PullEntriesRequest
+	(*ReplicaEntry)(nil),            // 21: corkscrewdb.transport.v1.ReplicaEntry
+	(*PullEntriesResponse)(nil),     // 22: corkscrewdb.transport.v1.PullEntriesResponse
+	(*PullSnapshotRequest)(nil),     // 23: corkscrewdb.transport.v1.PullSnapshotRequest
+	(*SnapshotVersion)(nil),         // 24: corkscrewdb.transport.v1.SnapshotVersion
+	(*SnapshotRecord)(nil),          // 25: corkscrewdb.transport.v1.SnapshotRecord
+	(*PullSnapshotResponse)(nil),    // 26: corkscrewdb.transport.v1.PullSnapshotResponse
+	nil,                             // 27: corkscrewdb.transport.v1.Entry.MetadataEntry
+	nil,                             // 28: corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	nil,                             // 29: corkscrewdb.transport.v1.Version.MetadataEntry
+	nil,                             // 30: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	nil,                             // 31: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	nil,                             // 32: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	(*timestamppb.Timestamp)(nil),   // 33: google.protobuf.Timestamp
 }
 var file_corkscrewdb_proto_depIdxs = []int32{
-	25, // 0: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
-	26, // 1: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	27, // 2: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
-	31, // 3: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
+	27, // 0: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
+	28, // 1: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	29, // 2: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
+	33, // 3: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
 	1,  // 4: corkscrewdb.transport.v1.InfoResponse.embedding:type_name -> corkscrewdb.transport.v1.EmbeddingConfig
-	2,  // 5: corkscrewdb.transport.v1.PutRequest.entry:type_name -> corkscrewdb.transport.v1.Entry
-	28, // 6: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
-	3,  // 7: corkscrewdb.transport.v1.SearchRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
-	3,  // 8: corkscrewdb.transport.v1.SearchVectorRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
-	4,  // 9: corkscrewdb.transport.v1.SearchResponse.results:type_name -> corkscrewdb.transport.v1.SearchResult
-	5,  // 10: corkscrewdb.transport.v1.HistoryResponse.versions:type_name -> corkscrewdb.transport.v1.Version
-	29, // 11: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	31, // 12: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
-	19, // 13: corkscrewdb.transport.v1.PullEntriesResponse.entries:type_name -> corkscrewdb.transport.v1.ReplicaEntry
-	30, // 14: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	31, // 15: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
-	22, // 16: corkscrewdb.transport.v1.SnapshotRecord.versions:type_name -> corkscrewdb.transport.v1.SnapshotVersion
-	23, // 17: corkscrewdb.transport.v1.PullSnapshotResponse.records:type_name -> corkscrewdb.transport.v1.SnapshotRecord
-	6,  // 18: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
-	8,  // 19: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
-	9,  // 20: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
-	10, // 21: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
-	11, // 22: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
-	12, // 23: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
-	13, // 24: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
-	14, // 25: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
-	16, // 26: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
-	18, // 27: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
-	21, // 28: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
-	7,  // 29: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
-	0,  // 30: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 31: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 32: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 33: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 34: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
-	15, // 35: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
-	15, // 36: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
-	17, // 37: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
-	20, // 38: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
-	24, // 39: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
-	29, // [29:40] is the sub-list for method output_type
-	18, // [18:29] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	2,  // 5: corkscrewdb.transport.v1.InfoResponse.collections:type_name -> corkscrewdb.transport.v1.CollectionInfo
+	3,  // 6: corkscrewdb.transport.v1.InfoResponse.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
+	4,  // 7: corkscrewdb.transport.v1.PutRequest.entry:type_name -> corkscrewdb.transport.v1.Entry
+	30, // 8: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	5,  // 9: corkscrewdb.transport.v1.SearchRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
+	5,  // 10: corkscrewdb.transport.v1.SearchVectorRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
+	6,  // 11: corkscrewdb.transport.v1.SearchResponse.results:type_name -> corkscrewdb.transport.v1.SearchResult
+	7,  // 12: corkscrewdb.transport.v1.HistoryResponse.versions:type_name -> corkscrewdb.transport.v1.Version
+	31, // 13: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	33, // 14: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
+	21, // 15: corkscrewdb.transport.v1.PullEntriesResponse.entries:type_name -> corkscrewdb.transport.v1.ReplicaEntry
+	32, // 16: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	33, // 17: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
+	24, // 18: corkscrewdb.transport.v1.SnapshotRecord.versions:type_name -> corkscrewdb.transport.v1.SnapshotVersion
+	25, // 19: corkscrewdb.transport.v1.PullSnapshotResponse.records:type_name -> corkscrewdb.transport.v1.SnapshotRecord
+	8,  // 20: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
+	10, // 21: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
+	11, // 22: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
+	12, // 23: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
+	13, // 24: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
+	14, // 25: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
+	15, // 26: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
+	16, // 27: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
+	18, // 28: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
+	20, // 29: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
+	23, // 30: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
+	9,  // 31: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
+	0,  // 32: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 33: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 34: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 35: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 36: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
+	17, // 37: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
+	17, // 38: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
+	19, // 39: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
+	22, // 40: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	26, // 41: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
+	31, // [31:42] is the sub-list for method output_type
+	20, // [20:31] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_corkscrewdb_proto_init() }
@@ -2026,7 +2176,7 @@ func file_corkscrewdb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_corkscrewdb_proto_rawDesc), len(file_corkscrewdb_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   31,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

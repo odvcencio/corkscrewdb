@@ -10,6 +10,7 @@ All notable changes to CorkScrewDB are documented here.
 - **HNSW index persistence** — approximate nearest-neighbor search now survives restarts alongside the existing quantized flat index
 - **Proto definitions** — `proto/corkscrewdb.proto` and generated `grpc/` stubs define the remote DB and replication pull surface
 - **Explicit shard metadata** — `WithShards(...)` persists contiguous ownership ranges in `manifest.json`, replacing peer-list hashing when configured
+- **Manual shard handoff** — `RebalanceShards(...)` pulls snapshot + WAL tail from old owners before applying the new local layout and pruning handed-off IDs
 
 ### Changed
 
@@ -17,6 +18,7 @@ All notable changes to CorkScrewDB are documented here.
 - **Format version bump** — WAL, snapshot, and index formats moved to v2 for the HLC/HNSW line
 - **Transport abstraction** — remote DB operations now flow through the extracted `remoteClient` interface so transport and cluster work can evolve independently
 - **Federation routing** — write ownership and scatter-gather fanout now prefer explicit shard assignments, falling back to the older peer-hash behavior only when shard metadata is absent
+- **Remote metadata surface** — `Info()` now returns collection and shard metadata so rebalancing code can discover what a peer owns before pulling data
 
 ## v0.1.1 — 2026-04-07
 

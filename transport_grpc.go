@@ -435,7 +435,9 @@ func toProtoInfoResponse(resp RPCInfoResponse) *grpcapi.InfoResponse {
 			Id:  resp.Embedding.ID,
 			Dim: int32(resp.Embedding.Dim),
 		},
-		Peers: append([]string(nil), resp.Peers...),
+		Peers:       append([]string(nil), resp.Peers...),
+		Collections: toProtoCollectionInfo(resp.Collections),
+		Shards:      toProtoShardAssignments(resp.Shards),
 	}
 }
 
@@ -446,6 +448,8 @@ func fromProtoInfoResponse(resp *grpcapi.InfoResponse) RPCInfoResponse {
 	info := RPCInfoResponse{
 		PackageVersion: resp.GetPackageVersion(),
 		Peers:          append([]string(nil), resp.GetPeers()...),
+		Collections:    fromProtoCollectionInfo(resp.GetCollections()),
+		Shards:         fromProtoShardAssignments(resp.GetShards()),
 	}
 	if embedding := resp.GetEmbedding(); embedding != nil {
 		info.Embedding = embeddingConfig{
@@ -454,6 +458,66 @@ func fromProtoInfoResponse(resp *grpcapi.InfoResponse) RPCInfoResponse {
 		}
 	}
 	return info
+}
+
+func toProtoCollectionInfo(infos []RPCCollectionInfo) []*grpcapi.CollectionInfo {
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]*grpcapi.CollectionInfo, len(infos))
+	for i, info := range infos {
+		out[i] = &grpcapi.CollectionInfo{
+			Name:     info.Name,
+			BitWidth: int32(info.BitWidth),
+		}
+	}
+	return out
+}
+
+func fromProtoCollectionInfo(infos []*grpcapi.CollectionInfo) []RPCCollectionInfo {
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]RPCCollectionInfo, len(infos))
+	for i, info := range infos {
+		out[i] = RPCCollectionInfo{
+			Name:     info.GetName(),
+			BitWidth: int(info.GetBitWidth()),
+		}
+	}
+	return out
+}
+
+func toProtoShardAssignments(shards []ShardAssignment) []*grpcapi.ShardAssignment {
+	if len(shards) == 0 {
+		return nil
+	}
+	out := make([]*grpcapi.ShardAssignment, len(shards))
+	for i, shard := range shards {
+		out[i] = &grpcapi.ShardAssignment{
+			Id:    shard.ID,
+			Owner: shard.Owner,
+			Start: shard.Start,
+			End:   shard.End,
+		}
+	}
+	return out
+}
+
+func fromProtoShardAssignments(shards []*grpcapi.ShardAssignment) []ShardAssignment {
+	if len(shards) == 0 {
+		return nil
+	}
+	out := make([]ShardAssignment, len(shards))
+	for i, shard := range shards {
+		out[i] = ShardAssignment{
+			ID:    shard.GetId(),
+			Owner: shard.GetOwner(),
+			Start: shard.GetStart(),
+			End:   shard.GetEnd(),
+		}
+	}
+	return out
 }
 
 func toProtoRPCFilters(filters []RPCFilter) []*grpcapi.Filter {

@@ -555,6 +555,148 @@ func TestExplicitShardsRouteWritesAndFanoutSearch(t *testing.T) {
 	}
 }
 
+func TestRebalanceShardsMigratesOwnershipAndPrunesOldOwner(t *testing.T) {
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerA.Close()
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerB.Close()
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+	maxKey := ^uint64(0)
+	oldCut := maxKey / 2
+	newCut := (maxKey / 4) * 3
+
+	oldLayoutA := []ShardAssignment{
+		{ID: "shard-a", Owner: LocalShardOwner, Start: 0, End: oldCut},
+		{ID: "shard-b", Owner: addrB, Start: oldCut + 1, End: maxKey},
+	}
+	oldLayoutB := []ShardAssignment{
+		{ID: "shard-a", Owner: addrA, Start: 0, End: oldCut},
+		{ID: "shard-b", Owner: LocalShardOwner, Start: oldCut + 1, End: maxKey},
+	}
+	newLayoutA := []ShardAssignment{
+		{ID: "shard-a", Owner: LocalShardOwner, Start: 0, End: newCut},
+		{ID: "shard-b", Owner: addrB, Start: newCut + 1, End: maxKey},
+	}
+	newLayoutB := []ShardAssignment{
+		{ID: "shard-a", Owner: addrA, Start: 0, End: newCut},
+		{ID: "shard-b", Owner: LocalShardOwner, Start: newCut + 1, End: maxKey},
+	}
+
+	dbA, err := Open(
+		filepath.Join(t.TempDir(), "a-rebalance.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrB),
+		WithShards(oldLayoutA...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	dbB, err := Open(
+		filepath.Join(t.TempDir(), "b-rebalance.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrA),
+		WithShards(oldLayoutB...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+	t.Cleanup(func() {
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Errorf("serve B: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve B did not exit")
+		}
+	})
+
+	movingID, stayingRemoteID := pickIDsForRebalance(t, dbA, "docs", oldLayoutA, newLayoutA, addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+	if err := collA.Put(movingID, Entry{Text: "moving before handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(stayingRemoteID, Entry{Text: "stays remote"}); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := dbB.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("old owner history len = %d, want 1", len(before))
+	}
+
+	if err := dbA.RebalanceShards(newLayoutA...); err != nil {
+		t.Fatal(err)
+	}
+	afterPull, err := dbA.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterPull) != 1 || afterPull[0].Text != "moving before handoff" {
+		t.Fatalf("new owner history after pull = %+v", afterPull)
+	}
+
+	if err := dbB.RebalanceShards(newLayoutB...); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := dbB.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("old owner retained handed-off id: %+v", pruned)
+	}
+	stillRemote, err := dbB.Collection("docs").historyFor(stayingRemoteID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillRemote) != 1 {
+		t.Fatalf("old owner lost stable remote id: %+v", stillRemote)
+	}
+
+	if err := dbB.Collection("docs").Put(movingID, Entry{Text: "moving after handoff"}); err != nil {
+		t.Fatal(err)
+	}
+	finalHistory, err := dbA.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finalHistory) != 2 || finalHistory[1].Text != "moving after handoff" {
+		t.Fatalf("new owner history after routed write = %+v", finalHistory)
+	}
+}
+
 func startRemoteTestServer(t *testing.T, opts ...Option) (*DB, string) {
 	t.Helper()
 
@@ -614,6 +756,27 @@ func twoNodeShardLayout(localOwner, remoteOwner string) []ShardAssignment {
 		{ID: "shard-a", Owner: localOwner, Start: 0, End: mid},
 		{ID: "shard-b", Owner: remoteOwner, Start: mid + 1, End: ^uint64(0)},
 	}
+}
+
+func pickIDsForRebalance(t *testing.T, db *DB, collection string, oldLayout, newLayout []ShardAssignment, localOwner, remoteOwner string) (string, string) {
+	t.Helper()
+	var movingID, stayingRemoteID string
+	oldMembers := db.legacyShardMembers()
+	for i := 0; i < 10000 && (movingID == "" || stayingRemoteID == ""); i++ {
+		candidate := "doc-rebalance-" + strconv.Itoa(i)
+		oldOwner := db.ownerForLayout(collection, candidate, oldLayout, oldMembers)
+		newOwner := db.ownerForLayout(collection, candidate, newLayout, nil)
+		switch {
+		case movingID == "" && oldOwner == remoteOwner && newOwner == localOwner:
+			movingID = candidate
+		case stayingRemoteID == "" && oldOwner == remoteOwner && newOwner == remoteOwner:
+			stayingRemoteID = candidate
+		}
+	}
+	if movingID == "" || stayingRemoteID == "" {
+		t.Fatalf("could not find rebalance ids: moving=%q stayingRemote=%q", movingID, stayingRemoteID)
+	}
+	return movingID, stayingRemoteID
 }
 
 func hasResult(results []SearchResult, id string) bool {

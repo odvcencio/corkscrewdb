@@ -82,6 +82,10 @@ func (db *DB) ownerFor(collection, id string) string {
 
 func (db *DB) explicitOwnerForKey(key uint64) (string, bool) {
 	shards := db.shardAssignments()
+	return db.explicitOwnerForKeyFromAssignments(key, shards)
+}
+
+func (db *DB) explicitOwnerForKeyFromAssignments(key uint64, shards []ShardAssignment) (string, bool) {
 	if len(shards) == 0 {
 		return "", false
 	}

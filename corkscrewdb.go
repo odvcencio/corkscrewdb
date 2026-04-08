@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -320,6 +321,27 @@ func (db *DB) saveManifest() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	return db.saveManifestLocked()
+}
+
+func (db *DB) rpcCollectionInfo() []RPCCollectionInfo {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if len(db.manifest.Collections) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(db.manifest.Collections))
+	for name := range db.manifest.Collections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]RPCCollectionInfo, len(names))
+	for i, name := range names {
+		out[i] = RPCCollectionInfo{
+			Name:     name,
+			BitWidth: db.manifest.Collections[name].BitWidth,
+		}
+	}
+	return out
 }
 
 func (db *DB) isClosed() bool {

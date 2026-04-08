@@ -18,6 +18,13 @@ type RPCInfoResponse struct {
 	PackageVersion string
 	Embedding      embeddingConfig
 	Peers          []string
+	Collections    []RPCCollectionInfo
+	Shards         []ShardAssignment
+}
+
+type RPCCollectionInfo struct {
+	Name     string
+	BitWidth int
 }
 
 type RPCEmpty struct{}
@@ -127,7 +134,7 @@ func Connect(addr string, opts ...Option) (*DB, error) {
 		remote:      client,
 		token:       cfg.token,
 		peers:       append([]string(nil), info.Peers...),
-		manifest:    manifest{ModuleVersion: info.PackageVersion, Embedding: info.Embedding},
+		manifest:    manifest{ModuleVersion: info.PackageVersion, Embedding: info.Embedding, Shards: cloneShardAssignments(info.Shards)},
 		collections: make(map[string]*Collection),
 	}, nil
 }
@@ -207,6 +214,8 @@ func (s *transportServer) Info(req RPCInfoRequest, resp *RPCInfoResponse) error 
 		PackageVersion: PackageVersion,
 		Embedding:      s.db.manifest.Embedding,
 		Peers:          append([]string(nil), s.db.peers...),
+		Collections:    s.db.rpcCollectionInfo(),
+		Shards:         cloneShardAssignments(s.db.manifest.Shards),
 	}
 	return nil
 }
