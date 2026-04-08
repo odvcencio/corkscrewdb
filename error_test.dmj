@@ -1,0 +1,110 @@
+package corkscrewdb
+
+import "testing"
+
+unit "InputValidation" {
+    db, _ := openTestDB(t)
+    coll := db.Collection("validation")
+    seed16 := make([]float32, 16)
+    for i := range seed16 { seed16[i] = float32(i+1) / 100.0 }
+    err := coll.PutVector("seed", seed16)
+    if err != nil {
+        t.Fatalf("seed put failed: %v", err)
+    }
+
+    then "PutEmptyID" {
+        err := coll.Put("", Entry{Text: "hello"})
+        expect err != nil
+    }
+
+    then "PutWhitespaceID" {
+        err := coll.Put("   ", Entry{Text: "hello"})
+        expect err != nil
+    }
+
+    then "PutNoTextNoVector" {
+        err := coll.Put("id", Entry{})
+        expect err != nil
+    }
+
+    then "PutVectorWrongDimension" {
+        big := make([]float32, 32)
+        for i := range big { big[i] = float32(i+1) / 100.0 }
+        err := coll.PutVector("wrongdim", big)
+        expect err != nil
+    }
+
+    then "SearchVectorWrongDimension" {
+        query := make([]float32, 32)
+        for i := range query { query[i] = float32(i+1) / 100.0 }
+        results, err := coll.SearchVector(query, 5)
+        expect err != nil
+        expect results == nil
+    }
+
+    then "SearchEmptyCollection" {
+        db2, _ := openTestDB(t)
+        empty := db2.Collection("empty")
+        query := make([]float32, 16)
+        for i := range query { query[i] = 0.1 }
+        results, err := empty.SearchVector(query, 5)
+        expect err == nil
+        expect len(results) == 0
+    }
+}
+
+unit "ClosedDatabaseOperations" {
+    db, _ := openTestDB(t)
+    coll := db.Collection("closed-test")
+    vec16 := make([]float32, 16)
+    for i := range vec16 { vec16[i] = float32(i+1) / 100.0 }
+    if err := coll.PutVector("entry1", vec16); err != nil {
+        t.Fatalf("setup put failed: %v", err)
+    }
+    if err := db.Close(); err != nil {
+        t.Fatalf("close failed: %v", err)
+    }
+
+    then "PutReturnsError" {
+        err := coll.Put("x", Entry{Text: "hi"})
+        expect err != nil
+    }
+
+    then "SearchReturnsError" {
+        results, err := coll.Search("hi", 1)
+        expect err != nil
+        expect results == nil
+    }
+
+    then "HistoryReturnsError" {
+        versions, err := coll.History("entry1")
+        expect err != nil
+        expect versions == nil
+    }
+
+    then "DeleteReturnsError" {
+        err := coll.Delete("entry1")
+        expect err != nil
+    }
+}
+
+unit "NilCollectionOperations" {
+    var coll *Collection
+
+    then "PutReturnsError" {
+        err := coll.Put("id", Entry{Text: "hello"})
+        expect err != nil
+    }
+
+    then "SearchReturnsError" {
+        results, err := coll.Search("hello", 1)
+        expect err != nil
+        expect results == nil
+    }
+
+    then "HistoryReturnsError" {
+        versions, err := coll.History("id")
+        expect err != nil
+        expect versions == nil
+    }
+}
