@@ -3,13 +3,13 @@
 CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 - Text-in and vector-in collection APIs
-- Version history per ID with Lamport clocks
-- TurboQuant-backed quantized flat search
+- Version history per ID with hybrid logical clocks
+- TurboQuant-backed quantized flat and HNSW search
 - Append-only WAL persistence with snapshot recovery
 - Quantized index persistence (`.tqi`)
 - Embedding-space config enforcement
 - Metadata filters and point-in-time collection views
-- Built-in RPC transport with `Connect(...)` and `Serve(...)`
+- gRPC transport with `Connect(...)` and `Serve(...)`
 - Embedded federation with hash-based write routing and fan-out search
 - WAL streaming replication (primary → follower with catch-up)
 - Cold storage offload (sealed WAL segments + snapshots)
@@ -17,7 +17,7 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 ## Status
 
-`v0.1.1` — embedded core, remote access, federation, replication, and cold storage offload. gRPC transport, explicit shard rebalancing, and cross-region replication are deferred to v0.2.0.
+`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, and gRPC transport are in on the dev branch. Remaining roadmap work is shard metadata/rebalancing, richer replication, pluggable cloud offload backends, and the bundled model.
 
 ## Install
 
@@ -74,7 +74,7 @@ Embedding config is persisted in `manifest.json`. Reopening a database with a di
 
 ## Remote Mode
 
-`Connect(...)` now works for single-node remote access using the same collection API over the wire:
+`Connect(...)` works for remote access using the same collection API over gRPC:
 
 ```go
 db, err := corkscrewdb.Connect("127.0.0.1:4040", corkscrewdb.WithToken("agent-token-xxx"))
@@ -108,7 +108,7 @@ Current behavior:
 
 ## Replication
 
-WAL entries stream from primary to followers via pull-based RPC. Followers apply entries through CRDT merge (last-writer-wins by Lamport clock). New followers catch up via snapshot transfer + WAL tail replay.
+WAL entries stream from primary to followers via pull-based gRPC. Followers apply entries through CRDT merge (last-writer-wins by HLC value). New followers catch up via snapshot transfer + WAL tail replay.
 
 ## Cold Storage Offload
 
@@ -147,11 +147,10 @@ go test -bench=. -benchmem -run=^$ .
 
 ## Roadmap (v0.2.0)
 
-- gRPC transport
 - Explicit shard metadata and rebalancing
 - Cross-region replication
 - Pluggable S3/GCS storage backends
-- HNSW index for sub-linear search
+- Bundled embedding model
 
 ## Development
 

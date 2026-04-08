@@ -1,4 +1,4 @@
-// Command corkscrewdb runs an embedded CorkScrewDB server over the built-in RPC transport.
+// Command corkscrewdb runs an embedded CorkScrewDB server over the gRPC transport.
 package main
 
 import (

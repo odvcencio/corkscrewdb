@@ -1,7 +1,7 @@
 package corkscrewdb
 
 // remoteClient abstracts the transport layer for remote DB operations.
-// Implemented by *rpcClient (net/rpc) and later by grpcClient (gRPC).
+// Implemented by *grpcClient over gRPC.
 type remoteClient interface {
 	Info() (RPCInfoResponse, error)
 	EnsureCollection(name string, bitWidth int) error
@@ -16,6 +16,3 @@ type remoteClient interface {
 	PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error)
 	Close() error
 }
-
-// Verify rpcClient satisfies the interface at compile time.
-var _ remoteClient = (*rpcClient)(nil)

@@ -1,0 +1,196 @@
+syntax = "proto3";
+
+package corkscrewdb.transport.v1;
+
+option go_package = "github.com/odvcencio/corkscrewdb/grpc;grpcapi";
+
+import "google/protobuf/timestamp.proto";
+
+service CorkScrewDB {
+  rpc Info(InfoRequest) returns (InfoResponse);
+  rpc EnsureCollection(EnsureCollectionRequest) returns (Empty);
+  rpc DropCollection(DropCollectionRequest) returns (Empty);
+  rpc Put(PutRequest) returns (Empty);
+  rpc PutVector(PutVectorRequest) returns (Empty);
+  rpc Delete(DeleteRequest) returns (Empty);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc SearchVector(SearchVectorRequest) returns (SearchResponse);
+  rpc History(HistoryRequest) returns (HistoryResponse);
+  rpc PullEntries(PullEntriesRequest) returns (PullEntriesResponse);
+  rpc PullSnapshot(PullSnapshotRequest) returns (PullSnapshotResponse);
+}
+
+message Empty {}
+
+message EmbeddingConfig {
+  string id = 1;
+  int32 dim = 2;
+}
+
+message Entry {
+  string text = 1;
+  repeated float vector = 2;
+  map<string, string> metadata = 3;
+}
+
+message Filter {
+  string key = 1;
+  string value = 2;
+}
+
+message SearchResult {
+  string id = 1;
+  float score = 2;
+  string text = 3;
+  map<string, string> metadata = 4;
+  uint64 version = 5;
+}
+
+message Version {
+  repeated float embedding = 1;
+  string text = 2;
+  map<string, string> metadata = 3;
+  uint64 lamport_clock = 4;
+  string actor_id = 5;
+  google.protobuf.Timestamp wall_clock = 6;
+  bool tombstone = 7;
+}
+
+message InfoRequest {
+  string token = 1;
+}
+
+message InfoResponse {
+  string package_version = 1;
+  EmbeddingConfig embedding = 2;
+  repeated string peers = 3;
+}
+
+message EnsureCollectionRequest {
+  string token = 1;
+  string name = 2;
+  int32 bit_width = 3;
+}
+
+message DropCollectionRequest {
+  string token = 1;
+  string name = 2;
+}
+
+message PutRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  string id = 4;
+  Entry entry = 5;
+}
+
+message PutVectorRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  string id = 4;
+  repeated float vector = 5;
+  string text = 6;
+  map<string, string> metadata = 7;
+}
+
+message DeleteRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  string id = 4;
+}
+
+message SearchRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  string query = 4;
+  int32 k = 5;
+  repeated Filter filters = 6;
+  bool use_at = 7;
+  uint64 at_lamport = 8;
+}
+
+message SearchVectorRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  repeated float query = 4;
+  int32 k = 5;
+  repeated Filter filters = 6;
+  bool use_at = 7;
+  uint64 at_lamport = 8;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+message HistoryRequest {
+  string token = 1;
+  bool internal = 2;
+  string collection = 3;
+  string id = 4;
+  bool use_at = 5;
+  uint64 at_lamport = 6;
+}
+
+message HistoryResponse {
+  repeated Version versions = 1;
+}
+
+message PullEntriesRequest {
+  string token = 1;
+  string collection = 2;
+  uint64 since_clock = 3;
+  int32 max_entries = 4;
+}
+
+message ReplicaEntry {
+  uint32 kind = 1;
+  string collection_id = 2;
+  string vector_id = 3;
+  repeated float embedding = 4;
+  string text = 5;
+  map<string, string> metadata = 6;
+  uint64 lamport_clock = 7;
+  string actor_id = 8;
+  google.protobuf.Timestamp wall_clock = 9;
+}
+
+message PullEntriesResponse {
+  repeated ReplicaEntry entries = 1;
+  uint64 latest_clock = 2;
+  bool has_more = 3;
+}
+
+message PullSnapshotRequest {
+  string token = 1;
+  string collection = 2;
+}
+
+message SnapshotVersion {
+  repeated float embedding = 1;
+  string text = 2;
+  map<string, string> metadata = 3;
+  uint64 lamport_clock = 4;
+  string actor_id = 5;
+  google.protobuf.Timestamp wall_clock = 6;
+  bool tombstone = 7;
+}
+
+message SnapshotRecord {
+  string id = 1;
+  repeated SnapshotVersion versions = 2;
+}
+
+message PullSnapshotResponse {
+  string collection = 1;
+  int32 bit_width = 2;
+  int64 seed = 3;
+  int32 dim = 4;
+  uint64 max_lamport = 5;
+  repeated SnapshotRecord records = 6;
+}
