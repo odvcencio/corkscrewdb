@@ -1,0 +1,96 @@
+package wal
+
+import (
+    "bytes"
+    "encoding/binary"
+    "testing"
+    "time"
+)
+
+unit "WALEntryDecodeEdgeCases" {
+    given "a valid encoded entry" {
+        entry := Entry{
+            Kind:         EntryPut,
+            CollectionID: "docs",
+            VectorID:     "v1",
+            Embedding:    []float32{1.0, 2.0, 3.0},
+            Text:         "hello",
+            Metadata:     map[string]string{"k": "v"},
+            LamportClock: 42,
+            ActorID:      "actor-1",
+            WallClock:    time.Now().UTC().Truncate(time.Nanosecond),
+        }
+        encoded, err := entry.MarshalBinary()
+        expect err == nil
+
+        when "CRC is corrupted" {
+            corrupted := make([]byte, len(encoded))
+            copy(corrupted, encoded)
+            corrupted[len(corrupted)-1] ^= 0xFF
+
+            then "ReadEntry returns crc mismatch" {
+                _, err := ReadEntry(bytes.NewReader(corrupted))
+                expect err != nil
+            }
+        }
+
+        when "version byte is unsupported" {
+            corrupted := make([]byte, len(encoded))
+            copy(corrupted, encoded)
+            corrupted[2] = 99
+
+            then "ReadEntry returns unsupported version" {
+                _, err := ReadEntry(bytes.NewReader(corrupted))
+                expect err != nil
+            }
+        }
+
+        when "magic bytes are invalid" {
+            corrupted := make([]byte, len(encoded))
+            copy(corrupted, encoded)
+            binary.LittleEndian.PutUint16(corrupted[0:2], 0x0000)
+
+            then "ReadEntry returns invalid magic" {
+                _, err := ReadEntry(bytes.NewReader(corrupted))
+                expect err != nil
+            }
+        }
+
+        when "entry is truncated" {
+            truncated := encoded[:len(encoded)/2]
+
+            then "ReadEntry returns error" {
+                _, err := ReadEntry(bytes.NewReader(truncated))
+                expect err != nil
+            }
+        }
+
+        when "input is empty" {
+            then "ReadEntry returns EOF" {
+                _, err := ReadEntry(bytes.NewReader(nil))
+                expect err != nil
+            }
+        }
+    }
+}
+
+func FuzzWALEntryDecode(f *testing.F) {
+    entry := Entry{
+        Kind:         EntryPut,
+        CollectionID: "docs",
+        VectorID:     "v1",
+        Embedding:    []float32{1.0, 2.0, 3.0},
+        Text:         "hello",
+        Metadata:     map[string]string{"k": "v"},
+        LamportClock: 42,
+        ActorID:      "actor-1",
+        WallClock:    time.Now().UTC().Truncate(time.Nanosecond),
+    }
+    seed, _ := entry.MarshalBinary()
+    f.Add(seed)
+    f.Add([]byte(nil))
+    f.Add([]byte{0x00, 0x01, 0x02})
+    f.Fuzz(func(t *testing.T, data []byte) {
+        _, _ = ReadEntry(bytes.NewReader(data))
+    })
+}
