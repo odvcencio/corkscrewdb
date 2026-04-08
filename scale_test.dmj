@@ -1,0 +1,126 @@
+package corkscrewdb
+
+import (
+    "fmt"
+    "math/rand"
+    "path/filepath"
+    "testing"
+    "time"
+)
+
+@slow
+unit "LargeCollection100K" {
+    given "100K vectors at 384-dim, 2-bit" {
+        path := filepath.Join(t.TempDir(), "scale.csdb")
+        db, err := Open(path, WithProvider(&mockProvider{dim: 384}))
+        expect err == nil
+
+        coll := db.Collection("big", WithBitWidth(2))
+        rng := rand.New(rand.NewSource(12345))
+        for i := 0; i < 100_000; i++ {
+            vec := make([]float32, 384)
+            for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+            err := coll.PutVector(fmt.Sprintf("v%d", i), vec)
+            expect err == nil
+        }
+
+        then "search returns results in under 10ms" {
+            query := make([]float32, 384)
+            for j := range query { query[j] = rng.Float32()*2 - 1 }
+
+            start := time.Now()
+            results, err := coll.SearchVector(query, 10)
+            elapsed := time.Since(start)
+
+            expect err == nil
+            expect len(results) == 10
+            expect elapsed < 10*time.Millisecond
+        }
+
+        then "survives close and reopen" {
+            db.Close()
+            db2, err := Open(path, WithProvider(&mockProvider{dim: 384}))
+            expect err == nil
+            defer db2.Close()
+
+            query := make([]float32, 384)
+            rng2 := rand.New(rand.NewSource(99))
+            for j := range query { query[j] = rng2.Float32()*2 - 1 }
+            results, err := db2.Collection("big").SearchVector(query, 10)
+            expect err == nil
+            expect len(results) == 10
+        }
+    }
+}
+
+@slow
+unit "ManyVersionsPerID" {
+    given "1 ID with 1000 versions" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("versions", WithBitWidth(2))
+        rng := rand.New(rand.NewSource(42))
+
+        var clocks []uint64
+        for i := 0; i < 1000; i++ {
+            vec := make([]float32, 16)
+            for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+            err := coll.PutVector("target", vec)
+            expect err == nil
+        }
+
+        then "history returns all 1000 in order" {
+            h, err := coll.History("target")
+            expect err == nil
+            expect len(h) == 1000
+
+            for i := 1; i < len(h); i++ {
+                expect h[i].LamportClock > h[i-1].LamportClock
+            }
+        }
+
+        then "At midpoint shows 500 versions" {
+            h, _ := coll.History("target")
+            midClock := h[499].LamportClock
+            view := coll.At(midClock)
+            viewH, err := view.History("target")
+            expect err == nil
+            expect len(viewH) == 500
+        }
+
+        _ = clocks
+    }
+}
+
+@slow
+unit "ManyCollections" {
+    given "100 collections with 100 vectors each" {
+        path := filepath.Join(t.TempDir(), "many-coll.csdb")
+        db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+        expect err == nil
+
+        rng := rand.New(rand.NewSource(42))
+        for c := 0; c < 100; c++ {
+            coll := db.Collection(fmt.Sprintf("coll-%d", c), WithBitWidth(2))
+            for i := 0; i < 100; i++ {
+                vec := make([]float32, 16)
+                for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+                coll.PutVector(fmt.Sprintf("v%d", i), vec)
+            }
+        }
+        db.Close()
+
+        then "all survive reopen" {
+            db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+            expect err == nil
+            defer db2.Close()
+
+            for c := 0; c < 100; c++ {
+                query := make([]float32, 16)
+                for j := range query { query[j] = 0.5 }
+                results, err := db2.Collection(fmt.Sprintf("coll-%d", c)).SearchVector(query, 10)
+                expect err == nil
+                expect len(results) > 0
+            }
+        }
+    }
+}
