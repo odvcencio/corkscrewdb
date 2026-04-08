@@ -1,0 +1,305 @@
+package corkscrewdb
+
+import (
+	"fmt"
+	"math/rand"
+	"testing"
+	"testing/quick"
+)
+
+// TestVersionSetsConverge: apply N versions in two random orders to two
+// independent collections via loadVersion and verify they agree on history.
+func TestVersionSetsConverge(t *testing.T) {
+	t.Parallel()
+	cfg := &quick.Config{MaxCount: 200}
+	err := quick.Check(func(seed int64) bool {
+		rng := rand.New(rand.NewSource(seed))
+		n := 3 + rng.Intn(5) // 3-7 versions
+
+		type versionEntry struct {
+			id      string
+			version Version
+		}
+
+		actors := []string{"alice", "bob", "carol", "dave", "eve"}
+		entries := make([]versionEntry, n)
+		for i := range entries {
+			dim := 8
+			emb := make([]float32, dim)
+			for j := range emb {
+				emb[j] = rng.Float32()
+			}
+			entries[i] = versionEntry{
+				id: fmt.Sprintf("doc-%d", rng.Intn(3)), // 3 possible IDs for collisions
+				version: Version{
+					Embedding:    emb,
+					LamportClock: uint64(i + 1),
+					ActorID:      actors[rng.Intn(len(actors))],
+				},
+			}
+		}
+
+		// Order A: natural order
+		orderA := make([]int, n)
+		for i := range orderA {
+			orderA[i] = i
+		}
+		// Order B: shuffled
+		orderB := make([]int, n)
+		copy(orderB, orderA)
+		rng.Shuffle(len(orderB), func(i, j int) { orderB[i], orderB[j] = orderB[j], orderB[i] })
+
+		db1, _ := openTestDB(t)
+		db2, _ := openTestDB(t)
+		coll1 := db1.Collection("conv", WithBitWidth(2))
+		coll2 := db2.Collection("conv", WithBitWidth(2))
+
+		for _, idx := range orderA {
+			if err := coll1.loadVersion(entries[idx].id, entries[idx].version); err != nil {
+				return false
+			}
+		}
+		for _, idx := range orderB {
+			if err := coll2.loadVersion(entries[idx].id, entries[idx].version); err != nil {
+				return false
+			}
+		}
+
+		// Verify both collections agree on history length for each ID
+		allIDs := map[string]bool{}
+		for _, e := range entries {
+			allIDs[e.id] = true
+		}
+		for id := range allIDs {
+			h1, err1 := coll1.History(id)
+			h2, err2 := coll2.History(id)
+			if err1 != nil || err2 != nil {
+				return false
+			}
+			if len(h1) != len(h2) {
+				return false
+			}
+			// Verify order matches (sortVersions should produce same order)
+			for i := range h1 {
+				if h1[i].LamportClock != h2[i].LamportClock || h1[i].ActorID != h2[i].ActorID {
+					return false
+				}
+			}
+		}
+		return true
+	}, cfg)
+	if err != nil {
+		t.Fatalf("VersionSetsConverge: %v", err)
+	}
+}
+
+// TestHLCWitnessOrderIndependent: Witness(a) then Witness(b) equals Witness(b)
+// then Witness(a) — both clocks reach same Current().
+func TestHLCWitnessOrderIndependent(t *testing.T) {
+	t.Parallel()
+	cfg := &quick.Config{MaxCount: 200}
+	err := quick.Check(func(a, b uint64) bool {
+		clock1 := newHLC("actor1")
+		clock2 := newHLC("actor2")
+
+		clock1.Witness(a)
+		clock1.Witness(b)
+
+		clock2.Witness(b)
+		clock2.Witness(a)
+
+		return clock1.Current() == clock2.Current()
+	}, cfg)
+	if err != nil {
+		t.Fatalf("HLCWitnessOrderIndependent: %v", err)
+	}
+}
+
+// TestIdempotentVersionApplication: applying each version twice via loadVersion
+// should not double the history length.
+func TestIdempotentVersionApplication(t *testing.T) {
+	t.Parallel()
+	cfg := &quick.Config{MaxCount: 200}
+	err := quick.Check(func(seed int64) bool {
+		rng := rand.New(rand.NewSource(seed))
+		n := 2 + rng.Intn(6) // 2-7 versions
+
+		actors := []string{"alice", "bob", "carol"}
+		type versionEntry struct {
+			id      string
+			version Version
+		}
+		entries := make([]versionEntry, n)
+		seen := map[string]bool{} // track unique (id, lamport, actor) combos
+		for i := range entries {
+			emb := make([]float32, 8)
+			for j := range emb {
+				emb[j] = rng.Float32()
+			}
+			actor := actors[rng.Intn(len(actors))]
+			id := fmt.Sprintf("doc-%d", rng.Intn(3))
+			entries[i] = versionEntry{
+				id: id,
+				version: Version{
+					Embedding:    emb,
+					LamportClock: uint64(i + 1),
+					ActorID:      actor,
+				},
+			}
+			seen[fmt.Sprintf("%s|%d|%s", id, i+1, actor)] = true
+		}
+
+		db, _ := openTestDB(t)
+		coll := db.Collection("idem", WithBitWidth(2))
+
+		// Apply each version twice
+		for _, e := range entries {
+			if err := coll.loadVersion(e.id, e.version); err != nil {
+				return false
+			}
+			if err := coll.loadVersion(e.id, e.version); err != nil {
+				return false
+			}
+		}
+
+		// Compute unique version count per ID
+		uniquePerID := map[string]int{}
+		for _, e := range entries {
+			key := fmt.Sprintf("%s|%d|%s", e.id, e.version.LamportClock, e.version.ActorID)
+			_ = key
+			uniquePerID[e.id]++
+		}
+		// Count unique (lamport, actor) per id
+		type pairKey struct {
+			id      string
+			lamport uint64
+			actor   string
+		}
+		uniq := map[pairKey]bool{}
+		for _, e := range entries {
+			uniq[pairKey{e.id, e.version.LamportClock, e.version.ActorID}] = true
+		}
+		uniqueCountPerID := map[string]int{}
+		for k := range uniq {
+			uniqueCountPerID[k.id]++
+		}
+
+		allIDs := map[string]bool{}
+		for _, e := range entries {
+			allIDs[e.id] = true
+		}
+		for id := range allIDs {
+			h, err := coll.History(id)
+			if err != nil {
+				return false
+			}
+			if len(h) != uniqueCountPerID[id] {
+				return false
+			}
+		}
+		return true
+	}, cfg)
+	if err != nil {
+		t.Fatalf("IdempotentVersionApplication: %v", err)
+	}
+}
+
+// TestSortVersionsDeterministic: sorting two copies of the same list produces
+// identical results, and the order is ascending by (LamportClock, ActorID).
+func TestSortVersionsDeterministic(t *testing.T) {
+	t.Parallel()
+	cfg := &quick.Config{MaxCount: 200}
+	err := quick.Check(func(seed int64) bool {
+		rng := rand.New(rand.NewSource(seed))
+		n := 1 + rng.Intn(10)
+		actors := []string{"alice", "bob", "carol", "dave"}
+
+		versions := make([]Version, n)
+		for i := range versions {
+			versions[i] = Version{
+				LamportClock: uint64(rng.Intn(100)),
+				ActorID:      actors[rng.Intn(len(actors))],
+			}
+		}
+
+		// Copy and sort independently
+		copy1 := make([]Version, len(versions))
+		copy2 := make([]Version, len(versions))
+		copy(copy1, versions)
+		copy(copy2, versions)
+
+		sortVersions(copy1)
+		sortVersions(copy2)
+
+		// Verify identical ordering
+		for i := range copy1 {
+			if copy1[i].LamportClock != copy2[i].LamportClock || copy1[i].ActorID != copy2[i].ActorID {
+				return false
+			}
+		}
+
+		// Verify sorted by (LamportClock, ActorID) ascending
+		for i := 1; i < len(copy1); i++ {
+			prev := copy1[i-1]
+			curr := copy1[i]
+			if prev.LamportClock > curr.LamportClock {
+				return false
+			}
+			if prev.LamportClock == curr.LamportClock && prev.ActorID > curr.ActorID {
+				return false
+			}
+		}
+
+		return true
+	}, cfg)
+	if err != nil {
+		t.Fatalf("SortVersionsDeterministic: %v", err)
+	}
+}
+
+// TestMergeSearchResultSetsCommutative: mergeSearchResultSets(k, A, B) equals
+// mergeSearchResultSets(k, B, A).
+func TestMergeSearchResultSetsCommutative(t *testing.T) {
+	t.Parallel()
+	cfg := &quick.Config{MaxCount: 200}
+	err := quick.Check(func(seed int64) bool {
+		rng := rand.New(rand.NewSource(seed))
+		k := 1 + rng.Intn(10)
+
+		makeSet := func(size int, idPrefix string) []SearchResult {
+			results := make([]SearchResult, size)
+			for i := range results {
+				results[i] = SearchResult{
+					ID:      fmt.Sprintf("%s-%d", idPrefix, i),
+					Score:   rng.Float32(),
+					Version: uint64(rng.Intn(100)),
+				}
+			}
+			return results
+		}
+
+		sizeA := rng.Intn(8)
+		sizeB := rng.Intn(8)
+		setA := makeSet(sizeA, "a")
+		setB := makeSet(sizeB, "b")
+
+		mergedAB := mergeSearchResultSets(k, setA, setB)
+		mergedBA := mergeSearchResultSets(k, setB, setA)
+
+		if len(mergedAB) != len(mergedBA) {
+			return false
+		}
+		for i := range mergedAB {
+			if mergedAB[i].ID != mergedBA[i].ID {
+				return false
+			}
+			if mergedAB[i].Score != mergedBA[i].Score {
+				return false
+			}
+		}
+		return true
+	}, cfg)
+	if err != nil {
+		t.Fatalf("MergeSearchResultSetsCommutative: %v", err)
+	}
+}
