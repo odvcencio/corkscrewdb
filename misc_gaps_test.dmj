@@ -1,0 +1,145 @@
+package corkscrewdb
+
+import (
+    "strings"
+    "testing"
+)
+
+unit "EncodeBatch" {
+    then "builtin provider encodes a batch and returns correct dimensions" {
+        p := newBuiltinProvider()
+        vecs, err := p.EncodeBatch([]string{"hello", "world"})
+        expect err == nil
+        expect len(vecs) == 2
+        expect len(vecs[0]) == defaultEmbeddingDim
+        expect len(vecs[1]) == defaultEmbeddingDim
+    }
+}
+
+unit "WithWALSegmentSize" {
+    then "DB opened with small WAL segment size works correctly after writes" {
+        db, _ := openTestDB(t, WithWALSegmentSize(512))
+        coll := db.Collection("wal-seg", WithBitWidth(2))
+
+        vec := make([]float32, 16)
+        for i := range vec {
+            vec[i] = float32(i+1) / 100.0
+        }
+        for i := 0; i < 20; i++ {
+            err := coll.PutVector("v", vec)
+            expect err == nil
+        }
+
+        results, err := coll.SearchVector(vec, 1)
+        expect err == nil
+        expect len(results) == 1
+        expect results[0].ID == "v"
+    }
+}
+
+unit "WithIndexTypeAndHNSWParams" {
+    then "HNSW collection with custom params accepts vectors and returns search results" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("hnsw-coll",
+            WithBitWidth(2),
+            WithIndexType(IndexHNSW),
+            WithHNSWParams(8, 100, 25),
+        )
+
+        for i := 0; i < 10; i++ {
+            vec := make([]float32, 16)
+            for j := range vec {
+                vec[j] = float32((i+1)*(j+1)) / 200.0
+            }
+            err := coll.PutVector("doc", vec)
+            expect err == nil
+        }
+
+        query := make([]float32, 16)
+        for j := range query {
+            query[j] = float32(j+1) / 200.0
+        }
+        results, err := coll.SearchVector(query, 1)
+        expect err == nil
+        expect len(results) >= 1
+    }
+}
+
+unit "CollectionViewHistory" {
+    then "At(clock) History returns versions visible at that clock" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("hist-view", WithBitWidth(2))
+
+        vec1 := make([]float32, 16)
+        for i := range vec1 {
+            vec1[i] = float32(i+1) / 100.0
+        }
+
+        err := coll.PutVector("doc", vec1)
+        expect err == nil
+
+        h1, err := coll.History("doc")
+        expect err == nil
+        expect len(h1) == 1
+        clock1 := h1[0].LamportClock
+
+        vec2 := make([]float32, 16)
+        for i := range vec2 {
+            vec2[i] = float32(i+2) / 100.0
+        }
+        err = coll.PutVector("doc", vec2)
+        expect err == nil
+
+        h2, err := coll.History("doc")
+        expect err == nil
+        expect len(h2) == 2
+
+        view := coll.At(clock1)
+        viewHist, err := view.History("doc")
+        expect err == nil
+        expect len(viewHist) == 1
+        expect viewHist[0].LamportClock == clock1
+    }
+}
+
+unit "AddBatch" {
+    then "flat index AddBatch inserts multiple entries findable by search" {
+        idx := newIndex(16, 2, 42)
+
+        ids := []string{"a", "b", "c"}
+        vecs := [][]float32{
+            {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8},
+            {0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2},
+            {0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5},
+        }
+        texts := []string{"aa", "bb", "cc"}
+        metas := []map[string]string{nil, nil, nil}
+        versions := []uint64{1, 2, 3}
+
+        idx.AddBatch(ids, vecs, texts, metas, versions)
+
+        expect idx.Len() == 3
+        results := idx.Search(vecs[0], 1, nil)
+        expect len(results) == 1
+        expect results[0].ID == "a"
+    }
+}
+
+unit "HNSWIndexAccessors" {
+    then "Dim and BitWidth return correct values" {
+        hw := newHNSWIndex(16, 2, 42, defaultHNSWParams())
+        expect hw.Dim() == 16
+        expect hw.BitWidth() == 2
+    }
+}
+
+unit "WALActivePath" {
+    then "ActivePath on a collection WAL returns a non-empty string ending in .wal" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("wal-path", WithBitWidth(2))
+
+        p := coll.wal.ActivePath()
+        expect p != ""
+        expect strings.HasSuffix(p, ".wal")
+    }
+}
