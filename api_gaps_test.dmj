@@ -1,0 +1,284 @@
+package corkscrewdb
+
+import (
+	"fmt"
+	"math/rand"
+	"testing"
+	"time"
+)
+
+unit "DropCollection" {
+	then "dropped collection is gone, sibling unaffected, drop persists" {
+		db, path := openTestDB(t)
+
+		collA := db.Collection("alpha", WithBitWidth(2))
+		collB := db.Collection("beta", WithBitWidth(2))
+
+		vec := make([]float32, 16)
+		for i := range vec {
+			vec[i] = float32(i+1) / 100.0
+		}
+		err := collA.PutVector("a1", vec)
+		expect err == nil
+		err = collB.PutVector("b1", vec)
+		expect err == nil
+
+		results, err := collA.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 1
+
+		err = db.DropCollection("alpha")
+		expect err == nil
+
+		// Dropped collection search returns empty after drop
+		collAAfter := db.Collection("alpha", WithBitWidth(2))
+		results, err = collAAfter.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 0
+
+		// Sibling collection is unaffected
+		results, err = collB.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 1
+
+		// Close and reopen to verify persistence
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db2.Close()
+
+		collAReopen := db2.Collection("alpha", WithBitWidth(2))
+		results, err = collAReopen.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 0
+
+		collBReopen := db2.Collection("beta", WithBitWidth(2))
+		results, err = collBReopen.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 1
+	}
+
+	then "dropping a collection twice does not error" {
+		db, _ := openTestDB(t)
+
+		coll := db.Collection("gamma", WithBitWidth(2))
+		vec := make([]float32, 16)
+		for i := range vec {
+			vec[i] = float32(i+1) / 100.0
+		}
+		err := coll.PutVector("g1", vec)
+		expect err == nil
+
+		err = db.DropCollection("gamma")
+		expect err == nil
+
+		err = db.DropCollection("gamma")
+		expect err == nil
+	}
+}
+
+unit "RebuildIndex" {
+	then "flat to HNSW still returns results" {
+		db, _ := openTestDB(t)
+		coll := db.Collection("vecs", WithBitWidth(2))
+
+		rng := rand.New(rand.NewSource(42))
+		for i := 0; i < 200; i++ {
+			vec := make([]float32, 16)
+			for j := range vec {
+				vec[j] = rng.Float32()
+			}
+			id := fmt.Sprintf("doc-%d", i)
+			err := coll.PutVector(id, vec)
+			expect err == nil
+		}
+
+		query := make([]float32, 16)
+		for j := range query {
+			query[j] = rng.Float32()
+		}
+
+		flatResults, err := coll.SearchVector(query, 5)
+		expect err == nil
+		expect len(flatResults) > 0
+
+		err = coll.RebuildIndex(IndexHNSW)
+		expect err == nil
+
+		hnswResults, err := coll.SearchVector(query, 5)
+		expect err == nil
+		expect len(hnswResults) > 0
+	}
+
+	then "flat to flat is a no-op with no error" {
+		db, _ := openTestDB(t)
+		coll := db.Collection("flat", WithBitWidth(2))
+
+		vec := []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
+		err := coll.PutVector("v1", vec)
+		expect err == nil
+
+		err = coll.RebuildIndex(IndexFlat)
+		expect err == nil
+
+		results, err := coll.SearchVector(vec, 1)
+		expect err == nil
+		expect len(results) == 1
+	}
+
+	then "HNSW index persists across close and reopen" {
+		db, path := openTestDB(t)
+		coll := db.Collection("persistent", WithBitWidth(2))
+
+		rng := rand.New(rand.NewSource(99))
+		for i := 0; i < 50; i++ {
+			vec := make([]float32, 16)
+			for j := range vec {
+				vec[j] = rng.Float32()
+			}
+			err := coll.PutVector(fmt.Sprintf("p-%d", i), vec)
+			expect err == nil
+		}
+
+		err := coll.RebuildIndex(IndexHNSW)
+		expect err == nil
+
+		query := make([]float32, 16)
+		for j := range query {
+			query[j] = rng.Float32()
+		}
+
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db2.Close()
+
+		coll2 := db2.Collection("persistent", WithBitWidth(2))
+		results, err := coll2.SearchVector(query, 5)
+		expect err == nil
+		expect len(results) > 0
+	}
+}
+
+unit "AtLamportClock" {
+	then "At(0) is empty, At(clock1) returns first only, At(clock2) returns both" {
+		db, _ := openTestDB(t)
+		coll := db.Collection("lc", WithBitWidth(2))
+
+		vec1 := []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
+		vec2 := []float32{0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2}
+
+		err := coll.PutVector("doc1", vec1)
+		expect err == nil
+
+		history1, err := coll.History("doc1")
+		expect err == nil
+		expect len(history1) == 1
+		clock1 := history1[0].LamportClock
+
+		err = coll.PutVector("doc2", vec2)
+		expect err == nil
+
+		history2, err := coll.History("doc2")
+		expect err == nil
+		expect len(history2) == 1
+		clock2 := history2[0].LamportClock
+
+		// At(0) should return empty view
+		view0 := coll.At(0)
+		results0, err := view0.SearchVector(vec1, 10)
+		expect err == nil
+		expect len(results0) == 0
+
+		// At(clock1) should see doc1 only
+		view1 := coll.At(clock1)
+		results1, err := view1.SearchVector(vec1, 10)
+		expect err == nil
+		expect len(results1) == 1
+		expect results1[0].ID == "doc1"
+
+		// At(clock2) should see both docs
+		view2 := coll.At(clock2)
+		results2, err := view2.SearchVector(vec1, 10)
+		expect err == nil
+		expect len(results2) == 2
+	}
+}
+
+func TestAtTime(t *testing.T) {
+	// @serial: swaps package-level wallNow — not safe to run in parallel.
+	// Serial test: swaps package-level wallNow — not safe to run in parallel.
+	oldWallNow := wallNow
+	defer func() { wallNow = oldWallNow }()
+
+	// Three distinct fake millisecond timestamps.
+	const (
+		t1Ms = uint64(1_000_000)
+		t2Ms = uint64(2_000_000)
+		t3Ms = uint64(3_000_000)
+	)
+
+	db, _ := openTestDB(t)
+	coll := db.Collection("timed", WithBitWidth(2))
+
+	vec1 := []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
+	vec2 := []float32{0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2}
+
+	// Put doc1 at t1Ms.
+	wallNow = func() uint64 { return t1Ms }
+	if err := coll.PutVector("td1", vec1); err != nil {
+		t.Fatalf("PutVector td1: %v", err)
+	}
+
+	// Put doc2 at t2Ms.
+	wallNow = func() uint64 { return t2Ms }
+	if err := coll.PutVector("td2", vec2); err != nil {
+		t.Fatalf("PutVector td2: %v", err)
+	}
+
+	// AtTime(prior to t1) — should be empty.
+	tBefore := time.UnixMilli(int64(t1Ms) - 500)
+	viewBefore := coll.AtTime(tBefore)
+	resBefore, err := viewBefore.SearchVector(vec1, 10)
+	if err != nil {
+		t.Fatalf("SearchVector tBefore: %v", err)
+	}
+	if len(resBefore) != 0 {
+		t.Fatalf("expected empty prior to t1, got %d results", len(resBefore))
+	}
+
+	// AtTime(midway between t1 and t2) — should see td1 only.
+	tBetween := time.UnixMilli(int64(t1Ms) + 500)
+	viewBetween := coll.AtTime(tBetween)
+	resBetween, err := viewBetween.SearchVector(vec1, 10)
+	if err != nil {
+		t.Fatalf("SearchVector tBetween: %v", err)
+	}
+	if len(resBetween) != 1 {
+		t.Fatalf("expected 1 result midway t1/t2, got %d", len(resBetween))
+	}
+	if resBetween[0].ID != "td1" {
+		t.Fatalf("expected td1, got %s", resBetween[0].ID)
+	}
+
+	// AtTime(past t3Ms) — should see both.
+	tAfter := time.UnixMilli(int64(t3Ms))
+	viewAfter := coll.AtTime(tAfter)
+	resAfter, err := viewAfter.SearchVector(vec1, 10)
+	if err != nil {
+		t.Fatalf("SearchVector after: %v", err)
+	}
+	if len(resAfter) != 2 {
+		t.Fatalf("expected 2 results after t3, got %d", len(resAfter))
+	}
+}
