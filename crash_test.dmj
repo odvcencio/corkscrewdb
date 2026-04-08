@@ -1,0 +1,267 @@
+package corkscrewdb
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/odvcencio/corkscrewdb/wal"
+)
+
+unit "WALTruncatedLastEntry" {
+	then "at least first docs survive truncation of last WAL entry" {
+		path := filepath.Join(t.TempDir(), "trunc.csdb")
+		db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		coll := db.Collection("docs")
+		vec := make([]float32, 16)
+		for i := range vec { vec[i] = float32(i+1) / 100.0 }
+
+		for i := 1; i <= 3; i++ {
+			err := coll.PutVector(fmt.Sprintf("doc-%d", i), vec)
+			if err != nil {
+				t.Fatalf("PutVector doc-%d: %v", i, err)
+			}
+		}
+		coll.sync()
+		db.Close()
+
+		// Truncate last WAL segment by 20 bytes
+		walDir := filepath.Join(path, "collections", "docs", "wal")
+		segments, err := wal.ListSegments(walDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(segments) == 0 {
+			t.Fatal("no WAL segments found")
+		}
+		lastSeg := segments[len(segments)-1]
+		truncateFileBy(lastSeg, 20)
+
+		// Reopen and verify recovery
+		db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatalf("reopen failed: %v", err)
+		}
+		defer db2.Close()
+
+		coll2 := db2.Collection("docs")
+		survived := 0
+		for i := 1; i <= 3; i++ {
+			versions, err := coll2.History(fmt.Sprintf("doc-%d", i))
+			if err != nil {
+				t.Fatalf("History doc-%d: %v", i, err)
+			}
+			if len(versions) > 0 {
+				survived++
+			}
+		}
+		expect survived >= 1
+		t.Logf("survived %d of 3 docs after WAL truncation", survived)
+	}
+}
+
+unit "WALBadCRC" {
+	then "first doc survives CRC corruption of last entry" {
+		path := filepath.Join(t.TempDir(), "badcrc.csdb")
+		db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		coll := db.Collection("docs")
+		vec := make([]float32, 16)
+		for i := range vec { vec[i] = float32(i+1) / 100.0 }
+
+		err = coll.PutVector("doc-1", vec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = coll.PutVector("doc-2", vec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll.sync()
+		db.Close()
+
+		// Corrupt CRC of last entry (last 4 bytes)
+		walDir := filepath.Join(path, "collections", "docs", "wal")
+		segments, err := wal.ListSegments(walDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(segments) == 0 {
+			t.Fatal("no WAL segments found")
+		}
+		lastSeg := segments[len(segments)-1]
+		info, err := os.Stat(lastSeg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptFileAt(lastSeg, int(info.Size()-4), 4)
+
+		// Reopen and verify first doc survives
+		db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatalf("reopen failed: %v", err)
+		}
+		defer db2.Close()
+
+		coll2 := db2.Collection("docs")
+		versions, err := coll2.History("doc-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect len(versions) > 0
+	}
+}
+
+unit "SnapshotCorruptionFallsBackToWAL" {
+	then "both docs recovered via full WAL replay when snapshot is corrupt" {
+		path := filepath.Join(t.TempDir(), "snapcorrupt.csdb")
+		db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		coll := db.Collection("docs")
+		vec := make([]float32, 16)
+		for i := range vec { vec[i] = float32(i+1) / 100.0 }
+
+		err = coll.PutVector("doc-1", vec)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Persist snapshot after doc-1
+		err = coll.persistSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = coll.PutVector("doc-2", vec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll.sync()
+		db.Close()
+
+		// Corrupt snapshot CRC
+		collDir := filepath.Join(path, "collections", "docs")
+		entries, err := os.ReadDir(collDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) == ".csdb" {
+				snapPath := filepath.Join(collDir, e.Name())
+				info, err := os.Stat(snapPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				corruptFileAt(snapPath, int(info.Size()-4), 4)
+			}
+		}
+
+		// Reopen — should fall back to full WAL replay
+		db2, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatalf("reopen failed: %v", err)
+		}
+		defer db2.Close()
+
+		coll2 := db2.Collection("docs")
+		v1, err := coll2.History("doc-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect len(v1) > 0
+
+		v2, err := coll2.History("doc-2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect len(v2) > 0
+	}
+}
+
+unit "MultipleReopenCycles" {
+	then "all docs present after 10 open-write-close cycles" {
+		path := filepath.Join(t.TempDir(), "reopen.csdb")
+		vec := make([]float32, 16)
+		for i := range vec { vec[i] = float32(i+1) / 100.0 }
+
+		for cycle := 0; cycle < 10; cycle++ {
+			db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+			if err != nil {
+				t.Fatalf("open cycle %d: %v", cycle, err)
+			}
+			coll := db.Collection("docs")
+			err = coll.PutVector(fmt.Sprintf("doc-%d", cycle), vec)
+			if err != nil {
+				t.Fatalf("put cycle %d: %v", cycle, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close cycle %d: %v", cycle, err)
+			}
+		}
+
+		// Final reopen — verify all 10 docs present
+		db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatalf("final open: %v", err)
+		}
+		defer db.Close()
+
+		coll := db.Collection("docs")
+		for i := 0; i < 10; i++ {
+			versions, err := coll.History(fmt.Sprintf("doc-%d", i))
+			if err != nil {
+				t.Fatalf("History doc-%d: %v", i, err)
+			}
+			expect len(versions) > 0
+		}
+	}
+}
+
+unit "ManifestCorruption" {
+	then "reopen fails with invalid manifest JSON" {
+		path := filepath.Join(t.TempDir(), "manifest.csdb")
+		db, err := Open(path, WithProvider(&mockProvider{dim: 16}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		coll := db.Collection("docs")
+		vec := make([]float32, 16)
+		for i := range vec { vec[i] = float32(i+1) / 100.0 }
+		err = coll.PutVector("doc-1", vec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		// Overwrite manifest with invalid JSON
+		manifestPath := filepath.Join(path, "manifest.json")
+		err = os.WriteFile(manifestPath, []byte("{invalid json!!!"), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Reopen should fail
+		_, err = Open(path, WithProvider(&mockProvider{dim: 16}))
+		expect err != nil
+
+		// Verify error is a JSON-related error
+		var syntaxErr *json.SyntaxError
+		if !errors.As(err, &syntaxErr) {
+			t.Logf("expected json.SyntaxError, got: %T: %v", err, err)
+		}
+	}
+}

@@ -443,42 +443,45 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 	if snapshotPath != "" {
 		data, err := snap.LoadFile(snapshotPath)
 		if err != nil {
-			return nil, err
+			// Snapshot is corrupt — fall back to full WAL replay.
+			snapshotPath = ""
 		}
-		if data.BitWidth != 0 {
-			coll.bitWidth = data.BitWidth
-		}
-		if data.Seed != 0 {
-			coll.seed = data.Seed
-		}
-		for _, record := range data.Records {
-			for _, version := range record.Versions {
-				if err := coll.loadVersion(record.ID, Version{
-					Embedding:    cloneVector(version.Embedding),
-					Text:         version.Text,
-					Metadata:     cloneMetadata(version.Metadata),
-					LamportClock: version.LamportClock,
-					ActorID:      version.ActorID,
-					WallClock:    version.WallClock,
-					Tombstone:    version.Tombstone,
-				}); err != nil {
-					return nil, err
+		if snapshotPath != "" {
+			if data.BitWidth != 0 {
+				coll.bitWidth = data.BitWidth
+			}
+			if data.Seed != 0 {
+				coll.seed = data.Seed
+			}
+			for _, record := range data.Records {
+				for _, version := range record.Versions {
+					if err := coll.loadVersion(record.ID, Version{
+						Embedding:    cloneVector(version.Embedding),
+						Text:         version.Text,
+						Metadata:     cloneMetadata(version.Metadata),
+						LamportClock: version.LamportClock,
+						ActorID:      version.ActorID,
+						WallClock:    version.WallClock,
+						Tombstone:    version.Tombstone,
+					}); err != nil {
+						return nil, err
+					}
 				}
 			}
-		}
-		snapshotMax = data.MaxLamport
-		if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
-			coll.mu.Lock()
-			// Check if an HNSW graph file exists; if so, wrap the flat index.
-			if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
-				coll.index = hw
-			} else {
-				coll.index = restored
+			snapshotMax = data.MaxLamport
+			if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
+				coll.mu.Lock()
+				// Check if an HNSW graph file exists; if so, wrap the flat index.
+				if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
+					coll.index = hw
+				} else {
+					coll.index = restored
+				}
+				if coll.dim == 0 {
+					coll.dim = restored.Dim()
+				}
+				coll.mu.Unlock()
 			}
-			if coll.dim == 0 {
-				coll.dim = restored.Dim()
-			}
-			coll.mu.Unlock()
 		}
 	}
 

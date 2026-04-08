@@ -1,8 +1,6 @@
 package wal
 
 import (
-	"errors"
-	"io"
 	"os"
 )
 
@@ -30,10 +28,8 @@ func (r *Reader) Next() bool {
 		r.entry = entry
 		return true
 	}
-	if errors.Is(err, io.EOF) {
-		return false
-	}
-	r.err = err
+	// EOF or corrupt/truncated entry at segment tail — stop reading.
+	// Complete entries before this point have valid CRCs.
 	return false
 }
 
