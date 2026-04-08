@@ -3,6 +3,7 @@ package corkscrewdb
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"strings"
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	defaultGRPCDialTimeout = 5 * time.Second
-	defaultGRPCMaxMessage  = 256 << 20
+	defaultGRPCDialTimeout        = 5 * time.Second
+	defaultGRPCMaxMessage         = 256 << 20
+	defaultReplicaStreamHeartbeat = 2 * time.Second
 )
 
 type grpcClient struct {
@@ -190,6 +192,38 @@ func (c *grpcClient) PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesRespo
 		return RPCPullEntriesResponse{}, normalizeTransportError(err)
 	}
 	return fromProtoPullEntriesResponse(resp), nil
+}
+
+func (c *grpcClient) StreamEntries(ctx context.Context, req RPCPullEntriesRequest, onResponse func(RPCPullEntriesResponse) error) error {
+	maxEntries, err := int32FromInt(req.MaxEntries, "max entries")
+	if err != nil {
+		return err
+	}
+	stream, err := c.client.StreamEntries(ctx, &grpcapi.PullEntriesRequest{
+		Token:      c.token,
+		Collection: req.Collection,
+		SinceClock: req.SinceClock,
+		MaxEntries: maxEntries,
+	})
+	if err != nil {
+		return normalizeTransportError(err)
+	}
+	for {
+		resp, err := stream.Recv()
+		if err == nil {
+			if onResponse == nil {
+				continue
+			}
+			if callErr := onResponse(fromProtoPullEntriesResponse(resp)); callErr != nil {
+				return callErr
+			}
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return normalizeTransportError(err)
+	}
 }
 
 func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error) {
@@ -368,16 +402,40 @@ func (s *grpcServer) Delete(_ context.Context, req *grpcapi.DeleteRequest) (*grp
 }
 
 func (s *grpcServer) PullEntries(_ context.Context, req *grpcapi.PullEntriesRequest) (*grpcapi.PullEntriesResponse, error) {
-	var resp RPCPullEntriesResponse
-	if err := s.handler.PullEntries(RPCPullEntriesRequest{
+	resp, err := s.handler.pullEntries(RPCPullEntriesRequest{
 		Token:      req.GetToken(),
 		Collection: req.GetCollection(),
 		SinceClock: req.GetSinceClock(),
 		MaxEntries: int(req.GetMaxEntries()),
-	}, &resp); err != nil {
+	})
+	if err != nil {
 		return nil, grpcStatusError(err)
 	}
 	return toProtoPullEntriesResponse(resp), nil
+}
+
+func (s *grpcServer) StreamEntries(req *grpcapi.PullEntriesRequest, stream grpcapi.CorkScrewDB_StreamEntriesServer) error {
+	current := req.GetSinceClock()
+	for {
+		resp, err := s.handler.pullEntriesBlocking(RPCPullEntriesRequest{
+			Token:      req.GetToken(),
+			Collection: req.GetCollection(),
+			SinceClock: current,
+			MaxEntries: int(req.GetMaxEntries()),
+		}, defaultReplicaStreamHeartbeat)
+		if err != nil {
+			return grpcStatusError(err)
+		}
+		if err := stream.Send(toProtoPullEntriesResponse(resp)); err != nil {
+			return err
+		}
+		if resp.LatestClock > current {
+			current = resp.LatestClock
+		}
+		if err := stream.Context().Err(); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *grpcServer) PullSnapshot(_ context.Context, req *grpcapi.PullSnapshotRequest) (*grpcapi.PullSnapshotResponse, error) {

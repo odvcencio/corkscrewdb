@@ -17,6 +17,7 @@ service CorkScrewDB {
   rpc SearchVector(SearchVectorRequest) returns (SearchResponse);
   rpc History(HistoryRequest) returns (HistoryResponse);
   rpc PullEntries(PullEntriesRequest) returns (PullEntriesResponse);
+  rpc StreamEntries(PullEntriesRequest) returns (stream PullEntriesResponse);
   rpc PullSnapshot(PullSnapshotRequest) returns (PullSnapshotResponse);
   rpc PrepareRebalance(RebalanceRequest) returns (Empty);
   rpc CommitRebalance(RebalanceRequest) returns (Empty);

@@ -1,6 +1,7 @@
 package corkscrewdb
 
 import (
+	"context"
 	"errors"
 
 	"github.com/odvcencio/corkscrewdb/replica"
@@ -87,6 +88,34 @@ func (p *RPCPuller) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotR
 			Entries:    records,
 		},
 	}, nil
+}
+
+func (p *RPCPuller) StreamEntries(ctx context.Context, req replica.PullRequest, handle func(replica.PullResponse) error) error {
+	return p.remote.StreamEntries(ctx, RPCPullEntriesRequest{
+		Collection: req.Collection,
+		SinceClock: req.SinceClock,
+		MaxEntries: req.MaxEntries,
+	}, func(resp RPCPullEntriesResponse) error {
+		entries := make([]replica.Entry, len(resp.Entries))
+		for i, e := range resp.Entries {
+			entries[i] = replica.Entry{Entry: walpkg.Entry{
+				Kind:         e.Kind,
+				CollectionID: e.CollectionID,
+				VectorID:     e.VectorID,
+				Embedding:    cloneVector(e.Embedding),
+				Text:         e.Text,
+				Metadata:     cloneMetadata(e.Metadata),
+				LamportClock: e.LamportClock,
+				ActorID:      e.ActorID,
+				WallClock:    e.WallClock,
+			}}
+		}
+		return handle(replica.PullResponse{
+			Entries:     entries,
+			LatestClock: resp.LatestClock,
+			HasMore:     resp.HasMore,
+		})
+	})
 }
 
 // DBApplier adapts a local DB to the replica.Applier interface for receiving

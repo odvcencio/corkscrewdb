@@ -1,5 +1,7 @@
 package corkscrewdb
 
+import "context"
+
 // remoteClient abstracts the transport layer for remote DB operations.
 // Implemented by *grpcClient over gRPC.
 type remoteClient interface {
@@ -13,6 +15,7 @@ type remoteClient interface {
 	SearchVector(collection string, query []float32, k int, filters []FilterOption, useAt bool, atLamport uint64, internal bool) ([]SearchResult, error)
 	History(collection, id string, useAt bool, atLamport uint64, internal bool) ([]Version, error)
 	PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesResponse, error)
+	StreamEntries(ctx context.Context, req RPCPullEntriesRequest, onResponse func(RPCPullEntriesResponse) error) error
 	PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error)
 	PrepareRebalance(shards []ShardAssignment) error
 	CommitRebalance(shards []ShardAssignment) error

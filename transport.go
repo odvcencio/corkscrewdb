@@ -407,16 +407,27 @@ type RPCRebalanceRequest struct {
 }
 
 func (s *transportServer) PullEntries(req RPCPullEntriesRequest, resp *RPCPullEntriesResponse) error {
-	if err := s.authorize(req.Token); err != nil {
+	pulled, err := s.pullEntries(req)
+	if err != nil {
 		return err
 	}
+	*resp = pulled
+	return nil
+}
+
+func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntriesResponse, error) {
+	if err := s.authorize(req.Token); err != nil {
+		return RPCPullEntriesResponse{}, err
+	}
 	if s.db.streamer == nil {
-		return nil
+		return RPCPullEntriesResponse{}, nil
 	}
 	pulled := s.db.streamer.Pull(req.Collection, req.SinceClock, req.MaxEntries)
-	resp.LatestClock = pulled.LatestClock
-	resp.HasMore = pulled.HasMore
-	resp.Entries = make([]RPCReplicaEntry, len(pulled.Entries))
+	resp := RPCPullEntriesResponse{
+		LatestClock: pulled.LatestClock,
+		HasMore:     pulled.HasMore,
+		Entries:     make([]RPCReplicaEntry, len(pulled.Entries)),
+	}
 	for i, e := range pulled.Entries {
 		resp.Entries[i] = RPCReplicaEntry{
 			Kind:         e.Kind,
@@ -430,7 +441,36 @@ func (s *transportServer) PullEntries(req RPCPullEntriesRequest, resp *RPCPullEn
 			WallClock:    e.WallClock,
 		}
 	}
-	return nil
+	return resp, nil
+}
+
+func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait time.Duration) (RPCPullEntriesResponse, error) {
+	if err := s.authorize(req.Token); err != nil {
+		return RPCPullEntriesResponse{}, err
+	}
+	if s.db.streamer == nil {
+		return RPCPullEntriesResponse{}, nil
+	}
+	pulled := s.db.streamer.PullBlocking(req.Collection, req.SinceClock, req.MaxEntries, wait)
+	resp := RPCPullEntriesResponse{
+		LatestClock: pulled.LatestClock,
+		HasMore:     pulled.HasMore,
+		Entries:     make([]RPCReplicaEntry, len(pulled.Entries)),
+	}
+	for i, e := range pulled.Entries {
+		resp.Entries[i] = RPCReplicaEntry{
+			Kind:         e.Kind,
+			CollectionID: e.CollectionID,
+			VectorID:     e.VectorID,
+			Embedding:    cloneVector(e.Embedding),
+			Text:         e.Text,
+			Metadata:     cloneMetadata(e.Metadata),
+			LamportClock: e.LamportClock,
+			ActorID:      e.ActorID,
+			WallClock:    e.WallClock,
+		}
+	}
+	return resp, nil
 }
 
 func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPullSnapshotResponse) error {

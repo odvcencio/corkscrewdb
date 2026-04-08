@@ -1,6 +1,7 @@
 package replica
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -45,6 +46,22 @@ func (p *mockPuller) PullEntries(req PullRequest) (PullResponse, error) {
 
 func (p *mockPuller) PullSnapshot(req SnapshotRequest) (SnapshotResponse, error) {
 	return SnapshotResponse{Data: p.snap}, nil
+}
+
+func (p *mockPuller) StreamEntries(ctx context.Context, req PullRequest, handle func(PullResponse) error) error {
+	since := req.SinceClock
+	for {
+		resp := p.streamer.PullBlocking(req.Collection, since, req.MaxEntries, 25*time.Millisecond)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := handle(resp); err != nil {
+			return err
+		}
+		if resp.LatestClock > since {
+			since = resp.LatestClock
+		}
+	}
 }
 
 func TestStreamerRecordAndPull(t *testing.T) {
@@ -184,6 +201,42 @@ func TestFollowerCatchUp(t *testing.T) {
 	if follower.LastClock() != 11 {
 		t.Fatalf("LastClock = %d, want 11", follower.LastClock())
 	}
+}
+
+func TestFollowerStreamsLiveEntries(t *testing.T) {
+	s := NewStreamer()
+	applier := &mockApplier{}
+
+	follower, err := NewFollower(FollowerConfig{
+		Collection: "docs",
+		Applier:    applier,
+		Puller:     &mockPuller{streamer: s},
+		Interval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	follower.Start()
+	t.Cleanup(follower.Stop)
+
+	s.Record("docs", walpkg.Entry{
+		Kind:         walpkg.EntryPut,
+		CollectionID: "docs",
+		VectorID:     "live-1",
+		LamportClock: 7,
+		ActorID:      "a",
+		WallClock:    time.Now().UTC(),
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if applier.entryCount() == 1 && follower.LastClock() == 7 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("stream follower did not apply live entry: count=%d clock=%d", applier.entryCount(), follower.LastClock())
 }
 
 func TestFollowerRequiresFields(t *testing.T) {

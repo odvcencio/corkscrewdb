@@ -14,13 +14,13 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Explicit shard metadata with persisted ownership ranges
 - Manual shard rebalance and handoff via snapshot + WAL catch-up
 - Coordinated cluster rebalance orchestration over gRPC
-- WAL streaming replication (primary → follower with catch-up)
+- Live gRPC WAL streaming replication with snapshot catch-up
 - Cold storage offload (sealed WAL segments + snapshots)
 - Standalone server binary (`cmd/corkscrewdb`)
 
 ## Status
 
-`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, and coordinated rebalance orchestration are in on the dev branch. Remaining roadmap work is richer replication, pluggable cloud offload backends, and the bundled model.
+`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming are in on the dev branch. Remaining roadmap work is stronger replica topologies, pluggable cloud offload backends, and the bundled model.
 
 ## Install
 
@@ -161,7 +161,7 @@ Current behavior:
 
 ## Replication
 
-WAL entries stream from primary to followers via pull-based gRPC. Followers apply entries through CRDT merge (last-writer-wins by HLC value). New followers catch up via snapshot transfer + WAL tail replay.
+WAL entries stream from primary to followers over gRPC. Followers use live entry streams when the transport supports it and fall back to polling otherwise. New followers still catch up via snapshot transfer + WAL tail replay before switching to live updates.
 
 ## Cold Storage Offload
 
@@ -201,6 +201,7 @@ go test -bench=. -benchmem -run=^$ .
 ## Roadmap (v0.2.0)
 
 - Stronger rebalance transactions and rollback semantics
+- Multi-primary / replica topology management
 - Cross-region replication
 - Pluggable S3/GCS storage backends
 - Bundled embedding model

@@ -29,6 +29,7 @@ const (
 	CorkScrewDB_SearchVector_FullMethodName     = "/corkscrewdb.transport.v1.CorkScrewDB/SearchVector"
 	CorkScrewDB_History_FullMethodName          = "/corkscrewdb.transport.v1.CorkScrewDB/History"
 	CorkScrewDB_PullEntries_FullMethodName      = "/corkscrewdb.transport.v1.CorkScrewDB/PullEntries"
+	CorkScrewDB_StreamEntries_FullMethodName    = "/corkscrewdb.transport.v1.CorkScrewDB/StreamEntries"
 	CorkScrewDB_PullSnapshot_FullMethodName     = "/corkscrewdb.transport.v1.CorkScrewDB/PullSnapshot"
 	CorkScrewDB_PrepareRebalance_FullMethodName = "/corkscrewdb.transport.v1.CorkScrewDB/PrepareRebalance"
 	CorkScrewDB_CommitRebalance_FullMethodName  = "/corkscrewdb.transport.v1.CorkScrewDB/CommitRebalance"
@@ -49,6 +50,7 @@ type CorkScrewDBClient interface {
 	SearchVector(ctx context.Context, in *SearchVectorRequest, opts ...grpc.CallOption) (*SearchResponse, error)
 	History(ctx context.Context, in *HistoryRequest, opts ...grpc.CallOption) (*HistoryResponse, error)
 	PullEntries(ctx context.Context, in *PullEntriesRequest, opts ...grpc.CallOption) (*PullEntriesResponse, error)
+	StreamEntries(ctx context.Context, in *PullEntriesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PullEntriesResponse], error)
 	PullSnapshot(ctx context.Context, in *PullSnapshotRequest, opts ...grpc.CallOption) (*PullSnapshotResponse, error)
 	PrepareRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
 	CommitRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
@@ -163,6 +165,25 @@ func (c *corkScrewDBClient) PullEntries(ctx context.Context, in *PullEntriesRequ
 	return out, nil
 }
 
+func (c *corkScrewDBClient) StreamEntries(ctx context.Context, in *PullEntriesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PullEntriesResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CorkScrewDB_ServiceDesc.Streams[0], CorkScrewDB_StreamEntries_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PullEntriesRequest, PullEntriesResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CorkScrewDB_StreamEntriesClient = grpc.ServerStreamingClient[PullEntriesResponse]
+
 func (c *corkScrewDBClient) PullSnapshot(ctx context.Context, in *PullSnapshotRequest, opts ...grpc.CallOption) (*PullSnapshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PullSnapshotResponse)
@@ -217,6 +238,7 @@ type CorkScrewDBServer interface {
 	SearchVector(context.Context, *SearchVectorRequest) (*SearchResponse, error)
 	History(context.Context, *HistoryRequest) (*HistoryResponse, error)
 	PullEntries(context.Context, *PullEntriesRequest) (*PullEntriesResponse, error)
+	StreamEntries(*PullEntriesRequest, grpc.ServerStreamingServer[PullEntriesResponse]) error
 	PullSnapshot(context.Context, *PullSnapshotRequest) (*PullSnapshotResponse, error)
 	PrepareRebalance(context.Context, *RebalanceRequest) (*Empty, error)
 	CommitRebalance(context.Context, *RebalanceRequest) (*Empty, error)
@@ -259,6 +281,9 @@ func (UnimplementedCorkScrewDBServer) History(context.Context, *HistoryRequest) 
 }
 func (UnimplementedCorkScrewDBServer) PullEntries(context.Context, *PullEntriesRequest) (*PullEntriesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PullEntries not implemented")
+}
+func (UnimplementedCorkScrewDBServer) StreamEntries(*PullEntriesRequest, grpc.ServerStreamingServer[PullEntriesResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamEntries not implemented")
 }
 func (UnimplementedCorkScrewDBServer) PullSnapshot(context.Context, *PullSnapshotRequest) (*PullSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PullSnapshot not implemented")
@@ -472,6 +497,17 @@ func _CorkScrewDB_PullEntries_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CorkScrewDB_StreamEntries_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PullEntriesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(CorkScrewDBServer).StreamEntries(m, &grpc.GenericServerStream[PullEntriesRequest, PullEntriesResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CorkScrewDB_StreamEntriesServer = grpc.ServerStreamingServer[PullEntriesResponse]
+
 func _CorkScrewDB_PullSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PullSnapshotRequest)
 	if err := dec(in); err != nil {
@@ -608,6 +644,12 @@ var CorkScrewDB_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CorkScrewDB_PruneRebalance_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamEntries",
+			Handler:       _CorkScrewDB_StreamEntries_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "corkscrewdb.proto",
 }

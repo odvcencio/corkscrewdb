@@ -1,6 +1,7 @@
 package corkscrewdb
 
 import (
+	"context"
 	"net"
 	"path/filepath"
 	"testing"
@@ -78,6 +79,34 @@ func (a *rpcPullerAdapter) PullSnapshot(req replica.SnapshotRequest) (replica.Sn
 			Entries:    records,
 		},
 	}, nil
+}
+
+func (a *rpcPullerAdapter) StreamEntries(ctx context.Context, req replica.PullRequest, handle func(replica.PullResponse) error) error {
+	return a.client.StreamEntries(ctx, RPCPullEntriesRequest{
+		Collection: req.Collection,
+		SinceClock: req.SinceClock,
+		MaxEntries: req.MaxEntries,
+	}, func(resp RPCPullEntriesResponse) error {
+		entries := make([]replica.Entry, len(resp.Entries))
+		for i, e := range resp.Entries {
+			entries[i] = replica.Entry{Entry: walpkg.Entry{
+				Kind:         e.Kind,
+				CollectionID: e.CollectionID,
+				VectorID:     e.VectorID,
+				Embedding:    e.Embedding,
+				Text:         e.Text,
+				Metadata:     e.Metadata,
+				LamportClock: e.LamportClock,
+				ActorID:      e.ActorID,
+				WallClock:    e.WallClock,
+			}}
+		}
+		return handle(replica.PullResponse{
+			Entries:     entries,
+			LatestClock: resp.LatestClock,
+			HasMore:     resp.HasMore,
+		})
+	})
 }
 
 // dbApplier adapts a DB to the replica.Applier interface.
@@ -282,4 +311,73 @@ func TestReplicationCatchUp(t *testing.T) {
 	if len(h2) != 1 {
 		t.Fatalf("follower new-1 history len = %d, want 1", len(h2))
 	}
+}
+
+func TestReplicationStreamingFollowerReceivesLiveWrites(t *testing.T) {
+	primaryPath := filepath.Join(t.TempDir(), "primary-stream.csdb")
+	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primaryDB.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- primaryDB.Serve(listener) }()
+
+	followerPath := filepath.Join(t.TempDir(), "follower-stream.csdb")
+	followerDB, err := Open(followerPath, WithProvider(&mockProvider{dim: 16}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer followerDB.Close()
+
+	client, err := Connect(listener.Addr().String(), WithToken("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	puller := &rpcPullerAdapter{client: client.remote}
+	applier := &dbApplier{db: followerDB}
+
+	follower, err := replica.NewFollower(replica.FollowerConfig{
+		Collection: "docs",
+		Applier:    applier,
+		Puller:     puller,
+		Interval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	follower.Start()
+	defer follower.Stop()
+
+	coll := primaryDB.Collection("docs", WithBitWidth(2))
+	if err := coll.Put("doc-live", Entry{Text: "live stream replication"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		history, err := followerDB.Collection("docs").History("doc-live")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(history) == 1 && history[0].Text == "live stream replication" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	history, err := followerDB.Collection("docs").History("doc-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("stream follower did not receive live write: %+v", history)
 }

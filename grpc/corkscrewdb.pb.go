@@ -2107,8 +2107,7 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\arecords\x18\x06 \x03(\v2(.corkscrewdb.transport.v1.SnapshotRecordR\arecords\"k\n" +
 	"\x10RebalanceRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12A\n" +
-	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards2\xcd\n" +
-	"\n" +
+	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards2\xbd\v\n" +
 	"\vCorkScrewDB\x12U\n" +
 	"\x04Info\x12%.corkscrewdb.transport.v1.InfoRequest\x1a&.corkscrewdb.transport.v1.InfoResponse\x12f\n" +
 	"\x10EnsureCollection\x121.corkscrewdb.transport.v1.EnsureCollectionRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12b\n" +
@@ -2119,7 +2118,8 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\x06Search\x12'.corkscrewdb.transport.v1.SearchRequest\x1a(.corkscrewdb.transport.v1.SearchResponse\x12g\n" +
 	"\fSearchVector\x12-.corkscrewdb.transport.v1.SearchVectorRequest\x1a(.corkscrewdb.transport.v1.SearchResponse\x12^\n" +
 	"\aHistory\x12(.corkscrewdb.transport.v1.HistoryRequest\x1a).corkscrewdb.transport.v1.HistoryResponse\x12j\n" +
-	"\vPullEntries\x12,.corkscrewdb.transport.v1.PullEntriesRequest\x1a-.corkscrewdb.transport.v1.PullEntriesResponse\x12m\n" +
+	"\vPullEntries\x12,.corkscrewdb.transport.v1.PullEntriesRequest\x1a-.corkscrewdb.transport.v1.PullEntriesResponse\x12n\n" +
+	"\rStreamEntries\x12,.corkscrewdb.transport.v1.PullEntriesRequest\x1a-.corkscrewdb.transport.v1.PullEntriesResponse0\x01\x12m\n" +
 	"\fPullSnapshot\x12-.corkscrewdb.transport.v1.PullSnapshotRequest\x1a..corkscrewdb.transport.v1.PullSnapshotResponse\x12_\n" +
 	"\x10PrepareRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12^\n" +
 	"\x0fCommitRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12]\n" +
@@ -2207,26 +2207,28 @@ var file_corkscrewdb_proto_depIdxs = []int32{
 	16, // 28: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
 	18, // 29: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
 	20, // 30: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
-	23, // 31: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
-	27, // 32: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	27, // 33: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	27, // 34: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	9,  // 35: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
-	0,  // 36: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 37: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 38: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 39: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 40: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
-	17, // 41: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
-	17, // 42: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
-	19, // 43: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
-	22, // 44: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
-	26, // 45: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
-	0,  // 46: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 47: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 48: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	35, // [35:49] is the sub-list for method output_type
-	21, // [21:35] is the sub-list for method input_type
+	20, // 31: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
+	23, // 32: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
+	27, // 33: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	27, // 34: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	27, // 35: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	9,  // 36: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
+	0,  // 37: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 38: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 39: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 40: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 41: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
+	17, // 42: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
+	17, // 43: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
+	19, // 44: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
+	22, // 45: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	22, // 46: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	26, // 47: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
+	0,  // 48: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 49: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	0,  // 50: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	36, // [36:51] is the sub-list for method output_type
+	21, // [21:36] is the sub-list for method input_type
 	21, // [21:21] is the sub-list for extension type_name
 	21, // [21:21] is the sub-list for extension extendee
 	0,  // [0:21] is the sub-list for field type_name

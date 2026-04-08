@@ -1,6 +1,7 @@
 package replica
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -76,12 +77,14 @@ type Applier interface {
 type Streamer struct {
 	mu      sync.RWMutex
 	entries map[string][]Entry // collection -> sorted entries
+	signals map[string]chan struct{}
 }
 
 // NewStreamer creates a new replication streamer.
 func NewStreamer() *Streamer {
 	return &Streamer{
 		entries: make(map[string][]Entry),
+		signals: make(map[string]chan struct{}),
 	}
 }
 
@@ -90,6 +93,9 @@ func (s *Streamer) Record(collection string, walEntry walpkg.Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries[collection] = append(s.entries[collection], Entry{Entry: walEntry})
+	ch := s.signalLocked(collection)
+	close(ch)
+	s.signals[collection] = make(chan struct{})
 }
 
 // Pull returns entries for a collection after sinceClock, up to maxEntries.
@@ -100,6 +106,46 @@ func (s *Streamer) Pull(collection string, sinceClock uint64, maxEntries int) Pu
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.pullLocked(collection, sinceClock, maxEntries)
+}
+
+// PullBlocking waits up to wait for new entries after sinceClock.
+func (s *Streamer) PullBlocking(collection string, sinceClock uint64, maxEntries int, wait time.Duration) PullResponse {
+	resp, ch := s.pullState(collection, sinceClock, maxEntries)
+	if len(resp.Entries) > 0 || wait <= 0 {
+		return resp
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ch:
+		return s.Pull(collection, sinceClock, maxEntries)
+	case <-timer.C:
+		return PullResponse{LatestClock: s.LatestClock(collection)}
+	}
+}
+
+func (s *Streamer) pullState(collection string, sinceClock uint64, maxEntries int) (PullResponse, chan struct{}) {
+	if maxEntries <= 0 {
+		maxEntries = 1000
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pullLocked(collection, sinceClock, maxEntries), s.signalLocked(collection)
+}
+
+func (s *Streamer) signalLocked(collection string) chan struct{} {
+	ch := s.signals[collection]
+	if ch == nil {
+		ch = make(chan struct{})
+		s.signals[collection] = ch
+	}
+	return ch
+}
+
+func (s *Streamer) pullLocked(collection string, sinceClock uint64, maxEntries int) PullResponse {
 	all := s.entries[collection]
 	if len(all) == 0 {
 		return PullResponse{}
@@ -159,6 +205,12 @@ type Follower struct {
 type Puller interface {
 	PullEntries(req PullRequest) (PullResponse, error)
 	PullSnapshot(req SnapshotRequest) (SnapshotResponse, error)
+}
+
+// StreamPuller provides continuous replication updates when available.
+type StreamPuller interface {
+	Puller
+	StreamEntries(ctx context.Context, req PullRequest, handle func(PullResponse) error) error
 }
 
 // FollowerConfig configures a replication follower.
@@ -246,6 +298,10 @@ func (f *Follower) LastClock() uint64 {
 
 func (f *Follower) loop() {
 	defer close(f.doneCh)
+	if streamer, ok := f.puller.(StreamPuller); ok {
+		f.streamLoop(streamer)
+		return
+	}
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
 	for {
@@ -256,6 +312,66 @@ func (f *Follower) loop() {
 			_ = f.pullOnce("")
 		}
 	}
+}
+
+func (f *Follower) streamLoop(streamer StreamPuller) {
+	const retryDelay = 250 * time.Millisecond
+	for {
+		if f.stopped() {
+			return
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelDone := make(chan struct{})
+		go func() {
+			select {
+			case <-f.stopCh:
+				cancel()
+			case <-cancelDone:
+			}
+		}()
+
+		err := streamer.StreamEntries(ctx, PullRequest{
+			Collection: f.collection,
+			SinceClock: f.LastClock(),
+			MaxEntries: 1000,
+		}, f.applyPullResponse)
+		close(cancelDone)
+		cancel()
+
+		if f.stopped() {
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		time.Sleep(retryDelay)
+	}
+}
+
+func (f *Follower) stopped() bool {
+	select {
+	case <-f.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f *Follower) applyPullResponse(resp PullResponse) error {
+	for _, entry := range resp.Entries {
+		if err := f.applier.ApplyReplicatedEntry(f.collection, entry); err != nil {
+			return err
+		}
+	}
+	if resp.LatestClock != 0 {
+		f.mu.Lock()
+		if resp.LatestClock > f.lastClock {
+			f.lastClock = resp.LatestClock
+		}
+		f.mu.Unlock()
+	}
+	return nil
 }
 
 func (f *Follower) pullOnce(token string) error {
@@ -273,16 +389,11 @@ func (f *Follower) pullOnce(token string) error {
 		if err != nil {
 			return err
 		}
-		for _, entry := range resp.Entries {
-			if err := f.applier.ApplyReplicatedEntry(f.collection, entry); err != nil {
-				return err
-			}
+		if err := f.applyPullResponse(resp); err != nil {
+			return err
 		}
-		if len(resp.Entries) > 0 {
+		if resp.LatestClock > clock {
 			clock = resp.LatestClock
-			f.mu.Lock()
-			f.lastClock = clock
-			f.mu.Unlock()
 		}
 		if !resp.HasMore {
 			break
