@@ -78,13 +78,13 @@ type DB struct {
 	walSegmentSize int64
 	peers          []string
 	token          string
-	remote         *rpcClient
+	remote         remoteClient
 	serveAddr      string
 
 	mu          sync.RWMutex
 	manifest    manifest
 	collections map[string]*Collection
-	peerClients map[string]*rpcClient
+	peerClients map[string]remoteClient
 	streamer    *replica.Streamer
 	closed      bool
 }
@@ -154,7 +154,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		token:          cfg.token,
 		manifest:       manifestData,
 		collections:    make(map[string]*Collection),
-		peerClients:    make(map[string]*rpcClient),
+		peerClients:    make(map[string]remoteClient),
 		streamer:       replica.NewStreamer(),
 	}
 	if err := db.saveManifest(); err != nil {

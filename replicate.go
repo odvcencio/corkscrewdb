@@ -10,7 +10,7 @@ import (
 // RPCPuller adapts a remote DB connection (from Connect) to the
 // replica.Puller interface for setting up replication followers.
 type RPCPuller struct {
-	remote *rpcClient
+	remote remoteClient
 }
 
 // NewRPCPuller creates a Puller from a DB opened via Connect.

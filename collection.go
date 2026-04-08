@@ -20,7 +20,7 @@ type Collection struct {
 	bitWidth int
 	seed     int64
 	encoder  *encoder
-	remote   *rpcClient
+	remote   remoteClient
 
 	mu      sync.RWMutex
 	index   *index
@@ -40,7 +40,7 @@ type CollectionView struct {
 	history map[string][]Version
 	err     error
 	dim     int
-	remote  *rpcClient
+	remote  remoteClient
 	useAt   bool
 	atClock uint64
 }

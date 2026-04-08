@@ -10,9 +10,9 @@ import (
 	walpkg "github.com/odvcencio/corkscrewdb/wal"
 )
 
-// rpcPullerAdapter adapts the rpcClient to the replica.Puller interface.
+// rpcPullerAdapter adapts the remoteClient to the replica.Puller interface.
 type rpcPullerAdapter struct {
-	client *rpcClient
+	client remoteClient
 }
 
 func (a *rpcPullerAdapter) PullEntries(req replica.PullRequest) (replica.PullResponse, error) {

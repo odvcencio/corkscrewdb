@@ -61,7 +61,7 @@ func (db *DB) isLocalOwner(collection, id string) bool {
 	return db.ownerFor(collection, id) == db.localMemberID()
 }
 
-func (db *DB) peerClient(addr string) (*rpcClient, error) {
+func (db *DB) peerClient(addr string) (remoteClient, error) {
 	if addr == "" {
 		return nil, errors.New("corkscrewdb: peer address is required")
 	}
@@ -101,7 +101,7 @@ func (db *DB) peerClient(addr string) (*rpcClient, error) {
 
 func (db *DB) closePeerClients() error {
 	db.mu.Lock()
-	clients := make([]*rpcClient, 0, len(db.peerClients))
+	clients := make([]remoteClient, 0, len(db.peerClients))
 	for addr, client := range db.peerClients {
 		if client != nil {
 			clients = append(clients, client)
