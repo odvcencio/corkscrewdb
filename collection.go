@@ -23,7 +23,7 @@ type Collection struct {
 	remote   remoteClient
 
 	mu      sync.RWMutex
-	index   *index
+	index   indexer
 	history map[string][]Version
 	clock   *HLC
 	wal     *walpkg.Manager
@@ -36,7 +36,7 @@ type Collection struct {
 type CollectionView struct {
 	name    string
 	encoder *encoder
-	index   *index
+	index   indexer
 	history map[string][]Version
 	err     error
 	dim     int
@@ -389,6 +389,50 @@ func (v *CollectionView) History(id string) ([]Version, error) {
 	return out, nil
 }
 
+// RebuildIndex rebuilds the collection's vector index using the target algorithm.
+// All existing vectors are copied into the new index structure.
+func (c *Collection) RebuildIndex(target IndexType) error {
+	if err := c.usable(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.index == nil {
+		return nil
+	}
+
+	switch target {
+	case IndexHNSW:
+		hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, defaultHNSWParams())
+		// Re-insert all live entries using the raw embeddings from history.
+		for id, versions := range c.history {
+			if len(versions) == 0 {
+				continue
+			}
+			latest := versions[len(versions)-1]
+			if latest.Tombstone || len(latest.Embedding) == 0 {
+				continue
+			}
+			hw.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
+		}
+		c.index = hw
+	case IndexFlat:
+		switch idx := c.index.(type) {
+		case *index:
+			return nil // already flat
+		case *hnswIndex:
+			c.index = idx.flat
+		default:
+			return errors.New("corkscrewdb: unknown index type")
+		}
+	default:
+		return fmt.Errorf("corkscrewdb: unsupported index type %d", target)
+	}
+	c.dirty = true
+	return nil
+}
+
 func (c *Collection) usable() error {
 	if c == nil {
 		return errors.New("corkscrewdb: nil collection")
@@ -577,8 +621,18 @@ func (c *Collection) persistSnapshot() error {
 	if err := snap.WriteFile(path, data); err != nil {
 		return err
 	}
-	if err := saveIndexFile(c.db.collectionIndexPath(c.name), c.index, maxLamport); err != nil {
-		return err
+	if flat, ok := c.index.(*index); ok {
+		if err := saveIndexFile(c.db.collectionIndexPath(c.name), flat, maxLamport); err != nil {
+			return err
+		}
+	}
+	if hw, ok := c.index.(*hnswIndex); ok {
+		if err := saveIndexFile(c.db.collectionIndexPath(c.name), hw.flat, maxLamport); err != nil {
+			return err
+		}
+		if err := saveHNSWFile(c.db.collectionHNSWPath(c.name), hw); err != nil {
+			return err
+		}
 	}
 	c.mu.Lock()
 	if c.clock.Current() == maxLamport {

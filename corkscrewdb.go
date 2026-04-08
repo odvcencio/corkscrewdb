@@ -438,7 +438,12 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 		snapshotMax = data.MaxLamport
 		if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
 			coll.mu.Lock()
-			coll.index = restored
+			// Check if an HNSW graph file exists; if so, wrap the flat index.
+			if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
+				coll.index = hw
+			} else {
+				coll.index = restored
+			}
 			if coll.dim == 0 {
 				coll.dim = restored.Dim()
 			}
@@ -546,6 +551,10 @@ func (db *DB) collectionIndexPath(name string) string {
 	return filepath.Join(db.collectionIndexDir(name), "quantized.tqi")
 }
 
+func (db *DB) collectionHNSWPath(name string) string {
+	return filepath.Join(db.collectionIndexDir(name), "graph.hnsw")
+}
+
 func (db *DB) collectionWALDir(name string) string {
 	return filepath.Join(db.collectionDir(name), "wal")
 }
@@ -614,4 +623,15 @@ func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 		return nil, 0, err
 	}
 	return loadIndexFile(path)
+}
+
+func (db *DB) tryLoadHNSWIndex(name string, flat *index) (*hnswIndex, error) {
+	path := db.collectionHNSWPath(name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return loadHNSWFile(path, flat, defaultHNSWParams())
 }
