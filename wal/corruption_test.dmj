@@ -74,23 +74,6 @@ unit "WALEntryDecodeEdgeCases" {
     }
 }
 
-func FuzzWALEntryDecode(f *testing.F) {
-    entry := Entry{
-        Kind:         EntryPut,
-        CollectionID: "docs",
-        VectorID:     "v1",
-        Embedding:    []float32{1.0, 2.0, 3.0},
-        Text:         "hello",
-        Metadata:     map[string]string{"k": "v"},
-        LamportClock: 42,
-        ActorID:      "actor-1",
-        WallClock:    time.Now().UTC().Truncate(time.Nanosecond),
-    }
-    seed, _ := entry.MarshalBinary()
-    f.Add(seed)
-    f.Add([]byte(nil))
-    f.Add([]byte{0x00, 0x01, 0x02})
-    f.Fuzz(func(t *testing.T, data []byte) {
-        _, _ = ReadEntry(bytes.NewReader(data))
-    })
+fuzz "WALEntryDecode" with (data []byte) {
+    _, _ = ReadEntry(bytes.NewReader(data))
 }
