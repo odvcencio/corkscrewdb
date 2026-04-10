@@ -2,7 +2,7 @@
 
 All notable changes to CorkScrewDB are documented here.
 
-## v0.2.0-dev — 2026-04-07
+## v0.2.0 — 2026-04-10
 
 ### Added
 
