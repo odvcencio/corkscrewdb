@@ -20,7 +20,7 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 ## Status
 
-`v0.2.0-dev` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming are in on the dev branch. Remaining roadmap work is stronger replica topologies, pluggable cloud offload backends, and the bundled model.
+`v0.2.0` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming have shipped.
 
 ## Install
 
@@ -197,14 +197,6 @@ Recall@10 at 64-dim, 4-bit: 0.80 (vs exact brute-force).
 ```bash
 go test -bench=. -benchmem -run=^$ .
 ```
-
-## Roadmap (v0.2.0)
-
-- Stronger rebalance transactions and rollback semantics
-- Multi-primary / replica topology management
-- Cross-region replication
-- Pluggable S3/GCS storage backends
-- Bundled embedding model
 
 ## Development
 
