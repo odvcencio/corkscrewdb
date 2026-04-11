@@ -3,7 +3,7 @@ module github.com/odvcencio/corkscrewdb
 go 1.25.1
 
 require (
-	github.com/odvcencio/manta v0.0.0
+	github.com/odvcencio/manta v0.0.13
 	github.com/odvcencio/turboquant v0.1.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -18,7 +18,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/odvcencio/manta => ../manta
 
 replace github.com/odvcencio/mll => ../mll
