@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	mantaruntime "github.com/odvcencio/barracuda/runtime"
-	"github.com/odvcencio/barracuda/runtime/backends/cuda"
-	"github.com/odvcencio/barracuda/runtime/backends/metal"
+	mantaruntime "github.com/odvcencio/manta/runtime"
+	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 // LoadMantaProvider loads a Manta embedding package from disk.
@@ -19,13 +19,6 @@ func LoadMantaProvider(artifactPath string) (EmbeddingProvider, error) {
 	return loadMantaProvider(loadMantaConfig{
 		ArtifactPath: artifactPath,
 	})
-}
-
-// LoadBarracudaProvider loads a Manta embedding package from disk.
-//
-// Deprecated: use LoadMantaProvider.
-func LoadBarracudaProvider(artifactPath string) (EmbeddingProvider, error) {
-	return LoadMantaProvider(artifactPath)
 }
 
 type mantaProvider struct {

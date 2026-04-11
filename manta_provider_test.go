@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	mantaruntime "github.com/odvcencio/barracuda/runtime"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	mantaruntime "github.com/odvcencio/manta/runtime"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 func TestLoadMantaProviderEncodes(t *testing.T) {
