@@ -43,7 +43,7 @@ func (f dbOptionFunc) applyDB(cfg *dbConfig) {
 	f(cfg)
 }
 
-// WithProvider overrides the default built-in text embedding provider.
+// WithProvider overrides the default embedded Manta text embedding provider.
 func WithProvider(provider EmbeddingProvider) Option {
 	return dbOptionFunc(func(cfg *dbConfig) {
 		cfg.provider = provider
@@ -141,7 +141,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		}
 	}
 	if !cfg.providerSet {
-		cfg.provider = newBuiltinProvider()
+		cfg.provider = newDefaultProvider()
 	}
 	cleanPath := filepath.Clean(path)
 	if err := ensureDBDir(cleanPath); err != nil {
