@@ -1,0 +1,6 @@
+docs/
+.graft/
+**/*.dmj
+**/testdata/
+**/*_test.go
+corkscrewdb
