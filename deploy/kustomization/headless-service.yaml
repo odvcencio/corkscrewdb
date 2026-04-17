@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: corkscrewdb
+  namespace: m31labs
+  labels:
+    app: corkscrewdb
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: corkscrewdb
+  ports:
+    - name: grpc
+      port: 4040
+      targetPort: 4040
+      protocol: TCP

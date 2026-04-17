@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: corkscrewdb-rw
+  namespace: m31labs
+  labels:
+    app: corkscrewdb
+    role: rw
+spec:
+  type: ClusterIP
+  selector:
+    app: corkscrewdb
+    statefulset.kubernetes.io/pod-name: corkscrewdb-0
+  ports:
+    - name: grpc
+      port: 4040
+      targetPort: 4040
+      protocol: TCP
