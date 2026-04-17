@@ -153,7 +153,7 @@ func runServer(ctx context.Context, opts serverOpts) error {
 		followers []*replica.Follower
 	)
 	if opts.ReplicateFrom != "" {
-		remote, followers, err = startReplicationFollowers(db, opts)
+		remote, followers, err = startReplicationFollowers(ctx, db, opts)
 		if err != nil {
 			if offloadMgr != nil {
 				offloadMgr.Stop()
@@ -179,7 +179,22 @@ func runServer(ctx context.Context, opts serverOpts) error {
 	}
 
 	if opts.ReadyCh != nil {
-		opts.ReadyCh <- listener.Addr()
+		select {
+		case opts.ReadyCh <- listener.Addr():
+		case <-ctx.Done():
+			_ = listener.Close()
+			for _, f := range followers {
+				f.Stop()
+			}
+			if remote != nil {
+				_ = remote.Close()
+			}
+			if offloadMgr != nil {
+				offloadMgr.Stop()
+			}
+			_ = db.Close()
+			return ctx.Err()
+		}
 	}
 
 	doneCh := make(chan error, 1)
@@ -224,18 +239,46 @@ func runServer(ctx context.Context, opts serverOpts) error {
 	return errors.Join(errs...)
 }
 
+// replicationStartupTimeout bounds how long the connect + catch-up phase
+// is allowed to take before startReplicationFollowers gives up. The
+// parent context can still cancel earlier; this is just a ceiling so
+// startup does not hang if the primary is wedged.
+const replicationStartupTimeout = 30 * time.Second
+
+// dedupeCollections returns the slice unchanged iff every entry is unique,
+// otherwise an error naming the first duplicate. Duplicates would otherwise
+// silently create two followers for the same collection and double the
+// primary's replication load.
+func dedupeCollections(names []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			return nil, fmt.Errorf("duplicate replicate collection %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return names, nil
+}
+
 // startReplicationFollowers connects to the configured primary, builds one
 // Follower per replicated collection backed by a shared DBApplier, catches
-// each one up, and starts its streaming loop.
-func startReplicationFollowers(db *corkscrewdb.DB, opts serverOpts) (*corkscrewdb.DB, []*replica.Follower, error) {
-	remoteOpts := []corkscrewdb.Option{}
-	if opts.Token != "" {
-		remoteOpts = append(remoteOpts, corkscrewdb.WithToken(opts.Token))
-	}
-	remote, err := corkscrewdb.Connect(opts.ReplicateFrom, remoteOpts...)
+// each one up, and starts its streaming loop. Connect + catch-up are
+// bounded by replicationStartupTimeout and honor ctx cancellation so a
+// wedged primary does not block shutdown indefinitely.
+func startReplicationFollowers(ctx context.Context, db *corkscrewdb.DB, opts serverOpts) (*corkscrewdb.DB, []*replica.Follower, error) {
+	collections, err := dedupeCollections(splitAndTrim(opts.ReplicateCollections, ","))
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect primary: %w", err)
+		return nil, nil, err
 	}
+
+	startupCtx, cancel := context.WithTimeout(ctx, replicationStartupTimeout)
+	defer cancel()
+
+	remote, err := connectPrimary(startupCtx, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	puller, err := corkscrewdb.NewRPCPuller(remote)
 	if err != nil {
 		_ = remote.Close()
@@ -248,9 +291,19 @@ func startReplicationFollowers(db *corkscrewdb.DB, opts serverOpts) (*corkscrewd
 		return nil, nil, fmt.Errorf("db applier: %w", err)
 	}
 
-	collections := splitAndTrim(opts.ReplicateCollections, ",")
 	followers := make([]*replica.Follower, 0, len(collections))
+	cleanup := func() {
+		for _, prev := range followers {
+			prev.Stop()
+		}
+		_ = remote.Close()
+	}
+
 	for _, name := range collections {
+		if err := startupCtx.Err(); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("replication startup canceled: %w", err)
+		}
 		f, err := replica.NewFollower(replica.FollowerConfig{
 			Collection: name,
 			Applier:    applier,
@@ -258,21 +311,76 @@ func startReplicationFollowers(db *corkscrewdb.DB, opts serverOpts) (*corkscrewd
 			Interval:   500 * time.Millisecond,
 		})
 		if err != nil {
-			for _, prev := range followers {
-				prev.Stop()
-			}
-			_ = remote.Close()
+			cleanup()
 			return nil, nil, fmt.Errorf("new follower %q: %w", name, err)
 		}
-		if err := f.CatchUp(opts.Token); err != nil {
-			for _, prev := range followers {
-				prev.Stop()
-			}
-			_ = remote.Close()
+		if err := catchUpWithContext(startupCtx, f, opts.Token); err != nil {
+			cleanup()
 			return nil, nil, fmt.Errorf("catchup %q: %w", name, err)
 		}
 		f.Start()
 		followers = append(followers, f)
 	}
 	return remote, followers, nil
+}
+
+// connectPrimary dials the configured primary with ctx-aware cancellation.
+// corkscrewdb.Connect does not currently accept a context, so we drive the
+// dial from a goroutine and race its completion against ctx.Done.
+func connectPrimary(ctx context.Context, opts serverOpts) (*corkscrewdb.DB, error) {
+	remoteOpts := []corkscrewdb.Option{}
+	if opts.Token != "" {
+		remoteOpts = append(remoteOpts, corkscrewdb.WithToken(opts.Token))
+	}
+	type result struct {
+		db  *corkscrewdb.DB
+		err error
+	}
+	doneCh := make(chan result, 1)
+	go func() {
+		db, err := corkscrewdb.Connect(opts.ReplicateFrom, remoteOpts...)
+		doneCh <- result{db: db, err: err}
+	}()
+	select {
+	case r := <-doneCh:
+		if r.err != nil {
+			return nil, fmt.Errorf("connect primary: %w", r.err)
+		}
+		// Re-check ctx: Connect may have returned after cancellation.
+		if err := ctx.Err(); err != nil {
+			_ = r.db.Close()
+			return nil, fmt.Errorf("connect primary canceled: %w", err)
+		}
+		return r.db, nil
+	case <-ctx.Done():
+		// Let the orphan Connect goroutine finish in the background and
+		// close whatever connection it eventually produces so we do not
+		// leak a gRPC conn.
+		go func() {
+			r := <-doneCh
+			if r.db != nil {
+				_ = r.db.Close()
+			}
+		}()
+		return nil, fmt.Errorf("connect primary canceled: %w", ctx.Err())
+	}
+}
+
+// catchUpWithContext runs Follower.CatchUp in a goroutine so it can be
+// canceled via ctx. Follower.CatchUp does not accept a context itself, so
+// we race its completion against ctx.Done. If ctx fires first the caller
+// must still clean up the Follower.
+func catchUpWithContext(ctx context.Context, f *replica.Follower, token string) error {
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- f.CatchUp(token) }()
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		// Let the orphan CatchUp goroutine finish in the background; the
+		// caller will Stop() the follower on cleanup, which drains its
+		// own loop state.
+		go func() { <-doneCh }()
+		return ctx.Err()
+	}
 }

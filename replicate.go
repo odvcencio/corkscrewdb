@@ -27,6 +27,7 @@ func NewRPCPuller(db *DB) (*RPCPuller, error) {
 
 func (p *RPCPuller) PullEntries(req replica.PullRequest) (replica.PullResponse, error) {
 	resp, err := p.remote.PullEntries(RPCPullEntriesRequest{
+		Token:      req.Token,
 		Collection: req.Collection,
 		SinceClock: req.SinceClock,
 		MaxEntries: req.MaxEntries,
@@ -57,6 +58,7 @@ func (p *RPCPuller) PullEntries(req replica.PullRequest) (replica.PullResponse, 
 
 func (p *RPCPuller) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotResponse, error) {
 	resp, err := p.remote.PullSnapshot(RPCPullSnapshotRequest{
+		Token:      req.Token,
 		Collection: req.Collection,
 	})
 	if err != nil {
@@ -92,6 +94,7 @@ func (p *RPCPuller) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotR
 
 func (p *RPCPuller) StreamEntries(ctx context.Context, req replica.PullRequest, handle func(replica.PullResponse) error) error {
 	return p.remote.StreamEntries(ctx, RPCPullEntriesRequest{
+		Token:      req.Token,
 		Collection: req.Collection,
 		SinceClock: req.SinceClock,
 		MaxEntries: req.MaxEntries,

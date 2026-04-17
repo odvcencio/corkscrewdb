@@ -57,6 +57,16 @@ func (c *grpcClient) Close() error {
 	return c.conn.Close()
 }
 
+// tokenFor returns the caller-supplied token when non-empty, falling back
+// to the connection's default token. Used by replication calls so that a
+// per-request token on RPCPuller overrides the Connect-time token.
+func (c *grpcClient) tokenFor(reqToken string) string {
+	if reqToken != "" {
+		return reqToken
+	}
+	return c.token
+}
+
 func (c *grpcClient) Info() (RPCInfoResponse, error) {
 	resp, err := c.client.Info(context.Background(), &grpcapi.InfoRequest{Token: c.token})
 	if err != nil {
@@ -183,7 +193,7 @@ func (c *grpcClient) PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesRespo
 		return RPCPullEntriesResponse{}, err
 	}
 	resp, err := c.client.PullEntries(context.Background(), &grpcapi.PullEntriesRequest{
-		Token:      c.token,
+		Token:      c.tokenFor(req.Token),
 		Collection: req.Collection,
 		SinceClock: req.SinceClock,
 		MaxEntries: maxEntries,
@@ -200,7 +210,7 @@ func (c *grpcClient) StreamEntries(ctx context.Context, req RPCPullEntriesReques
 		return err
 	}
 	stream, err := c.client.StreamEntries(ctx, &grpcapi.PullEntriesRequest{
-		Token:      c.token,
+		Token:      c.tokenFor(req.Token),
 		Collection: req.Collection,
 		SinceClock: req.SinceClock,
 		MaxEntries: maxEntries,
@@ -228,7 +238,7 @@ func (c *grpcClient) StreamEntries(ctx context.Context, req RPCPullEntriesReques
 
 func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error) {
 	resp, err := c.client.PullSnapshot(context.Background(), &grpcapi.PullSnapshotRequest{
-		Token:      c.token,
+		Token:      c.tokenFor(req.Token),
 		Collection: req.Collection,
 	})
 	if err != nil {
