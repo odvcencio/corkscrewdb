@@ -19,6 +19,16 @@ func AgentFromContext(ctx context.Context) (string, bool) {
 	return name, ok && name != ""
 }
 
+// adminContextKey marks a request that passed AdminAuth. Admin-scoped
+// handlers check for this marker as a defense against mis-wired middleware.
+type adminContextKey struct{}
+
+// IsAdminContext reports whether ctx was annotated by AdminAuth.
+func IsAdminContext(ctx context.Context) bool {
+	v, _ := ctx.Value(adminContextKey{}).(bool)
+	return v
+}
+
 // AgentAuth returns a middleware that rejects requests whose bearer
 // token does not match any entry in tokens. On success it injects the
 // matched agent name into the request context.
@@ -54,7 +64,8 @@ func AdminAuth(next http.Handler, admin string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), adminContextKey{}, true)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

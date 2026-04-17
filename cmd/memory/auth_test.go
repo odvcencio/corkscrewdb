@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -145,5 +146,35 @@ func TestAuthAdminRejectsMissingHeader(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status: want 401, got %d", rr.Code)
+	}
+}
+
+// TestAuthAdminContextMarker asserts that AdminAuth annotates the
+// request context so downstream admin handlers can verify they were
+// reached through the correct middleware, and that IsAdminContext
+// returns false for a plain context that did not pass through.
+func TestAuthAdminContextMarker(t *testing.T) {
+	// Before AdminAuth: plain context → false.
+	if IsAdminContext(context.Background()) {
+		t.Fatalf("IsAdminContext on plain ctx: want false, got true")
+	}
+
+	var observed bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed = IsAdminContext(r.Context())
+		fmt.Fprint(w, "ok")
+	})
+	h := AdminAuth(inner, testAdminToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+	if !observed {
+		t.Fatalf("IsAdminContext after AdminAuth: want true, got false")
 	}
 }
