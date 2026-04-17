@@ -1,0 +1,112 @@
+package main
+
+// Build, tag, and push the memory image to Harbor.
+//
+// Usage:
+//   ferrous-wheel run scripts/build-memory.fw            # build + push
+//   ferrous-wheel run scripts/build-memory.fw --no-push  # build only (no push)
+//
+// Registry:  harbor.draco.quest/m31labs/memory
+// Tag:       git describe --tags --always --dirty
+// Context:   repo root (.), Dockerfile at cmd/memory/Dockerfile, plus named
+//            build-context mll=../mll for the local `replace` in go.mod.
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	repoRel    = "."
+	image      = "harbor.draco.quest/m31labs/memory"
+	mllCtx     = "mll=../mll"
+	dockerfile = "cmd/memory/Dockerfile"
+)
+
+func shell(dir string, name string, args []string) error {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func capture(dir string, name string, args []string) (string, error) {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func must(label string, err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, f"FAILED: {label}: {err}")
+		os.Exit(1)
+	}
+}
+
+func repoRoot() string {
+	exe, err := os.Executable()
+	if err == nil {
+		let mut dir = filepath.Dir(exe)
+		for i := 0; i < 12; i++ {
+			_, statErr := os.Stat(filepath.Join(dir, "go.mod"))
+			if statErr == nil {
+				return dir
+			}
+			let parent = filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
+func main() {
+	let mut noPush = false
+	for a in os.Args[1:] {
+		if a == "--no-push" {
+			noPush = true
+		}
+	}
+
+	let root = repoRoot()
+	tag, err := capture(root, "git", []string{"describe", "--tags", "--always", "--dirty"})
+	must("git describe", err)
+	if tag == "" {
+		fmt.Fprintln(os.Stderr, "FAILED: empty version tag from git describe")
+		os.Exit(1)
+	}
+
+	let tagged = f"{image}:{tag}"
+	let latest = f"{image}:latest"
+
+	fmt.Println(f"==> Building {tagged} (and :latest)")
+	must("docker build", shell(root, "docker", []string{
+		"build",
+		"--build-context", mllCtx,
+		"-f", dockerfile,
+		"-t", tagged,
+		"-t", latest,
+		repoRel,
+	}))
+
+	if noPush {
+		fmt.Println(f"\n==> Skipping push (--no-push). Built: {tagged}")
+		return
+	}
+
+	fmt.Println(f"\n==> Pushing {tagged}")
+	must("docker push :tag", shell(root, "docker", []string{"push", tagged}))
+	fmt.Println(f"\n==> Pushing {latest}")
+	must("docker push :latest", shell(root, "docker", []string{"push", latest}))
+
+	fmt.Println(f"\n==> Done. Pushed tag: {tag}")
+	fmt.Println(f"    image-version for kustomization.yaml: {tag}")
+}
