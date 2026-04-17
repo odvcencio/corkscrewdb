@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory
+  namespace: m31labs
+  labels:
+    app: memory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: memory
+  template:
+    metadata:
+      labels:
+        app: memory
+    spec:
+      imagePullSecrets:
+        - name: harbor-m31labs
+      containers:
+        - name: memory
+          image: harbor.draco.quest/m31labs/memory
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: CORKSCREWDB_ADDR_RW
+              value: "corkscrewdb-rw.m31labs.svc.cluster.local:4040"
+            - name: CORKSCREWDB_ADDR_RO
+              value: "corkscrewdb-ro.m31labs.svc.cluster.local:4040"
+            - name: CORKSCREWDB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: corkscrewdb-token
+                  key: token
+            - name: MEMORY_AGENT_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: memory-tokens
+                  key: tokens
+            - name: MEMORY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: memory-admin-token
+                  key: token
+            - name: EXPECTED_PROVIDER_ID
+              value: "manta-embed-v0"
+            - name: MEMORY_LISTEN
+              value: "0.0.0.0:8080"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
