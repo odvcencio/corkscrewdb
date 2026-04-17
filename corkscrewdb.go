@@ -323,6 +323,28 @@ func (db *DB) saveManifest() error {
 	return db.saveManifestLocked()
 }
 
+// RemoteInfo fetches RPCInfoResponse over the wire when db is a remote
+// client (returned by Connect). On an embedded DB it returns the
+// manifest-level Embedding and peer metadata synthesized from local
+// state. Callers use this to verify the server reports the expected
+// embedding provider ID at startup so a misconfigured DB fails fast.
+func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
+	if db == nil {
+		return RPCInfoResponse{}, errors.New("corkscrewdb: nil database")
+	}
+	if db.remote != nil {
+		return db.remote.Info()
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return RPCInfoResponse{
+		PackageVersion: db.manifest.ModuleVersion,
+		Embedding:      db.manifest.Embedding,
+		Peers:          append([]string(nil), db.peers...),
+		Shards:         cloneShardAssignments(db.manifest.Shards),
+	}, nil
+}
+
 func (db *DB) rpcCollectionInfo() []RPCCollectionInfo {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
