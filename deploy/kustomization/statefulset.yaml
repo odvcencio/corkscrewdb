@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: corkscrewdb
+  namespace: m31labs
+  labels:
+    app: corkscrewdb
+spec:
+  serviceName: corkscrewdb
+  replicas: 2
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: corkscrewdb
+  template:
+    metadata:
+      labels:
+        app: corkscrewdb
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      imagePullSecrets:
+        - name: harbor-m31labs
+      containers:
+        - name: corkscrewdb
+          image: harbor.draco.quest/m31labs/corkscrewdb
+          ports:
+            - name: grpc
+              containerPort: 4040
+              protocol: TCP
+          env:
+            - name: CORKSCREWDB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: corkscrewdb-token
+                  key: token
+            - name: PEER_LIST
+              value: "corkscrewdb-0.corkscrewdb.m31labs.svc.cluster.local:4040,corkscrewdb-1.corkscrewdb.m31labs.svc.cluster.local:4040"
+            - name: REPLICATE_COLLECTIONS
+              value: "agent-memory,mirage-runs"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/corkscrewdb
+          livenessProbe:
+            tcpSocket:
+              port: 4040
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 4040
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
