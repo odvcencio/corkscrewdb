@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	mantaruntime "github.com/odvcencio/manta/runtime"
 	"github.com/odvcencio/manta/runtime/backend"
@@ -108,7 +108,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 	}
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "tiny_manta_provider.mll")
-	if err := barr.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := mantaruntime.EmbeddingManifest{
