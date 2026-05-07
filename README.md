@@ -18,6 +18,10 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Cold storage offload (sealed WAL segments + snapshots)
 - Standalone server binary (`cmd/corkscrewdb`)
 
+## Agent Skill
+
+Agents working with CorkScrewDB should use the [using-corkscrewdb](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-corkscrewdb/SKILL.md) skill.
+
 ## Status
 
 `v0.2.0` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming have shipped.
