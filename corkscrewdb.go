@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb/replica"
-	snap "github.com/odvcencio/corkscrewdb/snapshot"
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	"m31labs.dev/corkscrewdb/replica"
+	snap "m31labs.dev/corkscrewdb/snapshot"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 const (

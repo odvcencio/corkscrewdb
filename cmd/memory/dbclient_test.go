@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // newTestPrimary spins an in-process CorkScrewDB primary on a random

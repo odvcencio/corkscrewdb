@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // MemoriesHandler serves the /memories/* CRUD endpoints backed by

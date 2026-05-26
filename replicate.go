@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/odvcencio/corkscrewdb/replica"
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	"m31labs.dev/corkscrewdb/replica"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // RPCPuller adapts a remote DB connection (from Connect) to the

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // Entry is a WAL entry enriched with replication metadata.

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	snap "github.com/odvcencio/corkscrewdb/snapshot"
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	snap "m31labs.dev/corkscrewdb/snapshot"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // Collection stores versioned vector entries within one namespace.

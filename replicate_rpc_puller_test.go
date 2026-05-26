@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/corkscrewdb/replica"
+	"m31labs.dev/corkscrewdb/replica"
 )
 
 // TestRPCPullerForwardsToken asserts RPCPuller.PullEntries and

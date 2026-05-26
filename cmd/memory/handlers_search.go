@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // SearchHandler serves GET /memories/search backed by CorkScrewDB. It

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // DBClients holds two remote CorkScrewDB connections: one pinned to

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	grpcapi "github.com/odvcencio/corkscrewdb/grpc"
+	grpcapi "m31labs.dev/corkscrewdb/grpc"
 	grpcgo "google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

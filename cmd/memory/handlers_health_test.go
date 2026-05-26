@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // newHealthHandlerAndPrimary spins an in-process primary, optionally

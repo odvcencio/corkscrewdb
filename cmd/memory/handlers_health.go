@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // HealthHandler serves the liveness (/healthz) and readiness (/readyz)

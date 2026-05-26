@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 type mockApplier struct {

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/odvcencio/corkscrewdb"
+	"m31labs.dev/corkscrewdb"
 )
 
 // AdminHandler serves the /admin/* endpoints. Routes are registered

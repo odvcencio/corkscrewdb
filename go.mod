@@ -1,4 +1,4 @@
-module github.com/odvcencio/corkscrewdb
+module m31labs.dev/corkscrewdb
 
 go 1.25.1
 

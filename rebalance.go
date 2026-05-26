@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // RebalanceShards applies a new explicit shard layout to the local node.

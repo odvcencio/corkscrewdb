@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb"
-	"github.com/odvcencio/corkscrewdb/offload"
-	"github.com/odvcencio/corkscrewdb/replica"
+	"m31labs.dev/corkscrewdb"
+	"m31labs.dev/corkscrewdb/offload"
+	"m31labs.dev/corkscrewdb/replica"
 )
 
 // serverOpts bundles every configuration knob the corkscrewdb binary exposes.
