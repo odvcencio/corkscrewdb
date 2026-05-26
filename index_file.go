@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/odvcencio/turboquant"
+	"m31labs.dev/turboquant"
 )
 
 const (

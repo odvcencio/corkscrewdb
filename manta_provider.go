@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	mantaruntime "github.com/odvcencio/manta/runtime"
-	"github.com/odvcencio/manta/runtime/backends/cuda"
-	"github.com/odvcencio/manta/runtime/backends/metal"
+	mantaruntime "m31labs.dev/manta/runtime"
+	"m31labs.dev/manta/runtime/backends/cuda"
+	"m31labs.dev/manta/runtime/backends/metal"
 )
 
 // LoadMantaProvider loads a Manta embedding package from disk.

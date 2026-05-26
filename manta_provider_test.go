@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/compiler"
-	mantaruntime "github.com/odvcencio/manta/runtime"
-	"github.com/odvcencio/manta/runtime/backend"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/compiler"
+	mantaruntime "m31labs.dev/manta/runtime"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestLoadMantaProviderEncodes(t *testing.T) {

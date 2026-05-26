@@ -4,7 +4,7 @@ import (
 	"container/heap"
 	"sync"
 
-	"github.com/odvcencio/turboquant"
+	"m31labs.dev/turboquant"
 )
 
 // indexer is the common interface implemented by flat and HNSW indices.

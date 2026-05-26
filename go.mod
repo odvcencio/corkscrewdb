@@ -3,16 +3,17 @@ module m31labs.dev/corkscrewdb
 go 1.25.1
 
 require (
-	github.com/odvcencio/manta v0.0.13
-	github.com/odvcencio/turboquant v0.1.2
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
+	m31labs.dev/manta v0.0.13
+	m31labs.dev/turboquant v0.1.2
 )
 
 require (
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/odvcencio/gotreesitter v0.15.2 // indirect
 	github.com/odvcencio/mll v0.0.1 // indirect
+	github.com/odvcencio/turboquant v0.1.2 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
@@ -22,4 +23,6 @@ require (
 
 replace github.com/odvcencio/mll => ../mll
 
-replace github.com/odvcencio/manta => ../barracuda
+replace m31labs.dev/manta => ../barracuda
+
+replace m31labs.dev/turboquant => ../turboquant

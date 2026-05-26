@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"sync"
 
-	"github.com/odvcencio/turboquant"
+	"m31labs.dev/turboquant"
 )
 
 type hnswParams struct {
