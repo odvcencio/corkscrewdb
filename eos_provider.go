@@ -9,24 +9,24 @@ import (
 	"strings"
 	"sync"
 
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
-// LoadMantaProvider loads a Manta embedding package from disk.
-func LoadMantaProvider(artifactPath string) (EmbeddingProvider, error) {
-	return loadMantaProvider(loadMantaConfig{
+// LoadEosProvider loads a Eos embedding package from disk.
+func LoadEosProvider(artifactPath string) (EmbeddingProvider, error) {
+	return loadEosProvider(loadEosConfig{
 		ArtifactPath: artifactPath,
 	})
 }
 
-type mantaProvider struct {
+type eosProvider struct {
 	id        string
 	dim       int
-	runtime   *mantaruntime.Runtime
-	model     *mantaruntime.EmbeddingModel
-	tokenizer *mantaruntime.BPETokenizer
+	runtime   *eosruntime.Runtime
+	model     *eosruntime.EmbeddingModel
+	tokenizer *eosruntime.BPETokenizer
 
 	mu      sync.Mutex
 	closeMu sync.Mutex
@@ -34,18 +34,18 @@ type mantaProvider struct {
 	closed  bool
 }
 
-type loadMantaConfig struct {
+type loadEosConfig struct {
 	ID            string
 	ArtifactPath  string
 	TokenizerPath string
 	TempDir       string
 }
 
-func loadMantaProvider(cfg loadMantaConfig) (*mantaProvider, error) {
+func loadEosProvider(cfg loadEosConfig) (*eosProvider, error) {
 	if strings.TrimSpace(cfg.ArtifactPath) == "" {
-		return nil, fmt.Errorf("corkscrewdb: Manta artifact path is required")
+		return nil, fmt.Errorf("corkscrewdb: Eos artifact path is required")
 	}
-	rt := mantaruntime.New(cuda.New(), metal.New())
+	rt := eosruntime.New(cuda.New(), metal.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), cfg.ArtifactPath)
 	if err != nil {
 		if cfg.TempDir != "" {
@@ -56,23 +56,23 @@ func loadMantaProvider(cfg loadMantaConfig) (*mantaProvider, error) {
 	manifest := model.Manifest()
 	tokenizerPath := cfg.TokenizerPath
 	if tokenizerPath == "" {
-		tokenizerPath = mantaruntime.DefaultTokenizerPath(cfg.ArtifactPath)
+		tokenizerPath = eosruntime.DefaultTokenizerPath(cfg.ArtifactPath)
 	}
-	tokenizerFile, err := mantaruntime.ReadTokenizerFile(tokenizerPath)
+	tokenizerFile, err := eosruntime.ReadTokenizerFile(tokenizerPath)
 	if err != nil {
 		if cfg.TempDir != "" {
 			_ = os.RemoveAll(cfg.TempDir)
 		}
 		return nil, err
 	}
-	tokenizer, err := mantaruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
+	tokenizer, err := eosruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
 	if err != nil {
 		if cfg.TempDir != "" {
 			_ = os.RemoveAll(cfg.TempDir)
 		}
 		return nil, err
 	}
-	dim, err := detectMantaEmbeddingDim(model)
+	dim, err := detectEosEmbeddingDim(model)
 	if err != nil {
 		if cfg.TempDir != "" {
 			_ = os.RemoveAll(cfg.TempDir)
@@ -88,7 +88,7 @@ func loadMantaProvider(cfg loadMantaConfig) (*mantaProvider, error) {
 			id = strings.TrimSuffix(base, filepath.Ext(base))
 		}
 	}
-	return &mantaProvider{
+	return &eosProvider{
 		id:        id,
 		dim:       dim,
 		runtime:   rt,
@@ -98,9 +98,9 @@ func loadMantaProvider(cfg loadMantaConfig) (*mantaProvider, error) {
 	}, nil
 }
 
-func (p *mantaProvider) Encode(text string) ([]float32, error) {
+func (p *eosProvider) Encode(text string) ([]float32, error) {
 	if p == nil {
-		return nil, fmt.Errorf("corkscrewdb: nil Manta provider")
+		return nil, fmt.Errorf("corkscrewdb: nil Eos provider")
 	}
 	if strings.TrimSpace(text) == "" {
 		return make([]float32, p.dim), nil
@@ -118,9 +118,9 @@ func (p *mantaProvider) Encode(text string) ([]float32, error) {
 	return append([]float32(nil), result.Embeddings.F32...), nil
 }
 
-func (p *mantaProvider) EncodeBatch(texts []string) ([][]float32, error) {
+func (p *eosProvider) EncodeBatch(texts []string) ([][]float32, error) {
 	if p == nil {
-		return nil, fmt.Errorf("corkscrewdb: nil Manta provider")
+		return nil, fmt.Errorf("corkscrewdb: nil Eos provider")
 	}
 	out := make([][]float32, len(texts))
 	batches := make([][]int32, 0, len(texts))
@@ -147,7 +147,7 @@ func (p *mantaProvider) EncodeBatch(texts []string) ([][]float32, error) {
 		return nil, err
 	}
 	if len(result.Embeddings.Shape) != 2 || result.Embeddings.Shape[1] != p.dim {
-		return nil, fmt.Errorf("corkscrewdb: Manta batch embedding shape %v does not match dim %d", result.Embeddings.Shape, p.dim)
+		return nil, fmt.Errorf("corkscrewdb: Eos batch embedding shape %v does not match dim %d", result.Embeddings.Shape, p.dim)
 	}
 	for row, pos := range positions {
 		start := row * p.dim
@@ -156,14 +156,14 @@ func (p *mantaProvider) EncodeBatch(texts []string) ([][]float32, error) {
 	return out, nil
 }
 
-func (p *mantaProvider) Dim() int {
+func (p *eosProvider) Dim() int {
 	if p == nil {
 		return 0
 	}
 	return p.dim
 }
 
-func (p *mantaProvider) Close() error {
+func (p *eosProvider) Close() error {
 	if p == nil {
 		return nil
 	}
@@ -179,16 +179,16 @@ func (p *mantaProvider) Close() error {
 	return nil
 }
 
-func (p *mantaProvider) ProviderID() string {
+func (p *eosProvider) ProviderID() string {
 	if p == nil {
 		return ""
 	}
 	return p.id
 }
 
-func newEmbeddedMantaProvider(id string, assets fs.FS, dir string) (*mantaProvider, error) {
+func newEmbeddedEosProvider(id string, assets fs.FS, dir string) (*eosProvider, error) {
 	if assets == nil {
-		return nil, fmt.Errorf("corkscrewdb: embedded Manta assets are required")
+		return nil, fmt.Errorf("corkscrewdb: embedded Eos assets are required")
 	}
 	tempDir, err := os.MkdirTemp("", "corkscrewdb-"+id+"-")
 	if err != nil {
@@ -199,7 +199,7 @@ func newEmbeddedMantaProvider(id string, assets fs.FS, dir string) (*mantaProvid
 		return nil, err
 	}
 	artifactPath := filepath.Join(tempDir, id+".mll")
-	return loadMantaProvider(loadMantaConfig{
+	return loadEosProvider(loadEosConfig{
 		ID:            id,
 		ArtifactPath:  artifactPath,
 		TokenizerPath: filepath.Join(tempDir, id+".tokenizer.mll"),
@@ -231,9 +231,9 @@ func copyEmbeddedDir(dstRoot string, assets fs.FS, dir string) error {
 	})
 }
 
-func detectMantaEmbeddingDim(model *mantaruntime.EmbeddingModel) (int, error) {
+func detectEosEmbeddingDim(model *eosruntime.EmbeddingModel) (int, error) {
 	if model == nil {
-		return 0, fmt.Errorf("corkscrewdb: Manta embedding model is not loaded")
+		return 0, fmt.Errorf("corkscrewdb: Eos embedding model is not loaded")
 	}
 	manifest := model.Manifest()
 	token := manifest.Tokenizer.BOSID
@@ -251,7 +251,7 @@ func detectMantaEmbeddingDim(model *mantaruntime.EmbeddingModel) (int, error) {
 		return 0, err
 	}
 	if result.Embeddings == nil || len(result.Embeddings.Shape) != 1 {
-		return 0, fmt.Errorf("corkscrewdb: Manta embedding bootstrap returned invalid shape %v", result.Embeddings.Shape)
+		return 0, fmt.Errorf("corkscrewdb: Eos embedding bootstrap returned invalid shape %v", result.Embeddings.Shape)
 	}
 	return result.Embeddings.Shape[0], nil
 }

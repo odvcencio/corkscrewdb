@@ -10,7 +10,7 @@ const defaultEmbeddingDim = 384
 
 // builtinProvider produces deterministic keyword-based embeddings using FNV
 // hashing. Word unigrams and bigrams are hashed into sparse feature vectors.
-// This is the zero-dependency fallback when the embedded Manta model is
+// This is the zero-dependency fallback when the embedded Eos model is
 // unavailable. It provides keyword matching, not semantic similarity. "dog"
 // and "canine" produce unrelated vectors.
 type builtinProvider struct {

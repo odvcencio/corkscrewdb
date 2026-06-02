@@ -43,7 +43,7 @@ func (f dbOptionFunc) applyDB(cfg *dbConfig) {
 	f(cfg)
 }
 
-// WithProvider overrides the default embedded Manta text embedding provider.
+// WithProvider overrides the default embedded Eos text embedding provider.
 func WithProvider(provider EmbeddingProvider) Option {
 	return dbOptionFunc(func(cfg *dbConfig) {
 		cfg.provider = provider

@@ -4,23 +4,23 @@ import (
 	"path/filepath"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
 )
 
-func TestLoadMantaProviderEncodes(t *testing.T) {
-	path := writeTinyMantaProviderPackage(t)
-	provider, err := LoadMantaProvider(path)
+func TestLoadEosProviderEncodes(t *testing.T) {
+	path := writeTinyEosProviderPackage(t)
+	provider, err := LoadEosProvider(path)
 	if err != nil {
-		t.Fatalf("load Manta provider: %v", err)
+		t.Fatalf("load Eos provider: %v", err)
 	}
 	defer provider.Close()
 
 	named, ok := provider.(interface{ ProviderID() string })
 	if !ok {
-		t.Fatal("expected Manta provider to expose ProviderID")
+		t.Fatal("expected Eos provider to expose ProviderID")
 	}
 	if got := named.ProviderID(); got != "tiny-manta-provider" {
 		t.Fatalf("provider id = %q, want %q", got, "tiny-manta-provider")
@@ -44,7 +44,7 @@ func TestLoadMantaProviderEncodes(t *testing.T) {
 		}
 	}
 	if !nonZero {
-		t.Fatal("expected non-zero Manta embedding")
+		t.Fatal("expected non-zero Eos embedding")
 	}
 
 	batch, err := provider.EncodeBatch([]string{"hello world", "", "hello friend"})
@@ -66,7 +66,7 @@ func TestLoadMantaProviderEncodes(t *testing.T) {
 	}
 }
 
-func TestOpenDefaultsToMantaProvider(t *testing.T) {
+func TestOpenDefaultsToEosProvider(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -80,7 +80,7 @@ func TestOpenDefaultsToMantaProvider(t *testing.T) {
 	}
 }
 
-func writeTinyMantaProviderPackage(t *testing.T) string {
+func writeTinyEosProviderPackage(t *testing.T) string {
 	t.Helper()
 	source := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding")
@@ -108,10 +108,10 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 	}
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "tiny_manta_provider.mll")
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
-	manifest := mantaruntime.EmbeddingManifest{
+	manifest := eosruntime.EmbeddingManifest{
 		Name:                "tiny-manta-provider",
 		PooledEntry:         "embed_pooled",
 		BatchEntry:          "embed_pooled_batch",
@@ -120,7 +120,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 		OutputDType:         "f16",
 		TokenEmbeddingParam: "token_embedding",
 		ProjectionParam:     "projection",
-		Tokenizer: mantaruntime.TokenizerManifest{
+		Tokenizer: eosruntime.TokenizerManifest{
 			VocabSize:   8,
 			MaxSequence: 8,
 			PadID:       0,
@@ -129,21 +129,21 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 			UnknownID:   3,
 		},
 	}
-	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
+	if err := manifest.WriteFile(eosruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"[PAD]", "[CLS]", "[SEP]", "[UNK]", "hello", "world", "there", "friend"},
 		PadToken:     "[PAD]",
 		BOSToken:     "[CLS]",
 		EOSToken:     "[SEP]",
 		UnknownToken: "[UNK]",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(artifactPath)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(artifactPath)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	weights := mantaruntime.NewWeightFile(map[string]*backend.Tensor{
+	weights := eosruntime.NewWeightFile(map[string]*backend.Tensor{
 		"token_embedding": backend.NewTensorQ8([]int{8, 4}, []float32{
 			0, 0, 0, 0,
 			0.1, 0.1, 0.1, 0.1,
@@ -161,11 +161,11 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 			0.1, 0.0, 0.4,
 		}),
 	})
-	if err := weights.WriteFile(mantaruntime.DefaultWeightFilePath(artifactPath)); err != nil {
+	if err := weights.WriteFile(eosruntime.DefaultWeightFilePath(artifactPath)); err != nil {
 		t.Fatalf("write weights: %v", err)
 	}
-	plan := mantaruntime.NewMemoryPlan(bundle.Artifact, weights.Weights, mantaruntime.MemoryPlanOptions{})
-	if err := plan.WriteFile(mantaruntime.DefaultMemoryPlanPath(artifactPath)); err != nil {
+	plan := eosruntime.NewMemoryPlan(bundle.Artifact, weights.Weights, eosruntime.MemoryPlanOptions{})
+	if err := plan.WriteFile(eosruntime.DefaultMemoryPlanPath(artifactPath)); err != nil {
 		t.Fatalf("write memory plan: %v", err)
 	}
 	return artifactPath

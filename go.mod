@@ -5,13 +5,13 @@ go 1.25.1
 require (
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
-	m31labs.dev/manta v0.0.13
+	m31labs.dev/eos v0.0.13
 	m31labs.dev/turboquant v0.2.0
 )
 
 require (
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
-	github.com/odvcencio/gotreesitter v0.15.2 // indirect
+	github.com/odvcencio/gotreesitter v0.19.1 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
@@ -22,6 +22,8 @@ require (
 
 replace m31labs.dev/mll => ../mll
 
-replace m31labs.dev/manta => ../barracuda
+replace m31labs.dev/eos => ../eos
 
 replace m31labs.dev/turboquant => ../turboquant
+
+replace github.com/odvcencio/gotreesitter => ../gotreesitter
