@@ -1,0 +1,142 @@
+package corkscrewdb
+
+import (
+	"fmt"
+	"math/rand"
+	"sync/atomic"
+	"testing"
+)
+
+benchmark "HNSWSearch10K" {
+	setup {
+		db := benchOpenDB(b)
+		coll := benchPopulate(b, db, 10_000)
+		if err := coll.RebuildIndex(IndexHNSW); err != nil {
+			b.Fatal(err)
+		}
+		rng := rand.New(rand.NewSource(benchSeed + 2))
+		query := benchRandVec(rng, benchDim)
+	}
+	measure {
+		if _, err := coll.SearchVector(query, 10); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "HNSWConstruction1K" {
+	setup {
+		db := benchOpenDB(b)
+		coll := benchPopulate(b, db, 1_000)
+	}
+	measure {
+		if err := coll.RebuildIndex(IndexHNSW); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "ConcurrentPut" {
+	setup {
+		db := benchOpenDB(b)
+		coll := db.Collection("concurrent", WithBitWidth(benchBits))
+		var counter int64
+	}
+	parallel measure {
+		id := atomic.AddInt64(&counter, 1)
+		rng := rand.New(rand.NewSource(id))
+		vec := benchRandVec(rng, benchDim)
+		if err := coll.PutVector(fmt.Sprintf("v%d", id), vec); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "SnapshotWrite1K" {
+	setup {
+		db := benchOpenDB(b)
+		coll := benchPopulate(b, db, 1_000)
+	}
+	measure {
+		if err := coll.persistSnapshot(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "PointInTimeSearch10K" {
+	setup {
+		db := benchOpenDB(b)
+		coll := benchPopulate(b, db, 10_000)
+		history, err := coll.History("v0")
+		if err != nil || len(history) == 0 {
+			b.Fatal("failed to get history for v0")
+		}
+		clock := history[0].LamportClock
+		rng := rand.New(rand.NewSource(benchSeed + 3))
+		query := benchRandVec(rng, benchDim)
+	}
+	measure {
+		if _, err := coll.At(clock).SearchVector(query, 10); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "VersionHistoryLookup1K" {
+	setup {
+		db := benchOpenDB(b)
+		coll := db.Collection("history", WithBitWidth(benchBits))
+		rng := rand.New(rand.NewSource(benchSeed))
+		for i := 0; i < 1_000; i++ {
+			vec := benchRandVec(rng, benchDim)
+			if err := coll.PutVector("target", vec); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	measure {
+		if _, err := coll.History("target"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	report_allocs
+}
+
+benchmark "PutWithMetadata" {
+	setup {
+		db := benchOpenDB(b)
+		coll := db.Collection("meta", WithBitWidth(benchBits))
+		rng := rand.New(rand.NewSource(benchSeed))
+		vecs := make([][]float32, b.N)
+		for i := range vecs {
+			vecs[i] = benchRandVec(rng, benchDim)
+		}
+		meta := map[string]string{
+			"key0": "value0",
+			"key1": "value1",
+			"key2": "value2",
+			"key3": "value3",
+			"key4": "value4",
+			"key5": "value5",
+			"key6": "value6",
+			"key7": "value7",
+			"key8": "value8",
+			"key9": "value9",
+		}
+		var idx int
+	}
+	measure {
+		vec := vecs[idx%len(vecs)]
+		if err := coll.PutVector(fmt.Sprintf("v%d", idx), vec, WithMetadata(meta)); err != nil {
+			b.Fatal(err)
+		}
+		idx++
+	}
+	report_allocs
+}

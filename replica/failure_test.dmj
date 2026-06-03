@@ -1,0 +1,62 @@
+package replica
+
+import (
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/odvcencio/corkscrewdb/wal"
+)
+
+type retryPuller struct {
+	streamer  *Streamer
+	failUntil int64
+	callCount int64
+}
+
+func (p *retryPuller) PullEntries(req PullRequest) (PullResponse, error) {
+	n := atomic.AddInt64(&p.callCount, 1)
+	if n <= p.failUntil {
+		return PullResponse{}, errors.New("replica: simulated pull failure")
+	}
+	return p.streamer.Pull(req.Collection, req.SinceClock, req.MaxEntries), nil
+}
+
+func (p *retryPuller) PullSnapshot(_ SnapshotRequest) (SnapshotResponse, error) {
+	return SnapshotResponse{}, nil
+}
+
+unit "FollowerRetriesAfterPullerError" {
+	then "callCount > 1 and entry is applied after retry" {
+		s := NewStreamer()
+		s.Record("docs", wal.Entry{
+			Kind:         wal.EntryPut,
+			CollectionID: "docs",
+			VectorID:     "retry-v1",
+			LamportClock: 1,
+			ActorID:      "a",
+			WallClock:    time.Now().UTC(),
+		})
+
+		puller := &retryPuller{streamer: s, failUntil: 1}
+		applier := &mockApplier{}
+
+		follower, err := NewFollower(FollowerConfig{
+			Collection: "docs",
+			Applier:    applier,
+			Puller:     puller,
+			Interval:   50 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		follower.Start()
+		time.Sleep(300 * time.Millisecond)
+		follower.Stop()
+
+		expect atomic.LoadInt64(&puller.callCount) > 1
+		expect applier.entryCount() >= 1
+	}
+}

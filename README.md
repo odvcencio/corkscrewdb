@@ -3,15 +3,18 @@
 CorkScrewDB is a distributed, versioned vector database in pure Go.
 
 - Text-in and vector-in collection APIs
-- Version history per ID with Lamport clocks
-- TurboQuant-backed quantized flat search
+- Version history per ID with hybrid logical clocks
+- TurboQuant-backed quantized flat and HNSW search
 - Append-only WAL persistence with snapshot recovery
 - Quantized index persistence (`.tqi`)
 - Embedding-space config enforcement
 - Metadata filters and point-in-time collection views
-- Built-in RPC transport with `Connect(...)` and `Serve(...)`
+- gRPC transport with `Connect(...)` and `Serve(...)`
 - Embedded federation with hash-based write routing and fan-out search
-- WAL streaming replication (primary → follower with catch-up)
+- Explicit shard metadata with persisted ownership ranges
+- Manual shard rebalance and handoff via snapshot + WAL catch-up
+- Coordinated cluster rebalance orchestration over gRPC
+- Live gRPC WAL streaming replication with snapshot catch-up
 - Cold storage offload (sealed WAL segments + snapshots)
 - Standalone server binary (`cmd/corkscrewdb`)
 
@@ -21,7 +24,7 @@ Agents working with CorkScrewDB should use the [using-corkscrewdb](https://githu
 
 ## Status
 
-`v0.1.1` — embedded core, remote access, federation, replication, and cold storage offload. gRPC transport, explicit shard rebalancing, and cross-region replication are deferred to v0.2.0.
+`v0.2.0` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming have shipped.
 
 ## Install
 
@@ -78,7 +81,7 @@ Embedding config is persisted in `manifest.json`. Reopening a database with a di
 
 ## Remote Mode
 
-`Connect(...)` now works for single-node remote access using the same collection API over the wire:
+`Connect(...)` works for remote access using the same collection API over gRPC:
 
 ```go
 db, err := corkscrewdb.Connect("127.0.0.1:4040", corkscrewdb.WithToken("agent-token-xxx"))
@@ -110,9 +113,59 @@ Current behavior:
 - writes and deletes route to a hash-selected owner across the local node plus peers
 - history lookups route to the owning node
 
+For explicit ownership, persist shard ranges instead of relying on peer-list hashing:
+
+```go
+db, err := corkscrewdb.Open(
+    "./vectors.csdb",
+    corkscrewdb.WithPeers("node-b:4040"),
+    corkscrewdb.WithShards(
+        corkscrewdb.ShardAssignment{ID: "shard-a", Owner: corkscrewdb.LocalShardOwner, Start: 0, End: (^uint64(0)) / 2},
+        corkscrewdb.ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))/2 + 1, End: ^uint64(0)},
+    ),
+)
+```
+
+When `WithShards(...)` is present, routed writes and point ownership come from the persisted shard ranges. `WithPeers(...)` remains the legacy fallback and the remote seed list for shard owners.
+
+## Rebalancing
+
+Shard layouts can be updated in place with data handoff:
+
+```go
+err := db.RebalanceShards(
+    corkscrewdb.ShardAssignment{ID: "shard-a", Owner: corkscrewdb.LocalShardOwner, Start: 0, End: (^uint64(0)) * 3 / 4},
+    corkscrewdb.ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))*3/4 + 1, End: ^uint64(0)},
+)
+```
+
+Current behavior:
+
+- a gaining node pulls snapshot data plus WAL tail from the old owner for the ranges it is taking over
+- the new shard layout is then persisted locally
+- IDs no longer owned by the node are pruned from local search/history after the cutover
+- `RebalanceShards(...)` is still the single-node/manual form when you want to drive the phases yourself
+
+For cluster-wide cutover, coordinate the same phases from one node:
+
+```go
+err := db.OrchestrateRebalance(
+    corkscrewdb.ShardAssignment{ID: "shard-a", Owner: "node-a:4040", Start: 0, End: (^uint64(0)) * 3 / 4},
+    corkscrewdb.ShardAssignment{ID: "shard-b", Owner: "node-b:4040", Start: (^uint64(0))*3/4 + 1, End: ^uint64(0)},
+)
+```
+
+Current behavior:
+
+- the coordinator runs prepare, commit, and prune across the local node plus reachable peers
+- gaining nodes import data before the layout flips cluster-wide
+- routing changes once the commit phase runs
+- old owners prune handed-off data in the final phase
+- orchestration is sequential and best-effort; there is no distributed transaction or rollback yet
+
 ## Replication
 
-WAL entries stream from primary to followers via pull-based RPC. Followers apply entries through CRDT merge (last-writer-wins by Lamport clock). New followers catch up via snapshot transfer + WAL tail replay.
+WAL entries stream from primary to followers over gRPC. Followers use live entry streams when the transport supports it and fall back to polling otherwise. New followers still catch up via snapshot transfer + WAL tail replay before switching to live updates.
 
 ## Cold Storage Offload
 
@@ -148,14 +201,6 @@ Recall@10 at 64-dim, 4-bit: 0.80 (vs exact brute-force).
 ```bash
 go test -bench=. -benchmem -run=^$ .
 ```
-
-## Roadmap (v0.2.0)
-
-- gRPC transport
-- Explicit shard metadata and rebalancing
-- Cross-region replication
-- Pluggable S3/GCS storage backends
-- HNSW index for sub-linear search
 
 ## Development
 

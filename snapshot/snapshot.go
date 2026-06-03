@@ -14,7 +14,7 @@ import (
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(1)
+	snapshotVersion = uint8(2)
 )
 
 // Data is one collection snapshot.

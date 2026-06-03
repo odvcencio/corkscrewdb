@@ -7,13 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/odvcencio/corkscrewdb/replica"
-	snap "github.com/odvcencio/corkscrewdb/snapshot"
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	"m31labs.dev/corkscrewdb/replica"
+	snap "m31labs.dev/corkscrewdb/snapshot"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 const (
@@ -27,6 +28,7 @@ type dbConfig struct {
 	defaultBits    int
 	walSegmentSize int64
 	peers          []string
+	shards         []ShardAssignment
 	token          string
 }
 
@@ -41,7 +43,7 @@ func (f dbOptionFunc) applyDB(cfg *dbConfig) {
 	f(cfg)
 }
 
-// WithProvider overrides the default built-in text embedding provider.
+// WithProvider overrides the default embedded Eos text embedding provider.
 func WithProvider(provider EmbeddingProvider) Option {
 	return dbOptionFunc(func(cfg *dbConfig) {
 		cfg.provider = provider
@@ -63,6 +65,13 @@ func WithPeers(peers ...string) Option {
 	})
 }
 
+// WithShards configures explicit shard ownership ranges for federation routing.
+func WithShards(shards ...ShardAssignment) Option {
+	return dbOptionFunc(func(cfg *dbConfig) {
+		cfg.shards = cloneShardAssignments(shards)
+	})
+}
+
 // WithToken configures the in-memory auth token used for future remote access.
 func WithToken(token string) Option {
 	return dbOptionFunc(func(cfg *dbConfig) {
@@ -78,13 +87,13 @@ type DB struct {
 	walSegmentSize int64
 	peers          []string
 	token          string
-	remote         *rpcClient
+	remote         remoteClient
 	serveAddr      string
 
 	mu          sync.RWMutex
 	manifest    manifest
 	collections map[string]*Collection
-	peerClients map[string]*rpcClient
+	peerClients map[string]remoteClient
 	streamer    *replica.Streamer
 	closed      bool
 }
@@ -95,6 +104,7 @@ type manifest struct {
 	ActorID         string                    `json:"actor_id"`
 	DefaultBitWidth int                       `json:"default_bit_width"`
 	Peers           []string                  `json:"peers,omitempty"`
+	Shards          []ShardAssignment         `json:"shards,omitempty"`
 	Embedding       embeddingConfig           `json:"embedding"`
 	Collections     map[string]collectionMeta `json:"collections"`
 	CreatedAt       time.Time                 `json:"created_at"`
@@ -131,7 +141,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		}
 	}
 	if !cfg.providerSet {
-		cfg.provider = newBuiltinProvider()
+		cfg.provider = newDefaultProvider()
 	}
 	cleanPath := filepath.Clean(path)
 	if err := ensureDBDir(cleanPath); err != nil {
@@ -141,7 +151,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := applyRuntimeConfig(&manifestData, cfg.provider, cfg.peers); err != nil {
+	if err := applyRuntimeConfig(&manifestData, cfg.provider, cfg.peers, cfg.shards); err != nil {
 		return nil, err
 	}
 
@@ -154,7 +164,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		token:          cfg.token,
 		manifest:       manifestData,
 		collections:    make(map[string]*Collection),
-		peerClients:    make(map[string]*rpcClient),
+		peerClients:    make(map[string]remoteClient),
 		streamer:       replica.NewStreamer(),
 	}
 	if err := db.saveManifest(); err != nil {
@@ -313,6 +323,49 @@ func (db *DB) saveManifest() error {
 	return db.saveManifestLocked()
 }
 
+// RemoteInfo fetches RPCInfoResponse over the wire when db is a remote
+// client (returned by Connect). On an embedded DB it returns the
+// manifest-level Embedding and peer metadata synthesized from local
+// state. Callers use this to verify the server reports the expected
+// embedding provider ID at startup so a misconfigured DB fails fast.
+func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
+	if db == nil {
+		return RPCInfoResponse{}, errors.New("corkscrewdb: nil database")
+	}
+	if db.remote != nil {
+		return db.remote.Info()
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return RPCInfoResponse{
+		PackageVersion: db.manifest.ModuleVersion,
+		Embedding:      db.manifest.Embedding,
+		Peers:          append([]string(nil), db.peers...),
+		Shards:         cloneShardAssignments(db.manifest.Shards),
+	}, nil
+}
+
+func (db *DB) rpcCollectionInfo() []RPCCollectionInfo {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if len(db.manifest.Collections) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(db.manifest.Collections))
+	for name := range db.manifest.Collections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]RPCCollectionInfo, len(names))
+	for i, name := range names {
+		out[i] = RPCCollectionInfo{
+			Name:     name,
+			BitWidth: db.manifest.Collections[name].BitWidth,
+		}
+	}
+	return out
+}
+
 func (db *DB) isClosed() bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -412,37 +465,45 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 	if snapshotPath != "" {
 		data, err := snap.LoadFile(snapshotPath)
 		if err != nil {
-			return nil, err
+			// Snapshot is corrupt — fall back to full WAL replay.
+			snapshotPath = ""
 		}
-		if data.BitWidth != 0 {
-			coll.bitWidth = data.BitWidth
-		}
-		if data.Seed != 0 {
-			coll.seed = data.Seed
-		}
-		for _, record := range data.Records {
-			for _, version := range record.Versions {
-				if err := coll.loadVersion(record.ID, Version{
-					Embedding:    cloneVector(version.Embedding),
-					Text:         version.Text,
-					Metadata:     cloneMetadata(version.Metadata),
-					LamportClock: version.LamportClock,
-					ActorID:      version.ActorID,
-					WallClock:    version.WallClock,
-					Tombstone:    version.Tombstone,
-				}); err != nil {
-					return nil, err
+		if snapshotPath != "" {
+			if data.BitWidth != 0 {
+				coll.bitWidth = data.BitWidth
+			}
+			if data.Seed != 0 {
+				coll.seed = data.Seed
+			}
+			for _, record := range data.Records {
+				for _, version := range record.Versions {
+					if err := coll.loadVersion(record.ID, Version{
+						Embedding:    cloneVector(version.Embedding),
+						Text:         version.Text,
+						Metadata:     cloneMetadata(version.Metadata),
+						LamportClock: version.LamportClock,
+						ActorID:      version.ActorID,
+						WallClock:    version.WallClock,
+						Tombstone:    version.Tombstone,
+					}); err != nil {
+						return nil, err
+					}
 				}
 			}
-		}
-		snapshotMax = data.MaxLamport
-		if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
-			coll.mu.Lock()
-			coll.index = restored
-			if coll.dim == 0 {
-				coll.dim = restored.Dim()
+			snapshotMax = data.MaxLamport
+			if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
+				coll.mu.Lock()
+				// Check if an HNSW graph file exists; if so, wrap the flat index.
+				if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
+					coll.index = hw
+				} else {
+					coll.index = restored
+				}
+				if coll.dim == 0 {
+					coll.dim = restored.Dim()
+				}
+				coll.mu.Unlock()
 			}
-			coll.mu.Unlock()
 		}
 	}
 
@@ -513,7 +574,7 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		seed:     meta.Seed,
 		encoder:  db.encoder,
 		history:  make(map[string][]Version),
-		clock:    newLamportClock(db.manifest.ActorID),
+		clock:    newHLC(db.manifest.ActorID),
 		wal:      manager,
 	}, nil
 }
@@ -546,6 +607,10 @@ func (db *DB) collectionIndexPath(name string) string {
 	return filepath.Join(db.collectionIndexDir(name), "quantized.tqi")
 }
 
+func (db *DB) collectionHNSWPath(name string) string {
+	return filepath.Join(db.collectionIndexDir(name), "graph.hnsw")
+}
+
 func (db *DB) collectionWALDir(name string) string {
 	return filepath.Join(db.collectionDir(name), "wal")
 }
@@ -558,7 +623,7 @@ func validCollectionName(name string) bool {
 	return !strings.Contains(name, string(os.PathSeparator))
 }
 
-func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string) error {
+func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string, shards []ShardAssignment) error {
 	if m.Collections == nil {
 		m.Collections = make(map[string]collectionMeta)
 	}
@@ -569,8 +634,24 @@ func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string)
 	case m.Embedding != desired:
 		return fmt.Errorf("corkscrewdb: embedding config mismatch: manifest=%s/%d runtime=%s/%d", m.Embedding.ID, m.Embedding.Dim, desired.ID, desired.Dim)
 	}
+	if len(m.Shards) > 0 || len(shards) > 0 {
+		activeShards := m.Shards
+		if len(shards) > 0 {
+			activeShards = shards
+		}
+		normalized, err := normalizeShardAssignments(activeShards)
+		if err != nil {
+			return err
+		}
+		m.Shards = normalized
+	}
+	activePeers := m.Peers
 	if len(peers) > 0 {
-		m.Peers = append([]string(nil), peers...)
+		activePeers = peers
+	}
+	activePeers = sanitizePeers(append(append([]string(nil), activePeers...), peersFromShardAssignments(m.Shards)...))
+	if len(activePeers) > 0 {
+		m.Peers = activePeers
 	}
 	return nil
 }
@@ -614,4 +695,15 @@ func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 		return nil, 0, err
 	}
 	return loadIndexFile(path)
+}
+
+func (db *DB) tryLoadHNSWIndex(name string, flat *index) (*hnswIndex, error) {
+	path := db.collectionHNSWPath(name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return loadHNSWFile(path, flat, defaultHNSWParams())
 }

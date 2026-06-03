@@ -1,0 +1,168 @@
+package corkscrewdb
+
+import (
+	"net"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+integration "RemoteDropCollection" {
+	_, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 16}))
+
+	client, err := Connect(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	// Create a collection and put data via the remote client.
+	coll := client.Collection("drops", WithBitWidth(2))
+	vec := []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
+	if err := coll.PutVector("drop-me", vec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Confirm the entry is searchable before the drop.
+	preResults, err := coll.SearchVector(vec, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preResults) == 0 {
+		t.Fatal("expected results before drop, got none")
+	}
+
+	// Drop the collection via the remote client.
+	err = client.DropCollection("drops")
+	expect err == nil
+
+	// Search on the dropped collection should now return empty.
+	postColl := client.Collection("drops", WithBitWidth(2))
+	then "search after remote drop returns empty" {
+		results, err := postColl.SearchVector(vec, 5)
+		expect err == nil
+		expect len(results) == 0
+	}
+}
+
+integration "RemotePutVector" {
+	_, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 16}))
+
+	client, err := Connect(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	coll := client.Collection("vecs", WithBitWidth(2))
+
+	// PutVector with explicit float32 vector (no text embedding path).
+	vec := []float32{0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2}
+	err = coll.PutVector("remote-vec-1", vec, WithText("remote vector test"), WithMetadata(map[string]string{"kind": "test"}))
+	expect err == nil
+
+	then "PutVector result is searchable via SearchVector" {
+		results, err := coll.SearchVector(vec, 5, Filter("kind", "test"))
+		expect err == nil
+		expect len(results) > 0
+		expect results[0].ID == "remote-vec-1"
+		expect results[0].Text == "remote vector test"
+	}
+}
+
+integration "RemotePullEntries" {
+	serverDB, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 16}))
+
+	// Put some data directly into the server DB.
+	coll := serverDB.Collection("pull-col", WithBitWidth(2))
+	if err := coll.Put("entry-a", Entry{Text: "pull entry a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.Put("entry-b", Entry{Text: "pull entry b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Connect a remote client and call PullEntries through the remoteClient interface.
+	client, err := Connect(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	req := RPCPullEntriesRequest{
+		Collection: "pull-col",
+		SinceClock: 0,
+		MaxEntries: 100,
+	}
+	resp, err := client.remote.PullEntries(req)
+
+	then "PullEntries returns no transport error" {
+		expect err == nil
+		// The WAL streamer may return entries or empty depending on server state.
+		// Either is valid — this test exercises the transport path, not content.
+		_ = resp
+	}
+}
+
+integration "ListenAndServe" {
+	// Open a server DB directly (not via startRemoteTestServer) to exercise ListenAndServe.
+	serverPath := filepath.Join(t.TempDir(), "las.csdb")
+	serverDB, err := Open(serverPath, WithProvider(&mockProvider{dim: 16}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bind to an available port by letting the OS assign one.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	// Close the free-port listener so ListenAndServe can bind to the same address.
+	ln.Close()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serverDB.ListenAndServe(addr)
+	}()
+
+	// Give ListenAndServe a moment to bind and accept connections.
+	time.Sleep(150 * time.Millisecond)
+
+	// Cleanup: close the DB then wait for the ListenAndServe goroutine.
+	// ListenAndServe creates its own listener internally; closing the DB is
+	// sufficient because gRPC's GracefulStop is called via defer server.Stop()
+	// once the listener closes on DB shutdown.  We derive the listener handle
+	// by dialling a second connection that forces the OS to reclaim the port.
+	t.Cleanup(func() {
+		// Dial a dummy connection to unblock the gRPC server Accept loop on some
+		// platforms, then close the DB which marks the server as stopped.
+		_ = serverDB.Close()
+		// The gRPC server's defer server.Stop() will fire once Serve returns.
+		// Give it up to 3 seconds.
+		select {
+		case <-serveDone:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	// Connect to the ListenAndServe instance and verify basic operations.
+	client, err := Connect(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	coll := client.Collection("las-col", WithBitWidth(2))
+	vec := []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
+
+	then "ListenAndServe accepts writes and searches via remote client" {
+		err := coll.PutVector("las-1", vec)
+		expect err == nil
+
+		results, err := coll.SearchVector(vec, 5)
+		expect err == nil
+		expect len(results) > 0
+		expect results[0].ID == "las-1"
+	}
+}

@@ -1,0 +1,207 @@
+package corkscrewdb
+
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"testing"
+)
+
+@serial
+unit "ConcurrentPutVectorDifferentIDs" {
+    no_leaks
+
+    given "a collection" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("concurrent", WithBitWidth(2))
+
+        when "100 goroutines write different IDs" {
+            var wg sync.WaitGroup
+            for g := 0; g < 100; g++ {
+                wg.Add(1)
+                go func(gid int) {
+                    defer wg.Done()
+                    rng := rand.New(rand.NewSource(int64(gid)))
+                    for i := 0; i < 100; i++ {
+                        vec := make([]float32, 16)
+                        for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+                        id := fmt.Sprintf("g%d-v%d", gid, i)
+                        coll.PutVector(id, vec)
+                    }
+                }(g)
+            }
+            wg.Wait()
+
+            then "all 10000 vectors are retrievable via history" {
+                count := 0
+                for g := 0; g < 100; g++ {
+                    for i := 0; i < 100; i++ {
+                        h, err := coll.History(fmt.Sprintf("g%d-v%d", g, i))
+                        expect err == nil
+                        expect len(h) == 1
+                        count++
+                    }
+                }
+                expect count == 10000
+            }
+        }
+    }
+}
+
+@serial
+unit "ConcurrentPutVectorSameID" {
+    no_leaks
+
+    given "a collection" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("same-id", WithBitWidth(2))
+
+        when "50 goroutines write to the same ID" {
+            var wg sync.WaitGroup
+            for g := 0; g < 50; g++ {
+                wg.Add(1)
+                go func(gid int) {
+                    defer wg.Done()
+                    vec := make([]float32, 16)
+                    for j := range vec { vec[j] = float32(gid) }
+                    coll.PutVector("shared", vec)
+                }(g)
+            }
+            wg.Wait()
+
+            then "history contains exactly 50 versions" {
+                h, err := coll.History("shared")
+                expect err == nil
+                expect len(h) == 50
+            }
+
+            then "all lamport clocks are unique" {
+                h, _ := coll.History("shared")
+                seen := make(map[uint64]bool)
+                for _, v := range h {
+                    reject seen[v.LamportClock]
+                    seen[v.LamportClock] = true
+                }
+            }
+        }
+    }
+}
+
+@serial
+unit "ConcurrentMixedReadWrite" {
+    no_leaks
+
+    given "a collection with seed data" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("mixed", WithBitWidth(2))
+
+        rng := rand.New(rand.NewSource(42))
+        for i := 0; i < 100; i++ {
+            vec := make([]float32, 16)
+            for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+            coll.PutVector(fmt.Sprintf("seed-%d", i), vec)
+        }
+
+        when "writers, searchers, and history readers run concurrently" {
+            var wg sync.WaitGroup
+            errCh := make(chan error, 100)
+
+            for g := 0; g < 10; g++ {
+                wg.Add(1)
+                go func(gid int) {
+                    defer wg.Done()
+                    r := rand.New(rand.NewSource(int64(gid)))
+                    for i := 0; i < 50; i++ {
+                        vec := make([]float32, 16)
+                        for j := range vec { vec[j] = r.Float32()*2 - 1 }
+                        if err := coll.PutVector(fmt.Sprintf("w%d-%d", gid, i), vec); err != nil {
+                            errCh <- err
+                        }
+                    }
+                }(g)
+            }
+
+            for g := 0; g < 10; g++ {
+                wg.Add(1)
+                go func(gid int) {
+                    defer wg.Done()
+                    r := rand.New(rand.NewSource(int64(gid + 100)))
+                    query := make([]float32, 16)
+                    for j := range query { query[j] = r.Float32()*2 - 1 }
+                    for i := 0; i < 50; i++ {
+                        if _, err := coll.SearchVector(query, 10); err != nil {
+                            errCh <- err
+                        }
+                    }
+                }(g)
+            }
+
+            for g := 0; g < 10; g++ {
+                wg.Add(1)
+                go func(gid int) {
+                    defer wg.Done()
+                    for i := 0; i < 50; i++ {
+                        id := fmt.Sprintf("seed-%d", i)
+                        if _, err := coll.History(id); err != nil {
+                            errCh <- err
+                        }
+                    }
+                }(g)
+            }
+
+            wg.Wait()
+            close(errCh)
+
+            then "no errors occurred" {
+                for err := range errCh {
+                    t.Errorf("concurrent error: %v", err)
+                }
+            }
+        }
+    }
+}
+
+@serial
+unit "ConcurrentDeleteAndSearch" {
+    no_leaks
+
+    given "a collection with data" {
+        db, _ := openTestDB(t)
+        coll := db.Collection("del-search", WithBitWidth(2))
+
+        rng := rand.New(rand.NewSource(99))
+        for i := 0; i < 200; i++ {
+            vec := make([]float32, 16)
+            for j := range vec { vec[j] = rng.Float32()*2 - 1 }
+            coll.PutVector(fmt.Sprintf("v%d", i), vec)
+        }
+
+        when "deleters and searchers run concurrently" {
+            var wg sync.WaitGroup
+
+            wg.Add(1)
+            go func() {
+                defer wg.Done()
+                for i := 0; i < 100; i++ {
+                    coll.Delete(fmt.Sprintf("v%d", i))
+                }
+            }()
+
+            wg.Add(1)
+            go func() {
+                defer wg.Done()
+                query := make([]float32, 16)
+                for j := range query { query[j] = 0.5 }
+                for i := 0; i < 100; i++ {
+                    coll.SearchVector(query, 10)
+                }
+            }()
+
+            wg.Wait()
+
+            then "no panics occurred" {
+                expect true
+            }
+        }
+    }
+}

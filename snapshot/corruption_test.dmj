@@ -1,0 +1,79 @@
+package snapshot
+
+import (
+    "os"
+    "path/filepath"
+    "strings"
+    "testing"
+    "time"
+)
+
+unit "SnapshotDecodeEdgeCases" {
+    data := Data{
+        Collection: "test-coll",
+        BitWidth:   2,
+        Seed:       99,
+        Dim:        3,
+        MaxLamport: 5,
+        CreatedAt:  time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC),
+        Records: []Record{
+            {
+                ID: "rec-1",
+                Versions: []Version{
+                    {
+                        Embedding:    []float32{0.1, 0.2, 0.3},
+                        Text:         "hello",
+                        Metadata:     map[string]string{"k": "v"},
+                        LamportClock: 5,
+                        ActorID:      "actor-a",
+                        WallClock:    time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC),
+                        Tombstone:    false,
+                    },
+                },
+            },
+        },
+    }
+    raw, err := marshal(data)
+    if err != nil {
+        t.Fatalf("marshal failed: %v", err)
+    }
+
+    then "Truncated" {
+        dir := t.TempDir()
+        path := filepath.Join(dir, "trunc.csdb")
+        half := raw[:len(raw)/2]
+        os.WriteFile(path, half, 0o644)
+        _, err := LoadFile(path)
+        expect err != nil
+    }
+
+    then "BadCRC" {
+        dir := t.TempDir()
+        path := filepath.Join(dir, "badcrc.csdb")
+        corrupted := make([]byte, len(raw))
+        copy(corrupted, raw)
+        corrupted[len(corrupted)-1] ^= 0xFF
+        os.WriteFile(path, corrupted, 0o644)
+        _, err := LoadFile(path)
+        expect err != nil
+        if err != nil && !strings.Contains(err.Error(), "crc mismatch") {
+            t.Errorf("expected crc mismatch error, got: %v", err)
+        }
+    }
+
+    then "EmptyFile" {
+        dir := t.TempDir()
+        path := filepath.Join(dir, "empty.csdb")
+        os.WriteFile(path, []byte{}, 0o644)
+        _, err := LoadFile(path)
+        expect err != nil
+    }
+}
+
+fuzz "SnapshotDecode" with (data []byte) {
+    dir, _ := os.MkdirTemp("", "fuzz-snap-*")
+    defer os.RemoveAll(dir)
+    path := filepath.Join(dir, "snap.csdb")
+    os.WriteFile(path, data, 0o644)
+    _, _ = LoadFile(path)
+}

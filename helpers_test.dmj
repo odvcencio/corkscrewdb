@@ -1,0 +1,67 @@
+package corkscrewdb
+
+import (
+    "math/rand"
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+unit "helpers are compilable" {
+    then "corruptFileAt works" {
+        path := filepath.Join(t.TempDir(), "test.bin")
+        os.WriteFile(path, []byte{0x00, 0x01, 0x02, 0x03}, 0o644)
+        corruptFileAt(path, 2, 1)
+        data, err := os.ReadFile(path)
+        expect err == nil
+        expect data[0] == byte(0x00)
+        expect data[1] == byte(0x01)
+        expect data[2] != byte(0x02)
+        expect data[3] == byte(0x03)
+    }
+
+    then "truncateFileBy works" {
+        path := filepath.Join(t.TempDir(), "trunc.bin")
+        os.WriteFile(path, []byte{0x00, 0x01, 0x02, 0x03}, 0o644)
+        truncateFileBy(path, 2)
+        data, err := os.ReadFile(path)
+        expect err == nil
+        expect len(data) == 2
+    }
+}
+
+func corruptFileAt(path string, offset int, n int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	rng := rand.New(rand.NewSource(42))
+	for i := 0; i < n && offset+i < len(data); i++ {
+		data[offset+i] ^= byte(rng.Intn(255) + 1)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		panic(err)
+	}
+}
+
+func truncateFileBy(path string, n int) {
+	info, err := os.Stat(path)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Truncate(path, info.Size()-int64(n)); err != nil {
+		panic(err)
+	}
+}
+
+func openTestDB(t *testing.T, opts ...Option) (*DB, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.csdb")
+	allOpts := append([]Option{WithProvider(&mockProvider{dim: 16})}, opts...)
+	db, err := Open(path, allOpts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, path
+}

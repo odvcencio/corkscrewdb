@@ -1,0 +1,41 @@
+package corkscrewdb
+
+import (
+    "bytes"
+    "os"
+
+    "github.com/odvcencio/corkscrewdb/wal"
+)
+
+fuzz "WALEntryRoundTrip" with (data []byte) {
+    entry, err := wal.ReadEntry(bytes.NewReader(data))
+    if err != nil {
+        return
+    }
+    encoded, err := entry.MarshalBinary()
+    if err != nil {
+        return
+    }
+    _, err = wal.ReadEntry(bytes.NewReader(encoded))
+    if err != nil {
+        t.Errorf("round-trip re-decode failed: %v", err)
+    }
+}
+
+fuzz "IndexFileRoundTrip" with (data []byte) {
+    dir := t.TempDir()
+    path := dir + "/fuzz.tqi"
+    if err := os.WriteFile(path, data, 0o644); err != nil {
+        return
+    }
+    _, _, _ = loadIndexFile(path)
+}
+
+fuzz "HNSWFileRoundTrip" with (data []byte) {
+    dir := t.TempDir()
+    path := dir + "/fuzz.hnsw"
+    if err := os.WriteFile(path, data, 0o644); err != nil {
+        return
+    }
+    _, _ = loadHNSWFile(path, nil, defaultHNSWParams())
+}

@@ -1,0 +1,85 @@
+package wal
+
+import (
+    "path/filepath"
+    "testing"
+    "time"
+)
+
+unit "WALSegmentRotation" {
+    given "a manager with 1KB max segment size" {
+        dir := filepath.Join(t.TempDir(), "wal")
+        mgr, err := NewManager(dir, 1024)
+        expect err == nil
+        defer mgr.Close()
+
+        when "writing entries that exceed the limit" {
+            for i := 0; i < 50; i++ {
+                entry := Entry{
+                    Kind:         EntryPut,
+                    CollectionID: "docs",
+                    VectorID:     "v",
+                    Embedding:    make([]float32, 32),
+                    LamportClock: uint64(i),
+                    ActorID:      "a",
+                    WallClock:    time.Now().UTC(),
+                }
+                err := mgr.Append(entry)
+                expect err == nil
+            }
+
+            then "multiple segments are created" {
+                segments, err := ListSegments(dir)
+                expect err == nil
+                expect len(segments) > 1
+            }
+
+            then "all segments are replayable in order" {
+                mgr.Close()
+                segments, err := ListSegments(dir)
+                expect err == nil
+
+                var clocks []uint64
+                for _, seg := range segments {
+                    reader, err := NewReader(seg)
+                    expect err == nil
+                    for reader.Next() {
+                        clocks = append(clocks, reader.Entry().LamportClock)
+                    }
+                    expect reader.Err() == nil
+                    reader.Close()
+                }
+                expect len(clocks) == 50
+                for i := 1; i < len(clocks); i++ {
+                    expect clocks[i] > clocks[i-1]
+                }
+            }
+        }
+    }
+}
+
+unit "ManagerCloseIdempotent" {
+    dir := filepath.Join(t.TempDir(), "wal-close")
+    mgr, err := NewManager(dir, 1024)
+    expect err == nil
+
+    then "closing twice does not error" {
+        err := mgr.Close()
+        expect err == nil
+        err = mgr.Close()
+        expect err == nil
+    }
+}
+
+unit "AppendAfterClose" {
+    dir := filepath.Join(t.TempDir(), "wal-closed")
+    mgr, err := NewManager(dir, 1024)
+    expect err == nil
+    mgr.Close()
+
+    then "returns os.ErrClosed" {
+        entry := Entry{Kind: EntryPut, CollectionID: "x", VectorID: "y", LamportClock: 1, ActorID: "a", WallClock: time.Now().UTC()}
+        err := mgr.Append(entry)
+        expect err != nil
+    }
+}

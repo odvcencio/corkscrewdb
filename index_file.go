@@ -11,12 +11,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/odvcencio/turboquant"
+	"m31labs.dev/turboquant"
 )
 
 const (
 	indexMagic   = uint32(0x54514931) // TQI1
-	indexVersion = uint8(1)
+	indexVersion = uint8(2)
 )
 
 func saveIndexFile(path string, idx *index, maxLamport uint64) error {
@@ -149,7 +149,7 @@ func loadIndexFile(path string) (*index, uint64, error) {
 	if err := read(&version); err != nil {
 		return nil, 0, err
 	}
-	if version != indexVersion {
+	if version != 1 && version != 2 {
 		return nil, 0, fmt.Errorf("corkscrewdb: unsupported index version %d", version)
 	}
 	var dim uint32

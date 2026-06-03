@@ -4,8 +4,20 @@ import (
 	"container/heap"
 	"sync"
 
-	"github.com/odvcencio/turboquant"
+	"m31labs.dev/turboquant"
 )
+
+// indexer is the common interface implemented by flat and HNSW indices.
+type indexer interface {
+	Add(id string, vec []float32, text string, metadata map[string]string, version uint64)
+	Remove(id string) bool
+	Search(query []float32, k int, filters []FilterOption) []SearchResult
+	Len() int
+	Dim() int
+	BitWidth() int
+}
+
+var _ indexer = (*index)(nil)
 
 type indexEntry struct {
 	id       string

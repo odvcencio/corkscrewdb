@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	snap "github.com/odvcencio/corkscrewdb/snapshot"
-	walpkg "github.com/odvcencio/corkscrewdb/wal"
+	snap "m31labs.dev/corkscrewdb/snapshot"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // Collection stores versioned vector entries within one namespace.
@@ -20,12 +20,12 @@ type Collection struct {
 	bitWidth int
 	seed     int64
 	encoder  *encoder
-	remote   *rpcClient
+	remote   remoteClient
 
 	mu      sync.RWMutex
-	index   *index
+	index   indexer
 	history map[string][]Version
-	clock   *lamportClock
+	clock   *HLC
 	wal     *walpkg.Manager
 	dirty   bool
 	err     error
@@ -36,11 +36,11 @@ type Collection struct {
 type CollectionView struct {
 	name    string
 	encoder *encoder
-	index   *index
+	index   indexer
 	history map[string][]Version
 	err     error
 	dim     int
-	remote  *rpcClient
+	remote  remoteClient
 	useAt   bool
 	atClock uint64
 }
@@ -159,10 +159,7 @@ func (c *Collection) searchVector(query []float32, k int, filters []FilterOption
 			return nil, err
 		}
 		sets := [][]SearchResult{local}
-		for _, peer := range c.db.peers {
-			if peer == "" || peer == c.db.localMemberID() {
-				continue
-			}
+		for _, peer := range c.db.remoteShardTargets() {
 			client, err := c.db.peerClient(peer)
 			if err != nil {
 				return nil, err
@@ -255,7 +252,7 @@ func (c *Collection) delete(id string, federated bool) error {
 	version := Version{
 		Text:         latest.Text,
 		Metadata:     cloneMetadata(latest.Metadata),
-		LamportClock: c.clock.Tick(),
+		LamportClock: c.clock.Now(),
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
 		Tombstone:    true,
@@ -280,6 +277,12 @@ func (c *Collection) delete(id string, federated bool) error {
 		return err
 	}
 	return nil
+}
+
+// AtTime returns a point-in-time view of the collection at the given wall-clock time.
+func (c *Collection) AtTime(t time.Time) *CollectionView {
+	hlc := packHLC(uint64(t.UnixMilli()), 0)
+	return c.At(hlc)
 }
 
 func (c *Collection) At(maxLamport uint64) *CollectionView {
@@ -322,7 +325,7 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 				continue
 			}
 			visible = append(visible, cloneVersion(version))
-			if !ok || lamportBefore(latest.LamportClock, latest.ActorID, version.LamportClock, version.ActorID) {
+			if !ok || latest.LamportClock < version.LamportClock || (latest.LamportClock == version.LamportClock && latest.ActorID < version.ActorID) {
 				latest = version
 				ok = true
 			}
@@ -383,6 +386,50 @@ func (v *CollectionView) History(id string) ([]Version, error) {
 	return out, nil
 }
 
+// RebuildIndex rebuilds the collection's vector index using the target algorithm.
+// All existing vectors are copied into the new index structure.
+func (c *Collection) RebuildIndex(target IndexType) error {
+	if err := c.usable(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.index == nil {
+		return nil
+	}
+
+	switch target {
+	case IndexHNSW:
+		hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, defaultHNSWParams())
+		// Re-insert all live entries using the raw embeddings from history.
+		for id, versions := range c.history {
+			if len(versions) == 0 {
+				continue
+			}
+			latest := versions[len(versions)-1]
+			if latest.Tombstone || len(latest.Embedding) == 0 {
+				continue
+			}
+			hw.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
+		}
+		c.index = hw
+	case IndexFlat:
+		switch idx := c.index.(type) {
+		case *index:
+			return nil // already flat
+		case *hnswIndex:
+			c.index = idx.flat
+		default:
+			return errors.New("corkscrewdb: unknown index type")
+		}
+	default:
+		return fmt.Errorf("corkscrewdb: unsupported index type %d", target)
+	}
+	c.dirty = true
+	return nil
+}
+
 func (c *Collection) usable() error {
 	if c == nil {
 		return errors.New("corkscrewdb: nil collection")
@@ -407,7 +454,7 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		Embedding:    cloneVector(vector),
 		Text:         text,
 		Metadata:     cloneMetadata(metadata),
-		LamportClock: c.clock.Tick(),
+		LamportClock: c.clock.Now(),
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
 	}
@@ -571,8 +618,18 @@ func (c *Collection) persistSnapshot() error {
 	if err := snap.WriteFile(path, data); err != nil {
 		return err
 	}
-	if err := saveIndexFile(c.db.collectionIndexPath(c.name), c.index, maxLamport); err != nil {
-		return err
+	if flat, ok := c.index.(*index); ok {
+		if err := saveIndexFile(c.db.collectionIndexPath(c.name), flat, maxLamport); err != nil {
+			return err
+		}
+	}
+	if hw, ok := c.index.(*hnswIndex); ok {
+		if err := saveIndexFile(c.db.collectionIndexPath(c.name), hw.flat, maxLamport); err != nil {
+			return err
+		}
+		if err := saveHNSWFile(c.db.collectionHNSWPath(c.name), hw); err != nil {
+			return err
+		}
 	}
 	c.mu.Lock()
 	if c.clock.Current() == maxLamport {
@@ -584,6 +641,9 @@ func (c *Collection) persistSnapshot() error {
 
 func sortVersions(versions []Version) {
 	sort.Slice(versions, func(i, j int) bool {
-		return lamportBefore(versions[i].LamportClock, versions[i].ActorID, versions[j].LamportClock, versions[j].ActorID)
+		if versions[i].LamportClock != versions[j].LamportClock {
+			return versions[i].LamportClock < versions[j].LamportClock
+		}
+		return versions[i].ActorID < versions[j].ActorID
 	})
 }

@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: corkscrewdb-bootstrap
+  namespace: m31labs
+  labels:
+    app: corkscrewdb-bootstrap
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: corkscrewdb-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: curlimages/curl:latest
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: memory-admin-token
+                  key: token
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              set -eu
+              URL="http://memory.m31labs.svc.cluster.local:8080"
+              echo "waiting for $URL/readyz..."
+              ready=0
+              for i in $(seq 1 12); do
+                code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/readyz" || echo "000")
+                if [ "$code" = "200" ]; then
+                  ready=1
+                  echo "memory service ready after ${i} attempts"
+                  break
+                fi
+                echo "attempt ${i}: got ${code}, retrying in 5s"
+                sleep 5
+              done
+              if [ "$ready" -ne 1 ]; then
+                echo "memory service did not become ready within 60s" >&2
+                exit 1
+              fi
+
+              echo "provisioning agent-memory collection..."
+              curl -sS -f -X POST "$URL/admin/collections" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"name":"agent-memory","bit_width":2,"retention":"keep-all"}'
+
+              echo "provisioning mirage-runs collection..."
+              curl -sS -f -X POST "$URL/admin/collections" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"name":"mirage-runs","bit_width":2,"retention":"keep-all"}'
+
+              echo "bootstrap complete"

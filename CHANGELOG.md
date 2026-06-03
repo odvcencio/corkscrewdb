@@ -2,6 +2,28 @@
 
 All notable changes to CorkScrewDB are documented here.
 
+## v0.2.0 — 2026-04-10
+
+### Added
+
+- **gRPC transport** — `Connect(...)`, `Serve(...)`, and `ListenAndServe(...)` now run over generated protobuf stubs instead of `net/rpc`, with larger message limits for snapshot and replication traffic
+- **HNSW index persistence** — approximate nearest-neighbor search now survives restarts alongside the existing quantized flat index
+- **Proto definitions** — `proto/corkscrewdb.proto` and generated `grpc/` stubs define the remote DB and replication pull surface
+- **Explicit shard metadata** — `WithShards(...)` persists contiguous ownership ranges in `manifest.json`, replacing peer-list hashing when configured
+- **Manual shard handoff** — `RebalanceShards(...)` pulls snapshot + WAL tail from old owners before applying the new local layout and pruning handed-off IDs
+- **Coordinated rebalance orchestration** — `OrchestrateRebalance(...)` drives prepare, commit, and prune phases across the local node plus reachable peers
+- **Live replication streams** — followers can now consume continuous gRPC WAL updates instead of relying only on periodic pull loops
+
+### Changed
+
+- **Hybrid logical clocks** — HLC now backs version ordering while preserving the existing clock-shaped API and stored fields
+- **Format version bump** — WAL, snapshot, and index formats moved to v2 for the HLC/HNSW line
+- **Transport abstraction** — remote DB operations now flow through the extracted `remoteClient` interface so transport and cluster work can evolve independently
+- **Federation routing** — write ownership and scatter-gather fanout now prefer explicit shard assignments, falling back to the older peer-hash behavior only when shard metadata is absent
+- **Remote metadata surface** — `Info()` now returns collection and shard metadata so rebalancing code can discover what a peer owns before pulling data
+- **Remote admin surface** — gRPC now carries prepare/commit/prune rebalance calls so one node can coordinate cluster cutover
+- **Follower runtime** — replication followers auto-upgrade from poll mode to server-driven streaming when the puller supports it, while preserving snapshot catch-up and polling fallback
+
 ## v0.1.1 — 2026-04-07
 
 ### Fixed

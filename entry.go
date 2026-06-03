@@ -89,8 +89,22 @@ func WithText(text string) PutVectorOption {
 	})
 }
 
+// IndexType selects the vector index algorithm.
+type IndexType int
+
+const (
+	// IndexFlat is a brute-force flat scan (default).
+	IndexFlat IndexType = iota
+	// IndexHNSW is a Hierarchical Navigable Small World graph index.
+	IndexHNSW
+)
+
 type collectionConfig struct {
-	bitWidth int
+	bitWidth       int
+	indexType      IndexType
+	hnswM          int
+	hnswEfConstruct int
+	hnswEfSearch   int
 }
 
 // CollectionOption configures Collection creation.
@@ -108,6 +122,22 @@ func (f collectionOptionFunc) applyCollection(cfg *collectionConfig) {
 func WithBitWidth(bits int) CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
 		cfg.bitWidth = bits
+	})
+}
+
+// WithIndexType selects the vector index algorithm.
+func WithIndexType(t IndexType) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.indexType = t
+	})
+}
+
+// WithHNSWParams configures HNSW-specific parameters.
+func WithHNSWParams(m, efConstruction, efSearch int) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.hnswM = m
+		cfg.hnswEfConstruct = efConstruction
+		cfg.hnswEfSearch = efSearch
 	})
 }
 

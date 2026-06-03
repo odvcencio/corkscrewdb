@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: m31labs
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - headless-service.yaml
+  - rw-service.yaml
+  - ro-service.yaml
+  - statefulset.yaml
+  - memory-deployment.yaml
+  - memory-service.yaml
+  - bootstrap-job.yaml
+images:
+  - name: harbor.draco.quest/m31labs/corkscrewdb
+    newTag: v0.3.0
+  - name: harbor.draco.quest/m31labs/memory
+    newTag: v0.3.0

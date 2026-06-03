@@ -68,7 +68,7 @@ func read(r io.Reader) (Data, error) {
 	if err := read(&version); err != nil {
 		return data, err
 	}
-	if version != snapshotVersion {
+	if version != 1 && version != 2 {
 		return data, fmt.Errorf("snapshot: unsupported version %d", version)
 	}
 

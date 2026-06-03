@@ -1,0 +1,326 @@
+package corkscrewdb
+
+import (
+	"net"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/odvcencio/corkscrewdb/replica"
+)
+
+integration "OrchestrateRebalanceHappyPath" {
+	no_leaks
+
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+
+	dbA, err := Open(
+		filepath.Join(t.TempDir(), "a-orch.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrB),
+		WithShards(twoNodeShardLayout(LocalShardOwner, addrB)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbB, err := Open(
+		filepath.Join(t.TempDir(), "b-orch.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrA),
+		WithShards(twoNodeShardLayout(addrA, LocalShardOwner)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+
+	// Register cleanup for all goroutine-spawning resources so they shut down
+	// before the no_leaks goroutine check fires (t.Cleanup runs LIFO, so this
+	// cleanup runs before the no_leaks cleanup registered above).
+	t.Cleanup(func() {
+		listenerA.Close()
+		listenerB.Close()
+		dbA.Close()
+		dbB.Close()
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Errorf("serve B: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve B did not exit")
+		}
+	})
+
+	// Write data on both local and remote shards via node A.
+	localID, remoteID := pickPeerOwnedIDs(t, dbA, "docs", addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+	if err := collA.Put(localID, Entry{Text: "local shard data"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(remoteID, Entry{Text: "remote shard data"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a new layout that swaps shard ownership.
+	maxKey := ^uint64(0)
+	mid := maxKey / 2
+	newLayout := []ShardAssignment{
+		{ID: "shard-a", Owner: addrB, Start: 0, End: mid},
+		{ID: "shard-b", Owner: addrA, Start: mid + 1, End: maxKey},
+	}
+
+	if err := dbA.OrchestrateRebalance(newLayout...); err != nil {
+		t.Fatal(err)
+	}
+
+	then "data is accessible via search after rebalance" {
+		results, err := collA.Search("local shard data", 10)
+		expect err == nil
+		expect len(results) > 0
+
+		results2, err := dbB.Collection("docs").Search("remote shard data", 10)
+		expect err == nil
+		expect len(results2) > 0
+	}
+}
+
+integration "FederationNodeDownMidSearch" {
+	no_leaks
+
+	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addrA := listenerA.Addr().String()
+	addrB := listenerB.Addr().String()
+
+	dbA, err := Open(
+		filepath.Join(t.TempDir(), "a-nodedown.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrB),
+		WithShards(twoNodeShardLayout(LocalShardOwner, addrB)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbB, err := Open(
+		filepath.Join(t.TempDir(), "b-nodedown.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+		WithPeers(addrA),
+		WithShards(twoNodeShardLayout(addrA, LocalShardOwner)...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbA.registerServeAddr(addrA)
+	dbB.registerServeAddr(addrB)
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- dbA.Serve(listenerA) }()
+	doneB := make(chan error, 1)
+	go func() { doneB <- dbB.Serve(listenerB) }()
+
+	// Register cleanup for node A so it shuts down before goroutine leak check.
+	t.Cleanup(func() {
+		listenerA.Close()
+		dbA.Close()
+		select {
+		case err := <-doneA:
+			if err != nil {
+				t.Errorf("serve A: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve A did not exit")
+		}
+	})
+
+	// Write data on both shards via node A.
+	localID, remoteID := pickPeerOwnedIDs(t, dbA, "docs", addrA, addrB)
+	collA := dbA.Collection("docs", WithBitWidth(2))
+	if err := collA.Put(localID, Entry{Text: "node down local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := collA.Put(remoteID, Entry{Text: "node down remote"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close node B and its listener to simulate node failure.
+	listenerB.Close()
+	dbB.Close()
+
+	select {
+	case <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Error("serve B did not exit after close")
+	}
+
+	then "search from node A returns error when node B is down" {
+		_, err := collA.Search("node down remote", 10)
+		expect err != nil
+	}
+}
+
+integration "ReplicationFollowerReconnect" {
+	no_leaks
+
+	// Start primary.
+	primaryDB, err := Open(
+		filepath.Join(t.TempDir(), "primary-reconnect.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+		WithToken("secret"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- primaryDB.Serve(listener) }()
+
+	// Shut down primary server before goroutine leak check fires.
+	t.Cleanup(func() {
+		listener.Close()
+		primaryDB.Close()
+		select {
+		case err := <-doneCh:
+			if err != nil {
+				t.Errorf("primary serve: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("primary serve did not exit")
+		}
+	})
+
+	// Set up follower DB and connection.
+	followerDB, err := Open(
+		filepath.Join(t.TempDir(), "follower-reconnect.csdb"),
+		WithProvider(&mockProvider{dim: 16}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { followerDB.Close() })
+
+	client, err := Connect(listener.Addr().String(), WithToken("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	puller := &rpcPullerAdapter{client: client.remote}
+	applier := &dbApplier{db: followerDB}
+
+	follower, err := replica.NewFollower(replica.FollowerConfig{
+		Collection: "docs",
+		Applier:    applier,
+		Puller:     puller,
+		Interval:   50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write initial data on primary.
+	coll := primaryDB.Collection("docs", WithBitWidth(2))
+	if err := coll.Put("doc-before", Entry{Text: "written before follower stopped"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start follower and let it sync the first entry.
+	follower.Start()
+
+	syncDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(syncDeadline) {
+		h, err := followerDB.Collection("docs").History("doc-before")
+		if err == nil && len(h) == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Stop follower.
+	follower.Stop()
+
+	// Write more data on primary while follower is stopped.
+	if err := coll.Put("doc-after", Entry{Text: "written while follower was stopped"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart follower with a fresh instance pointing to the same follower DB.
+	// Use CatchUp (snapshot + WAL tail) to verify the reconnect catch-up path
+	// without opening a long-lived streaming connection that would interfere
+	// with the no_leaks goroutine check when running in parallel.
+	client2, err := Connect(listener.Addr().String(), WithToken("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client2.Close() })
+
+	puller2 := &rpcPullerAdapter{client: client2.remote}
+	follower2, err := replica.NewFollower(replica.FollowerConfig{
+		Collection: "docs",
+		Applier:    applier,
+		Puller:     puller2,
+		Interval:   50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CatchUp does a one-shot snapshot + WAL tail to replicate data written
+	// while the follower was stopped, without creating a persistent stream.
+	if err := follower2.CatchUp("secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	then "follower has all docs after reconnect" {
+		hBefore, err := followerDB.Collection("docs").History("doc-before")
+		expect err == nil
+		expect len(hBefore) == 1
+
+		hAfter, err := followerDB.Collection("docs").History("doc-after")
+		expect err == nil
+		expect len(hAfter) == 1
+	}
+}
