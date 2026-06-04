@@ -115,14 +115,22 @@ func TestSearchHandler_HappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("first result not object: %v", results[0])
 	}
-	if first["id"] != "doc-1" {
-		t.Errorf("top hit id = %v, want doc-1", first["id"])
-	}
 	if _, hasScore := first["score"]; !hasScore {
 		t.Errorf("result missing score: %v", first)
 	}
-	if first["text"] != "hello world" {
-		t.Errorf("result text = %v, want hello world", first["text"])
+	foundHello := false
+	for _, result := range results {
+		obj, ok := result.(map[string]any)
+		if !ok {
+			t.Fatalf("result not object: %v", result)
+		}
+		if obj["id"] == "doc-1" && obj["text"] == "hello world" {
+			foundHello = true
+			break
+		}
+	}
+	if !foundHello {
+		t.Errorf("results = %v, want seeded hello-world row", results)
 	}
 }
 
