@@ -100,11 +100,12 @@ const (
 )
 
 type collectionConfig struct {
-	bitWidth       int
-	indexType      IndexType
-	hnswM          int
+	bitWidth        int
+	seed            int64
+	indexType       IndexType
+	hnswM           int
 	hnswEfConstruct int
-	hnswEfSearch   int
+	hnswEfSearch    int
 }
 
 // CollectionOption configures Collection creation.
@@ -122,6 +123,13 @@ func (f collectionOptionFunc) applyCollection(cfg *collectionConfig) {
 func WithBitWidth(bits int) CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
 		cfg.bitWidth = bits
+	})
+}
+
+// WithQuantizerSeed sets the collection quantizer seed for reproducible indexes.
+func WithQuantizerSeed(seed int64) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.seed = seed
 	})
 }
 

@@ -98,3 +98,69 @@ func TestCollectionPutVectorAndFilter(t *testing.T) {
 		t.Fatalf("results = %v, want v1", results)
 	}
 }
+
+func TestCollectionWithQuantizerSeedPersistsAndValidates(t *testing.T) {
+	path := t.TempDir()
+	const seed int64 = 12345
+
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed))
+	if err := coll.PutVector("v1", []float32{1, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.PutVector("v2", []float32{0, 1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.manifest.Collections["vecs"].Seed; got != seed {
+		t.Fatalf("manifest seed = %d, want %d", got, seed)
+	}
+	before, err := coll.SearchVector([]float32{1, 0, 0, 0}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	coll = db.Collection("vecs", WithQuantizerSeed(seed))
+	if got := db.manifest.Collections["vecs"].Seed; got != seed {
+		t.Fatalf("reopened manifest seed = %d, want %d", got, seed)
+	}
+	after, err := coll.SearchVector([]float32{1, 0, 0, 0}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameResultIDs(before, after) {
+		t.Fatalf("search results changed after reopen: before=%v after=%v", before, after)
+	}
+
+	mismatched := db.Collection("vecs", WithQuantizerSeed(seed+1))
+	if err := mismatched.usable(); err == nil {
+		t.Fatal("expected mismatched quantizer seed to error")
+	}
+
+	negative := db.Collection("negative", WithQuantizerSeed(-1))
+	if err := negative.usable(); err == nil {
+		t.Fatal("expected negative quantizer seed to error")
+	}
+}
+
+func sameResultIDs(a, b []SearchResult) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID {
+			return false
+		}
+	}
+	return true
+}

@@ -206,6 +206,9 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				opt.applyCollection(&cfg)
 			}
 		}
+		if cfg.seed < 0 {
+			return &Collection{db: db, name: name, bitWidth: existing.bitWidth, seed: existing.seed, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
+		}
 		if cfg.bitWidth != 0 && cfg.bitWidth != existing.bitWidth {
 			return &Collection{
 				db:       db,
@@ -214,6 +217,16 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				seed:     existing.seed,
 				encoder:  db.encoder,
 				err:      fmt.Errorf("corkscrewdb: collection %q already exists with bit width %d", name, existing.bitWidth),
+			}
+		}
+		if cfg.seed != 0 && cfg.seed != existing.seed {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with quantizer seed %d", name, existing.seed),
 			}
 		}
 		return existing
@@ -228,15 +241,19 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if cfg.bitWidth < 2 {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: bit width must be >= 2")}
 	}
+	if cfg.seed < 0 {
+		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
+	}
 
 	meta := collectionMeta{
 		BitWidth: cfg.bitWidth,
-		Seed:     generateSeed(),
+		Seed:     cfg.seed,
 	}
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: err}
 	}
+	meta.Seed = coll.seed
 	db.collections[name] = coll
 	db.manifest.Collections[name] = meta
 	if err := db.saveManifestLocked(); err != nil {
