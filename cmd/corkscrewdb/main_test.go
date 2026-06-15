@@ -39,6 +39,16 @@ func TestReplicationFlagValidation(t *testing.T) {
 	}
 }
 
+func TestLoadServerProviderNoArtifactUsesEmbeddedDefault(t *testing.T) {
+	provider, err := loadServerProvider(serverOpts{})
+	if err != nil {
+		t.Fatalf("load provider: %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("provider = %#v, want nil", provider)
+	}
+}
+
 // TestReplicationEndToEnd asserts that running corkscrewdb with
 // -replicate-from and -replicate-collections wires up a per-collection
 // Follower backed by a shared DBApplier and eventually pulls data written

@@ -66,6 +66,26 @@ func TestLoadEosProviderEncodes(t *testing.T) {
 	}
 }
 
+func TestLoadEosProviderWithIDOverridesManifestName(t *testing.T) {
+	path := writeTinyEosProviderPackage(t)
+	provider, err := LoadEosProviderWithID("corkscrewdb-default-embedder", path)
+	if err != nil {
+		t.Fatalf("load Eos provider with ID: %v", err)
+	}
+	defer provider.Close()
+
+	named, ok := provider.(interface{ ProviderID() string })
+	if !ok {
+		t.Fatal("expected Eos provider to expose ProviderID")
+	}
+	if got := named.ProviderID(); got != "corkscrewdb-default-embedder" {
+		t.Fatalf("provider id = %q, want %q", got, "corkscrewdb-default-embedder")
+	}
+	if got := provider.Dim(); got != 3 {
+		t.Fatalf("provider dim = %d, want 3", got)
+	}
+}
+
 func TestOpenDefaultsToEosProvider(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

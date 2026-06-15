@@ -21,6 +21,15 @@ func LoadEosProvider(artifactPath string) (EmbeddingProvider, error) {
 	})
 }
 
+// LoadEosProviderWithID loads a Eos embedding package from disk and exposes it
+// under providerID in CorkScrewDB manifests and RemoteInfo responses.
+func LoadEosProviderWithID(providerID, artifactPath string) (EmbeddingProvider, error) {
+	return loadEosProvider(loadEosConfig{
+		ID:           strings.TrimSpace(providerID),
+		ArtifactPath: artifactPath,
+	})
+}
+
 type eosProvider struct {
 	id        string
 	dim       int
@@ -54,16 +63,27 @@ func loadEosProvider(cfg loadEosConfig) (*eosProvider, error) {
 		return nil, err
 	}
 	manifest := model.Manifest()
-	tokenizerPath := cfg.TokenizerPath
-	if tokenizerPath == "" {
-		tokenizerPath = eosruntime.DefaultTokenizerPath(cfg.ArtifactPath)
-	}
-	tokenizerFile, err := eosruntime.ReadTokenizerFile(tokenizerPath)
-	if err != nil {
-		if cfg.TempDir != "" {
-			_ = os.RemoveAll(cfg.TempDir)
+	var tokenizerFile eosruntime.TokenizerFile
+	if cfg.TokenizerPath == "" {
+		var ok bool
+		if tokenizerFile, ok = model.TokenizerFile(); !ok {
+			tokenizerPath := eosruntime.DefaultTokenizerPath(cfg.ArtifactPath)
+			tokenizerFile, err = eosruntime.ReadTokenizerFile(tokenizerPath)
+			if err != nil {
+				if cfg.TempDir != "" {
+					_ = os.RemoveAll(cfg.TempDir)
+				}
+				return nil, err
+			}
 		}
-		return nil, err
+	} else {
+		tokenizerFile, err = eosruntime.ReadTokenizerFile(cfg.TokenizerPath)
+		if err != nil {
+			if cfg.TempDir != "" {
+				_ = os.RemoveAll(cfg.TempDir)
+			}
+			return nil, err
+		}
 	}
 	tokenizer, err := eosruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
 	if err != nil {
