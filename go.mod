@@ -5,7 +5,7 @@ go 1.26
 require (
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
-	m31labs.dev/eos v0.1.4
+	m31labs.dev/eos v0.1.5-0.20260615042457-cf3de1f4d90a
 	m31labs.dev/turboquant v0.2.0
 )
 
