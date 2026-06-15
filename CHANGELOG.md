@@ -2,6 +2,12 @@
 
 All notable changes to CorkScrewDB are documented here.
 
+## Unreleased
+
+### Added
+
+- **Quantized-only local vector storage** - documented `WithQuantizedOnlyPersistence()` / `WithVectorStorage(VectorStorageQuantizedOnly)` for flat embedded collections that persist TurboQuant payloads without retaining raw embeddings in history; HNSW, remote collections, and replication export remain unsupported for this storage mode.
+
 ## v0.2.0 — 2026-04-10
 
 ### Added

@@ -13,7 +13,7 @@ import (
 
 const (
 	walMagic   = uint16(0x4357)
-	walVersion = uint8(2)
+	walVersion = uint8(3)
 )
 
 const (
@@ -27,11 +27,20 @@ type Entry struct {
 	CollectionID string
 	VectorID     string
 	Embedding    []float32
+	Quantized    *QuantizedVector
+	Dim          int
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
 	ActorID      string
 	WallClock    time.Time
+}
+
+// QuantizedVector stores a TurboQuant inner-product payload.
+type QuantizedVector struct {
+	MSE     []byte
+	Signs   []byte
+	ResNorm float32
 }
 
 func (e Entry) MarshalBinary() ([]byte, error) {
@@ -91,6 +100,25 @@ func (e Entry) Encode(w io.Writer) error {
 	if err := writeBytes(embeddingBytes); err != nil {
 		return err
 	}
+	if e.Quantized != nil {
+		if err := write(uint8(1)); err != nil {
+			return err
+		}
+		if err := writeBytes(e.Quantized.MSE); err != nil {
+			return err
+		}
+		if err := writeBytes(e.Quantized.Signs); err != nil {
+			return err
+		}
+		if err := write(math.Float32bits(e.Quantized.ResNorm)); err != nil {
+			return err
+		}
+	} else if err := write(uint8(0)); err != nil {
+		return err
+	}
+	if err := write(uint32(e.Dim)); err != nil {
+		return err
+	}
 	if err := writeString(e.Text); err != nil {
 		return err
 	}
@@ -140,7 +168,7 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	if err := read(&version); err != nil {
 		return entry, err
 	}
-	if version != 1 && version != 2 {
+	if version != 1 && version != 2 && version != 3 {
 		return entry, fmt.Errorf("wal: unsupported version %d", version)
 	}
 	if err := read(&entry.Kind); err != nil {
@@ -179,6 +207,36 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	entry.Embedding = make([]float32, len(embeddingBytes)/4)
 	for i := range entry.Embedding {
 		entry.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
+	}
+	if version >= 3 {
+		var hasQuantized uint8
+		if err := read(&hasQuantized); err != nil {
+			return entry, err
+		}
+		if hasQuantized == 1 {
+			mse, err := readBytes()
+			if err != nil {
+				return entry, err
+			}
+			signs, err := readBytes()
+			if err != nil {
+				return entry, err
+			}
+			var resNormBits uint32
+			if err := read(&resNormBits); err != nil {
+				return entry, err
+			}
+			entry.Quantized = &QuantizedVector{
+				MSE:     append([]byte(nil), mse...),
+				Signs:   append([]byte(nil), signs...),
+				ResNorm: math.Float32frombits(resNormBits),
+			}
+		}
+		var dim uint32
+		if err := read(&dim); err != nil {
+			return entry, err
+		}
+		entry.Dim = int(dim)
 	}
 	entry.Text, err = readString()
 	if err != nil {

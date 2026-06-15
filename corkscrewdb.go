@@ -117,9 +117,10 @@ type embeddingConfig struct {
 }
 
 type collectionMeta struct {
-	BitWidth int   `json:"bit_width"`
-	Seed     int64 `json:"seed"`
-	Dim      int   `json:"dim"`
+	BitWidth      int               `json:"bit_width"`
+	Seed          int64             `json:"seed"`
+	Dim           int               `json:"dim"`
+	VectorStorage VectorStorageMode `json:"vector_storage,omitempty"`
 }
 
 type providerIdentifier interface {
@@ -229,6 +230,16 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				err:      fmt.Errorf("corkscrewdb: collection %q already exists with quantizer seed %d", name, existing.seed),
 			}
 		}
+		if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) != existing.storage {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with vector storage %q", name, existing.storage),
+			}
+		}
 		return existing
 	}
 
@@ -244,10 +255,18 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if cfg.seed < 0 {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
 	}
+	storage, err := validateVectorStorage(cfg.vectorStorage)
+	if err != nil {
+		return &Collection{db: db, name: name, encoder: db.encoder, err: err}
+	}
+	if storage == VectorStorageQuantizedOnly && cfg.indexType == IndexHNSW {
+		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantized_only vector storage supports only flat local indexes")}
+	}
 
 	meta := collectionMeta{
-		BitWidth: cfg.bitWidth,
-		Seed:     cfg.seed,
+		BitWidth:      cfg.bitWidth,
+		Seed:          cfg.seed,
+		VectorStorage: manifestVectorStorage(storage),
 	}
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
@@ -457,13 +476,14 @@ func (db *DB) saveManifestLocked() error {
 	return writeManifest(filepath.Join(db.path, "manifest.json"), db.manifest)
 }
 
-func (db *DB) persistCollectionMeta(name string, bitWidth, dim int, seed int64) error {
+func (db *DB) persistCollectionMeta(name string, bitWidth, dim int, seed int64, storage VectorStorageMode) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	meta := db.manifest.Collections[name]
 	meta.BitWidth = bitWidth
 	meta.Dim = dim
 	meta.Seed = seed
+	meta.VectorStorage = manifestVectorStorage(storage)
 	db.manifest.Collections[name] = meta
 	return db.saveManifestLocked()
 }
@@ -492,10 +512,23 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if data.Seed != 0 {
 				coll.seed = data.Seed
 			}
+			if data.Dim != 0 {
+				coll.dim = data.Dim
+			}
+			if data.Storage != "" {
+				storage, err := validateVectorStorage(VectorStorageMode(data.Storage))
+				if err != nil {
+					return nil, err
+				}
+				coll.storage = storage
+			}
 			for _, record := range data.Records {
 				for _, version := range record.Versions {
+					qv := fromSnapshotQuantized(version.Quantized)
 					if err := coll.loadVersion(record.ID, Version{
 						Embedding:    cloneVector(version.Embedding),
+						quantized:    qv,
+						dim:          data.Dim,
 						Text:         version.Text,
 						Metadata:     cloneMetadata(version.Metadata),
 						LamportClock: version.LamportClock,
@@ -508,18 +541,20 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 				}
 			}
 			snapshotMax = data.MaxLamport
-			if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
-				coll.mu.Lock()
-				// Check if an HNSW graph file exists; if so, wrap the flat index.
-				if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
-					coll.index = hw
-				} else {
-					coll.index = restored
+			if !coll.isQuantizedOnly() {
+				if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
+					coll.mu.Lock()
+					// Check if an HNSW graph file exists; if so, wrap the flat index.
+					if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
+						coll.index = hw
+					} else {
+						coll.index = restored
+					}
+					if coll.dim == 0 {
+						coll.dim = restored.Dim()
+					}
+					coll.mu.Unlock()
 				}
-				if coll.dim == 0 {
-					coll.dim = restored.Dim()
-				}
-				coll.mu.Unlock()
 			}
 		}
 	}
@@ -538,8 +573,11 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if entry.LamportClock <= snapshotMax {
 				continue
 			}
+			qv := fromWALQuantized(entry.Quantized)
 			if err := coll.loadVersion(entry.VectorID, Version{
 				Embedding:    cloneVector(entry.Embedding),
+				quantized:    qv,
+				dim:          entry.Dim,
 				Text:         entry.Text,
 				Metadata:     cloneMetadata(entry.Metadata),
 				LamportClock: entry.LamportClock,
@@ -562,8 +600,8 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 	coll.mu.Lock()
 	coll.dirty = false
 	coll.mu.Unlock()
-	if coll.dim != meta.Dim || coll.bitWidth != meta.BitWidth || coll.seed != meta.Seed {
-		if err := db.persistCollectionMeta(name, coll.bitWidth, coll.dim, coll.seed); err != nil {
+	if coll.dim != meta.Dim || coll.bitWidth != meta.BitWidth || coll.seed != meta.Seed || coll.storage != normalizeVectorStorage(meta.VectorStorage) {
+		if err := db.persistCollectionMeta(name, coll.bitWidth, coll.dim, coll.seed, coll.storage); err != nil {
 			return nil, err
 		}
 	}
@@ -589,11 +627,23 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		name:     name,
 		bitWidth: meta.BitWidth,
 		seed:     meta.Seed,
+		storage:  normalizeVectorStorage(meta.VectorStorage),
 		encoder:  db.encoder,
 		history:  make(map[string][]Version),
 		clock:    newHLC(db.manifest.ActorID),
 		wal:      manager,
+		dim:      meta.Dim,
 	}, nil
+}
+
+func (db *DB) pruneWAL(name string) error {
+	db.mu.RLock()
+	coll := db.collections[name]
+	db.mu.RUnlock()
+	if coll == nil || coll.wal == nil {
+		return nil
+	}
+	return coll.wal.PruneAndReset()
 }
 
 func (db *DB) pruneSnapshots(name, keep string) error {

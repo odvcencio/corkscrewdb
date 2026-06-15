@@ -79,6 +79,25 @@ db, err := corkscrewdb.Open("./prod.csdb", corkscrewdb.WithProvider(myProvider))
 
 Embedding config is persisted in `manifest.json`. Reopening a database with a different embedding space is rejected to keep search results coherent.
 
+## Vector Storage
+
+Collections persist raw float embeddings by default. For local flat collections that only need quantized search and metadata/history text, use quantized-only persistence:
+
+```go
+coll := db.Collection(
+    "child_vectors",
+    corkscrewdb.WithBitWidth(8),
+    corkscrewdb.WithQuantizerSeed(5581486560434873699),
+    corkscrewdb.WithQuantizedOnlyPersistence(),
+)
+```
+
+`WithQuantizedOnlyPersistence()` is shorthand for `WithVectorStorage(VectorStorageQuantizedOnly)`. In this mode, WAL and snapshots store TurboQuant payloads plus text, metadata, clocks, and tombstones. Raw embeddings are used only at write time to build the quantized payload; they are not retained in version history or durable snapshots, and CorkScrewDB does not write a separate flat `.tqi` index file because the snapshot is the durable full-state copy.
+
+Current limits are intentional: `quantized_only` is for embedded local flat search. HNSW creation/rebuild is rejected, remote collections reject the option, and replication snapshot/WAL export is unsupported until those paths can carry quantized-only state safely. Choose the default raw mode when you need raw vectors in history, HNSW, remote operation, or replication.
+
+An Eos SciFact child-vector smoke using 12,468 128-d vectors with fixed quantizer seed `5581486560434873699` measured closed DB sizes of `4,251,167` bytes (`0.066749x`) for q8, `3,453,215` bytes (`0.054220x`) for q4, and `3,054,239` bytes (`0.047956x`) for q2. In that smoke, q8 exhaustive search matched the cache evaluator to rounding with nDCG@10 `0.413312` and recall@100 `0.743556`; serving-style overfetch100 recall was `0.729111`. These are local smoke numbers, not a general benchmark.
+
 ## Remote Mode
 
 `Connect(...)` works for remote access using the same collection API over gRPC:

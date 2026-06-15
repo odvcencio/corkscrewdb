@@ -14,7 +14,7 @@ import (
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(2)
+	snapshotVersion = uint8(3)
 )
 
 // Data is one collection snapshot.
@@ -23,6 +23,7 @@ type Data struct {
 	BitWidth   int
 	Seed       int64
 	Dim        int
+	Storage    string
 	MaxLamport uint64
 	CreatedAt  time.Time
 	Records    []Record
@@ -37,6 +38,7 @@ type Record struct {
 // Version is one immutable version stored in a snapshot.
 type Version struct {
 	Embedding    []float32
+	Quantized    *QuantizedVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -45,19 +47,57 @@ type Version struct {
 	Tombstone    bool
 }
 
+// QuantizedVector stores a TurboQuant inner-product payload.
+type QuantizedVector struct {
+	MSE     []byte
+	Signs   []byte
+	ResNorm float32
+}
+
 func WriteFile(path string, data Data) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	payload, err := marshal(data)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := dirFile.Sync(); err != nil {
+		_ = dirFile.Close()
+		return err
+	}
+	return dirFile.Close()
 }
 
 func marshal(data Data) ([]byte, error) {
@@ -96,6 +136,9 @@ func marshal(data Data) ([]byte, error) {
 	if err := write(uint32(data.Dim)); err != nil {
 		return nil, err
 	}
+	if err := writeString(data.Storage); err != nil {
+		return nil, err
+	}
 	if err := write(data.MaxLamport); err != nil {
 		return nil, err
 	}
@@ -118,6 +161,22 @@ func marshal(data Data) ([]byte, error) {
 				binary.LittleEndian.PutUint32(embedding[i*4:], math.Float32bits(value))
 			}
 			if err := writeBytes(embedding); err != nil {
+				return nil, err
+			}
+			if version.Quantized != nil {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if err := writeBytes(version.Quantized.MSE); err != nil {
+					return nil, err
+				}
+				if err := writeBytes(version.Quantized.Signs); err != nil {
+					return nil, err
+				}
+				if err := write(math.Float32bits(version.Quantized.ResNorm)); err != nil {
+					return nil, err
+				}
+			} else if err := write(uint8(0)); err != nil {
 				return nil, err
 			}
 			if err := writeString(version.Text); err != nil {

@@ -64,12 +64,12 @@ func read(r io.Reader) (Data, error) {
 	if magic != snapshotMagic {
 		return data, fmt.Errorf("snapshot: invalid magic %x", magic)
 	}
-	var version uint8
-	if err := read(&version); err != nil {
+	var formatVersion uint8
+	if err := read(&formatVersion); err != nil {
 		return data, err
 	}
-	if version != 1 && version != 2 {
-		return data, fmt.Errorf("snapshot: unsupported version %d", version)
+	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 {
+		return data, fmt.Errorf("snapshot: unsupported version %d", formatVersion)
 	}
 
 	var err error
@@ -90,6 +90,12 @@ func read(r io.Reader) (Data, error) {
 		return data, err
 	}
 	data.Dim = int(dim)
+	if formatVersion >= 3 {
+		data.Storage, err = readString()
+		if err != nil {
+			return data, err
+		}
+	}
 	if err := read(&data.MaxLamport); err != nil {
 		return data, err
 	}
@@ -125,6 +131,31 @@ func read(r io.Reader) (Data, error) {
 			version := Version{Embedding: make([]float32, len(embeddingBytes)/4)}
 			for i := range version.Embedding {
 				version.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
+			}
+			if formatVersion >= 3 {
+				var hasQuantized uint8
+				if err := read(&hasQuantized); err != nil {
+					return data, err
+				}
+				if hasQuantized == 1 {
+					mse, err := readBytes()
+					if err != nil {
+						return data, err
+					}
+					signs, err := readBytes()
+					if err != nil {
+						return data, err
+					}
+					var resNormBits uint32
+					if err := read(&resNormBits); err != nil {
+						return data, err
+					}
+					version.Quantized = &QuantizedVector{
+						MSE:     append([]byte(nil), mse...),
+						Signs:   append([]byte(nil), signs...),
+						ResNorm: math.Float32frombits(resNormBits),
+					}
+				}
 			}
 			version.Text, err = readString()
 			if err != nil {

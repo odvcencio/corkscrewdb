@@ -180,6 +180,9 @@ func (db *DB) remoteCollection(name string, opts ...CollectionOption) *Collectio
 			}
 			existing.bitWidth = cfg.bitWidth
 		}
+		if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) == VectorStorageQuantizedOnly {
+			return &Collection{db: db, name: name, remote: db.remote, err: errors.New("corkscrewdb: quantized_only vector storage is unsupported over remote collections")}
+		}
 		return existing
 	}
 
@@ -188,6 +191,9 @@ func (db *DB) remoteCollection(name string, opts ...CollectionOption) *Collectio
 		if opt != nil {
 			opt.applyCollection(&cfg)
 		}
+	}
+	if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) == VectorStorageQuantizedOnly {
+		return &Collection{db: db, name: name, remote: db.remote, err: errors.New("corkscrewdb: quantized_only vector storage is unsupported over remote collections")}
 	}
 	if err := db.remote.EnsureCollection(name, cfg.bitWidth); err != nil {
 		return &Collection{db: db, name: name, remote: db.remote, err: err}
@@ -244,12 +250,18 @@ func (s *transportServer) Put(req RPCPutRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
+	if s.collectionUsesQuantizedOnly(req.Collection) {
+		return errQuantizedOnlyRemoteWrite
+	}
 	return s.db.Collection(req.Collection).put(req.ID, req.Entry, !req.Internal)
 }
 
 func (s *transportServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
+	}
+	if s.collectionUsesQuantizedOnly(req.Collection) {
+		return errQuantizedOnlyRemoteWrite
 	}
 	opts := make([]PutVectorOption, 0, 2)
 	if req.Text != "" {
@@ -309,6 +321,9 @@ func (s *transportServer) History(req RPCHistoryRequest, resp *RPCHistoryRespons
 func (s *transportServer) Delete(req RPCDeleteRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
+	}
+	if s.collectionUsesQuantizedOnly(req.Collection) {
+		return errQuantizedOnlyRemoteWrite
 	}
 	return s.db.Collection(req.Collection).delete(req.ID, !req.Internal)
 }
@@ -419,6 +434,9 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
 	}
+	if s.collectionUsesQuantizedOnly(req.Collection) {
+		return RPCPullEntriesResponse{}, errors.New("corkscrewdb: replication pull entries is unsupported for quantized_only vector storage")
+	}
 	if s.db.streamer == nil {
 		return RPCPullEntriesResponse{}, nil
 	}
@@ -447,6 +465,9 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait time.Duration) (RPCPullEntriesResponse, error) {
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
+	}
+	if s.collectionUsesQuantizedOnly(req.Collection) {
+		return RPCPullEntriesResponse{}, errors.New("corkscrewdb: replication stream entries is unsupported for quantized_only vector storage")
 	}
 	if s.db.streamer == nil {
 		return RPCPullEntriesResponse{}, nil
@@ -483,6 +504,9 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPull
 	if !ok {
 		return fmt.Errorf("corkscrewdb: collection %q not found", req.Collection)
 	}
+	if coll.isQuantizedOnly() {
+		return errors.New("corkscrewdb: replication pull snapshot is unsupported for quantized_only vector storage")
+	}
 
 	coll.mu.RLock()
 	defer coll.mu.RUnlock()
@@ -509,6 +533,13 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPull
 		resp.Records = append(resp.Records, record)
 	}
 	return nil
+}
+
+func (s *transportServer) collectionUsesQuantizedOnly(name string) bool {
+	s.db.mu.RLock()
+	coll := s.db.collections[name]
+	s.db.mu.RUnlock()
+	return coll != nil && coll.isQuantizedOnly()
 }
 
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {

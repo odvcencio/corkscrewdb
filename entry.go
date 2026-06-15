@@ -3,6 +3,8 @@ package corkscrewdb
 import (
 	"sort"
 	"time"
+
+	"m31labs.dev/turboquant"
 )
 
 // Entry is the input payload for Put operations.
@@ -21,6 +23,8 @@ type Version struct {
 	ActorID      string
 	WallClock    time.Time
 	Tombstone    bool
+	quantized    *turboquant.IPQuantized
+	dim          int
 }
 
 // SearchResult is one ranked similarity-search hit.
@@ -99,6 +103,16 @@ const (
 	IndexHNSW
 )
 
+// VectorStorageMode controls how vector payloads are stored durably.
+type VectorStorageMode string
+
+const (
+	// VectorStorageRaw stores raw float embeddings in WAL and snapshots.
+	VectorStorageRaw VectorStorageMode = "raw"
+	// VectorStorageQuantizedOnly stores only TurboQuant payloads in WAL and snapshots.
+	VectorStorageQuantizedOnly VectorStorageMode = "quantized_only"
+)
+
 type collectionConfig struct {
 	bitWidth        int
 	seed            int64
@@ -106,6 +120,7 @@ type collectionConfig struct {
 	hnswM           int
 	hnswEfConstruct int
 	hnswEfSearch    int
+	vectorStorage   VectorStorageMode
 }
 
 // CollectionOption configures Collection creation.
@@ -149,6 +164,18 @@ func WithHNSWParams(m, efConstruction, efSearch int) CollectionOption {
 	})
 }
 
+// WithVectorStorage selects how vectors are persisted for a collection.
+func WithVectorStorage(mode VectorStorageMode) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.vectorStorage = mode
+	})
+}
+
+// WithQuantizedOnlyPersistence stores only quantized vector payloads durably.
+func WithQuantizedOnlyPersistence() CollectionOption {
+	return WithVectorStorage(VectorStorageQuantizedOnly)
+}
+
 func cloneMetadata(meta map[string]string) map[string]string {
 	if len(meta) == 0 {
 		return nil
@@ -170,6 +197,11 @@ func cloneVector(vec []float32) []float32 {
 }
 
 func cloneVersion(v Version) Version {
+	var qv *turboquant.IPQuantized
+	if v.quantized != nil {
+		cloned := cloneQuantized(*v.quantized)
+		qv = &cloned
+	}
 	return Version{
 		Embedding:    cloneVector(v.Embedding),
 		Text:         v.Text,
@@ -178,6 +210,8 @@ func cloneVersion(v Version) Version {
 		ActorID:      v.ActorID,
 		WallClock:    v.WallClock,
 		Tombstone:    v.Tombstone,
+		quantized:    qv,
+		dim:          v.dim,
 	}
 }
 
