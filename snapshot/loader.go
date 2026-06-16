@@ -68,7 +68,7 @@ func read(r io.Reader) (Data, error) {
 	if err := read(&formatVersion); err != nil {
 		return data, err
 	}
-	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 {
+	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 && formatVersion != 4 {
 		return data, fmt.Errorf("snapshot: unsupported version %d", formatVersion)
 	}
 
@@ -155,6 +155,73 @@ func read(r io.Reader) (Data, error) {
 						Signs:   append([]byte(nil), signs...),
 						ResNorm: math.Float32frombits(resNormBits),
 					}
+				}
+			}
+			if formatVersion >= 4 {
+				var childCount uint32
+				if err := read(&childCount); err != nil {
+					return data, err
+				}
+				version.Children = make([]ChildVector, 0, childCount)
+				for range childCount {
+					child := ChildVector{}
+					child.ID, err = readString()
+					if err != nil {
+						return data, err
+					}
+					childEmbeddingBytes, err := readBytes()
+					if err != nil {
+						return data, err
+					}
+					if len(childEmbeddingBytes)%4 != 0 {
+						return data, fmt.Errorf("snapshot: invalid child embedding byte length %d", len(childEmbeddingBytes))
+					}
+					child.Embedding = make([]float32, len(childEmbeddingBytes)/4)
+					for i := range child.Embedding {
+						child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(childEmbeddingBytes[i*4:]))
+					}
+					var hasQuantized uint8
+					if err := read(&hasQuantized); err != nil {
+						return data, err
+					}
+					if hasQuantized == 1 {
+						mse, err := readBytes()
+						if err != nil {
+							return data, err
+						}
+						signs, err := readBytes()
+						if err != nil {
+							return data, err
+						}
+						var resNormBits uint32
+						if err := read(&resNormBits); err != nil {
+							return data, err
+						}
+						child.Quantized = &QuantizedVector{
+							MSE:     append([]byte(nil), mse...),
+							Signs:   append([]byte(nil), signs...),
+							ResNorm: math.Float32frombits(resNormBits),
+						}
+					}
+					var childDim uint32
+					if err := read(&childDim); err != nil {
+						return data, err
+					}
+					child.Dim = int(childDim)
+					child.Text, err = readString()
+					if err != nil {
+						return data, err
+					}
+					childMetaJSON, err := readBytes()
+					if err != nil {
+						return data, err
+					}
+					if len(childMetaJSON) > 0 {
+						if err := json.Unmarshal(childMetaJSON, &child.Metadata); err != nil {
+							return data, err
+						}
+					}
+					version.Children = append(version.Children, child)
 				}
 			}
 			version.Text, err = readString()

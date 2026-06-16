@@ -14,7 +14,7 @@ import (
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(3)
+	snapshotVersion = uint8(4)
 )
 
 // Data is one collection snapshot.
@@ -39,6 +39,7 @@ type Record struct {
 type Version struct {
 	Embedding    []float32
 	Quantized    *QuantizedVector
+	Children     []ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -52,6 +53,16 @@ type QuantizedVector struct {
 	MSE     []byte
 	Signs   []byte
 	ResNorm float32
+}
+
+// ChildVector stores one packed child vector inside a parent snapshot version.
+type ChildVector struct {
+	ID        string
+	Embedding []float32
+	Quantized *QuantizedVector
+	Dim       int
+	Text      string
+	Metadata  map[string]string
 }
 
 func WriteFile(path string, data Data) error {
@@ -178,6 +189,50 @@ func marshal(data Data) ([]byte, error) {
 				}
 			} else if err := write(uint8(0)); err != nil {
 				return nil, err
+			}
+			if err := write(uint32(len(version.Children))); err != nil {
+				return nil, err
+			}
+			for _, child := range version.Children {
+				if err := writeString(child.ID); err != nil {
+					return nil, err
+				}
+				childEmbedding := make([]byte, len(child.Embedding)*4)
+				for i, value := range child.Embedding {
+					binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(value))
+				}
+				if err := writeBytes(childEmbedding); err != nil {
+					return nil, err
+				}
+				if child.Quantized != nil {
+					if err := write(uint8(1)); err != nil {
+						return nil, err
+					}
+					if err := writeBytes(child.Quantized.MSE); err != nil {
+						return nil, err
+					}
+					if err := writeBytes(child.Quantized.Signs); err != nil {
+						return nil, err
+					}
+					if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+						return nil, err
+					}
+				} else if err := write(uint8(0)); err != nil {
+					return nil, err
+				}
+				if err := write(uint32(child.Dim)); err != nil {
+					return nil, err
+				}
+				if err := writeString(child.Text); err != nil {
+					return nil, err
+				}
+				childMetaJSON, err := json.Marshal(child.Metadata)
+				if err != nil {
+					return nil, err
+				}
+				if err := writeBytes(childMetaJSON); err != nil {
+					return nil, err
+				}
 			}
 			if err := writeString(version.Text); err != nil {
 				return nil, err

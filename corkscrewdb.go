@@ -527,6 +527,7 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 					qv := fromSnapshotQuantized(version.Quantized)
 					if err := coll.loadVersion(record.ID, Version{
 						Embedding:    cloneVector(version.Embedding),
+						Children:     fromSnapshotChildren(version.Children),
 						quantized:    qv,
 						dim:          data.Dim,
 						Text:         version.Text,
@@ -576,6 +577,7 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			qv := fromWALQuantized(entry.Quantized)
 			if err := coll.loadVersion(entry.VectorID, Version{
 				Embedding:    cloneVector(entry.Embedding),
+				Children:     fromWALChildren(entry.Children),
 				quantized:    qv,
 				dim:          entry.Dim,
 				Text:         entry.Text,

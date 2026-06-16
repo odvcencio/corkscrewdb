@@ -254,6 +254,198 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 	}
 }
 
+func TestQuantizedOnlyPackedParentMultiVectorLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "packed-parent.csdb")
+	seed := int64(5581486560434873699)
+	oldQuery := []float32{0, 1, 0, 0}
+	newQuery := []float32{0, 0, 0, 1}
+
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithQuantizedOnlyPersistence())
+	if err := coll.PutVector("single", oldQuery, WithText("single vector"), WithMetadata(map[string]string{"kind": "single"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.PutMultiVector("parent-1", MultiVectorEntry{
+		Text:     "parent text",
+		Metadata: map[string]string{"tenant": "acme", "type": "article"},
+		Children: []MultiVectorChild{
+			{ID: "c-old", Vector: oldQuery, Text: "old child", Metadata: map[string]string{"slot": "old", "kind": "code"}},
+			{ID: "c-other", Vector: []float32{0, 0, 1, 0}, Text: "other child", Metadata: map[string]string{"slot": "other", "kind": "note"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history, err := coll.History("parent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || len(history[0].Children) != 2 || len(history[0].Embedding) != 0 {
+		t.Fatalf("history = %+v, want one packed parent version with children and no raw embedding", history)
+	}
+	if len(history[0].Children[0].Embedding) != 0 || history[0].Children[0].quantized == nil {
+		t.Fatalf("child history = %+v, want quantized-only child payload", history[0].Children[0])
+	}
+	firstClock := history[0].LamportClock
+
+	parentResults, err := coll.SearchParentsVector(oldQuery, 5, WithParentFilters(Filter("tenant", "acme")), WithChildFilters(Filter("kind", "code")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parentResults) != 1 || parentResults[0].ID != "parent-1" || parentResults[0].ChildID != "c-old" {
+		t.Fatalf("parent results = %+v, want parent-1/c-old", parentResults)
+	}
+	if parentResults[0].Text != "parent text" || parentResults[0].ChildText != "old child" || parentResults[0].ChildMetadata["slot"] != "old" {
+		t.Fatalf("parent result fields not preserved: %+v", parentResults[0])
+	}
+	if _, err := coll.SearchParentsVector(oldQuery, 5, WithChildOverfetch(2)); err == nil || !strings.Contains(err.Error(), "WithChildOverfetch") {
+		t.Fatalf("WithChildOverfetch err = %v, want unsupported", err)
+	}
+
+	vectorResults, err := coll.SearchVector(oldQuery, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vectorResults) != 1 || vectorResults[0].ID != "single" {
+		t.Fatalf("SearchVector results = %+v, want only single-vector entries", vectorResults)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilesDoNotContainRawVector(t, filepath.Join(path, "collections", "vecs"), oldQuery)
+
+	db, err = Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	coll = db.Collection("vecs", WithQuantizedOnlyPersistence())
+	reopened, err := coll.SearchParentsVector(oldQuery, 5, WithChildFilters(Filter("slot", "old")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened) != 1 || reopened[0].ID != "parent-1" || reopened[0].ChildID != "c-old" {
+		t.Fatalf("reopened parent results = %+v, want parent-1/c-old", reopened)
+	}
+	reopenedHistory, err := coll.History("parent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopenedHistory) != 1 || len(reopenedHistory[0].Children) != 2 {
+		t.Fatalf("reopened history = %+v, want packed children", reopenedHistory)
+	}
+
+	if err := coll.PutMultiVector("parent-1", MultiVectorEntry{
+		Text:     "replacement parent",
+		Metadata: map[string]string{"tenant": "acme", "type": "article"},
+		Children: []MultiVectorChild{
+			{ID: "c-new", Vector: newQuery, Text: "new child", Metadata: map[string]string{"slot": "new", "kind": "code"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := coll.SearchParentsVector(oldQuery, 5, WithChildFilters(Filter("slot", "old")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("stale child survived replacement: %+v", stale)
+	}
+	current, err := coll.SearchParentsVector(newQuery, 5, WithChildFilters(Filter("slot", "new")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(current) != 1 || current[0].ChildID != "c-new" || current[0].Text != "replacement parent" {
+		t.Fatalf("current results = %+v, want c-new replacement", current)
+	}
+	atOld, err := coll.At(firstClock).SearchParentsVector(oldQuery, 5, WithChildFilters(Filter("slot", "old")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atOld) != 1 || atOld[0].ChildID != "c-old" {
+		t.Fatalf("At(firstClock) parent results = %+v, want c-old", atOld)
+	}
+
+	if err := coll.Delete("parent-1"); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := coll.SearchParentsVector(newQuery, 5, WithChildFilters(Filter("slot", "new")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted parent still searchable: %+v", deleted)
+	}
+	history, err = coll.History("parent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 || !history[2].Tombstone {
+		t.Fatalf("history = %+v, want tombstone third version", history)
+	}
+}
+
+func TestPackedParentMultiVectorRejectsUnsupportedSurfacesAndInvalidInput(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	raw := db.Collection("raw")
+	err = raw.PutMultiVector("parent", MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}})
+	if err == nil || !strings.Contains(err.Error(), "requires quantized_only") {
+		t.Fatalf("raw PutMultiVector err = %v, want quantized_only requirement", err)
+	}
+	if _, err := raw.SearchParentsVector([]float32{1, 0}, 1); err == nil || !strings.Contains(err.Error(), "requires quantized_only") {
+		t.Fatalf("raw SearchParentsVector err = %v, want quantized_only requirement", err)
+	}
+
+	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	tests := []struct {
+		name    string
+		id      string
+		entry   MultiVectorEntry
+		wantErr string
+	}{
+		{name: "empty parent", id: "", entry: MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}}, wantErr: "parent id"},
+		{name: "no children", id: "parent", entry: MultiVectorEntry{}, wantErr: "at least one child"},
+		{name: "empty child", id: "parent", entry: MultiVectorEntry{Children: []MultiVectorChild{{Vector: []float32{1, 0}}}}, wantErr: "child id"},
+		{name: "duplicate child", id: "parent", entry: MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}, {ID: "c1", Vector: []float32{0, 1}}}}, wantErr: "duplicate child id"},
+		{name: "empty vector", id: "parent", entry: MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1"}}}, wantErr: "empty embedding"},
+		{name: "dimension mismatch", id: "parent", entry: MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}, {ID: "c2", Vector: []float32{1, 0, 0}}}}, wantErr: "dimension"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := coll.PutMultiVector(tt.id, tt.entry)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("PutMultiVector err = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	federated, err := Open(filepath.Join(t.TempDir(), "federated.csdb"), WithProvider(nil), WithShards(
+		ShardAssignment{ID: "local", Owner: LocalShardOwner, Start: 0, End: 10},
+		ShardAssignment{ID: "remote", Owner: "127.0.0.1:1", Start: 11, End: ^uint64(0)},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer federated.Close()
+	fedColl := federated.Collection("vecs", WithQuantizedOnlyPersistence())
+	err = fedColl.PutMultiVector("parent", MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}})
+	if err == nil || !strings.Contains(err.Error(), "federated") {
+		t.Fatalf("federated PutMultiVector err = %v, want unsupported", err)
+	}
+	if _, err := fedColl.SearchParentsVector([]float32{1, 0}, 1); err == nil || !strings.Contains(err.Error(), "federated") {
+		t.Fatalf("federated SearchParentsVector err = %v, want unsupported", err)
+	}
+}
+
 func TestQuantizedOnlyRejectsHNSWCreationAndReplicationExport(t *testing.T) {
 	db, err := Open(t.TempDir(), WithProvider(&mockProvider{dim: 4}))
 	if err != nil {

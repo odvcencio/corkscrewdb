@@ -2,6 +2,8 @@ package corkscrewdb
 
 import (
 	"container/heap"
+	"errors"
+	"sort"
 	"sync"
 
 	"m31labs.dev/turboquant"
@@ -20,11 +22,18 @@ type indexer interface {
 var _ indexer = (*index)(nil)
 
 type indexEntry struct {
-	id       string
-	qv       turboquant.IPQuantized
-	text     string
-	metadata map[string]string
-	version  uint64
+	id             string
+	qv             turboquant.IPQuantized
+	text           string
+	metadata       map[string]string
+	version        uint64
+	parentID       string
+	parentText     string
+	parentMetadata map[string]string
+	childID        string
+	childText      string
+	childMetadata  map[string]string
+	child          bool
 }
 
 type index struct {
@@ -91,6 +100,29 @@ func (idx *index) Remove(id string) bool {
 	return true
 }
 
+func (idx *index) removePackedChildren(parentID string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for i := 0; i < len(idx.entries); {
+		if idx.entries[i].child && idx.entries[i].parentID == parentID {
+			idx.removeAtLocked(i)
+			continue
+		}
+		i++
+	}
+}
+
+func (idx *index) removeAtLocked(pos int) {
+	last := len(idx.entries) - 1
+	removedID := idx.entries[pos].id
+	if pos != last {
+		idx.entries[pos] = idx.entries[last]
+		idx.idIndex[idx.entries[pos].id] = pos
+	}
+	idx.entries = idx.entries[:last]
+	delete(idx.idIndex, removedID)
+}
+
 func (idx *index) addQuantized(id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -109,17 +141,57 @@ func (idx *index) addQuantized(id string, qv turboquant.IPQuantized, text string
 	idx.entries = append(idx.entries, entry)
 }
 
+func (idx *index) addPackedChild(parentID string, parent Version, child MultiVectorChildVersion) {
+	if child.quantized == nil {
+		return
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	id := packedChildIndexID(parentID, child.ID)
+	entry := indexEntry{
+		id:             id,
+		qv:             cloneQuantized(*child.quantized),
+		text:           child.Text,
+		metadata:       cloneMetadata(child.Metadata),
+		version:        parent.LamportClock,
+		parentID:       parentID,
+		parentText:     parent.Text,
+		parentMetadata: cloneMetadata(parent.Metadata),
+		childID:        child.ID,
+		childText:      child.Text,
+		childMetadata:  cloneMetadata(child.Metadata),
+		child:          true,
+	}
+	if pos, ok := idx.idIndex[id]; ok {
+		idx.entries[pos] = entry
+		return
+	}
+	idx.idIndex[id] = len(idx.entries)
+	idx.entries = append(idx.entries, entry)
+}
+
+func packedChildIndexID(parentID, childID string) string {
+	return parentID + "\x00" + childID
+}
+
 func (idx *index) snapshotEntries() []indexEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	out := make([]indexEntry, len(idx.entries))
 	for i, entry := range idx.entries {
 		out[i] = indexEntry{
-			id:       entry.id,
-			qv:       cloneQuantized(entry.qv),
-			text:     entry.text,
-			metadata: cloneMetadata(entry.metadata),
-			version:  entry.version,
+			id:             entry.id,
+			qv:             cloneQuantized(entry.qv),
+			text:           entry.text,
+			metadata:       cloneMetadata(entry.metadata),
+			version:        entry.version,
+			parentID:       entry.parentID,
+			parentText:     entry.parentText,
+			parentMetadata: cloneMetadata(entry.parentMetadata),
+			childID:        entry.childID,
+			childText:      entry.childText,
+			childMetadata:  cloneMetadata(entry.childMetadata),
+			child:          entry.child,
 		}
 	}
 	return out
@@ -147,6 +219,9 @@ func (idx *index) Search(query []float32, k int, filters []FilterOption) []Searc
 	h := &searchHeap{}
 	for i := 0; i < n; i++ {
 		entry := idx.entries[i]
+		if entry.child {
+			continue
+		}
 		if !matchesFilters(entry.metadata, filters) {
 			continue
 		}
@@ -173,6 +248,75 @@ func (idx *index) Search(query []float32, k int, filters []FilterOption) []Searc
 	copy(results, *h)
 	sortSearchResults(results)
 	return results
+}
+
+func (idx *index) SearchParents(query []float32, k int, cfg parentSearchConfig) ([]ParentSearchResult, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+	if cfg.childOverfetch > 0 {
+		return nil, errors.New("corkscrewdb: WithChildOverfetch is unsupported for exact flat parent search in v1")
+	}
+	idx.mu.RLock()
+	n := len(idx.entries)
+	if n == 0 {
+		idx.mu.RUnlock()
+		return nil, nil
+	}
+	pq := idx.quantizer.PrepareQuery(query)
+	best := make(map[string]ParentSearchResult)
+	for i := 0; i < n; i++ {
+		entry := idx.entries[i]
+		if !entry.child {
+			continue
+		}
+		if !matchesFilters(entry.parentMetadata, cfg.parentFilters) || !matchesFilters(entry.childMetadata, cfg.childFilters) {
+			continue
+		}
+		score := idx.quantizer.InnerProductPrepared(entry.qv, pq)
+		result := ParentSearchResult{
+			ID:            entry.parentID,
+			Score:         score,
+			Text:          entry.parentText,
+			Metadata:      cloneMetadata(entry.parentMetadata),
+			Version:       entry.version,
+			ChildID:       entry.childID,
+			ChildScore:    score,
+			ChildText:     entry.childText,
+			ChildMetadata: cloneMetadata(entry.childMetadata),
+		}
+		current, ok := best[entry.parentID]
+		if !ok || parentResultLess(current, result) {
+			best[entry.parentID] = result
+		}
+	}
+	idx.mu.RUnlock()
+
+	results := make([]ParentSearchResult, 0, len(best))
+	for _, result := range best {
+		results = append(results, result)
+	}
+	sortParentSearchResults(results)
+	if len(results) > k {
+		results = results[:k]
+	}
+	return results, nil
+}
+
+func sortParentSearchResults(results []ParentSearchResult) {
+	sort.Slice(results, func(i, j int) bool {
+		return parentResultLess(results[j], results[i])
+	})
+}
+
+func parentResultLess(a, b ParentSearchResult) bool {
+	if a.Score != b.Score {
+		return a.Score < b.Score
+	}
+	if a.ID != b.ID {
+		return a.ID > b.ID
+	}
+	return a.ChildID > b.ChildID
 }
 
 func (idx *index) Len() int {

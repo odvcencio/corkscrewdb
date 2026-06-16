@@ -64,3 +64,50 @@ func TestEntryTombstoneRoundTrip(t *testing.T) {
 		t.Fatalf("VectorID = %q", got.VectorID)
 	}
 }
+
+func TestEntryPackedChildrenRoundTrip(t *testing.T) {
+	entry := Entry{
+		Kind:         EntryPut,
+		CollectionID: "documents",
+		VectorID:     "parent-1",
+		Dim:          4,
+		Children: []ChildVector{
+			{
+				ID:        "child-1",
+				Quantized: &QuantizedVector{MSE: []byte{1, 2}, Signs: []byte{3}, ResNorm: 0.75},
+				Dim:       4,
+				Text:      "child text",
+				Metadata:  map[string]string{"slot": "one"},
+			},
+			{
+				ID:        "child-raw-future",
+				Embedding: []float32{1, 0, 0, 0},
+				Dim:       4,
+				Text:      "future raw child",
+				Metadata:  map[string]string{"slot": "two"},
+			},
+		},
+		Text:         "parent text",
+		Metadata:     map[string]string{"tenant": "acme"},
+		LamportClock: 123,
+		ActorID:      "actor-1",
+		WallClock:    time.Date(2026, 4, 7, 14, 0, 0, 0, time.UTC),
+	}
+	var buf bytes.Buffer
+	if err := entry.Encode(&buf); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadEntry(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.VectorID != "parent-1" || got.Dim != 4 || len(got.Children) != 2 {
+		t.Fatalf("got = %+v, want parent with two children", got)
+	}
+	if got.Children[0].ID != "child-1" || got.Children[0].Quantized == nil || got.Children[0].Metadata["slot"] != "one" {
+		t.Fatalf("quantized child = %+v", got.Children[0])
+	}
+	if len(got.Children[1].Embedding) != 4 || got.Children[1].Metadata["slot"] != "two" {
+		t.Fatalf("raw child = %+v", got.Children[1])
+	}
+}

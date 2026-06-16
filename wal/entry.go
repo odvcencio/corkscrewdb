@@ -13,7 +13,7 @@ import (
 
 const (
 	walMagic   = uint16(0x4357)
-	walVersion = uint8(3)
+	walVersion = uint8(4)
 )
 
 const (
@@ -29,6 +29,7 @@ type Entry struct {
 	Embedding    []float32
 	Quantized    *QuantizedVector
 	Dim          int
+	Children     []ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -41,6 +42,16 @@ type QuantizedVector struct {
 	MSE     []byte
 	Signs   []byte
 	ResNorm float32
+}
+
+// ChildVector stores one packed child vector inside a parent WAL entry.
+type ChildVector struct {
+	ID        string
+	Embedding []float32
+	Quantized *QuantizedVector
+	Dim       int
+	Text      string
+	Metadata  map[string]string
 }
 
 func (e Entry) MarshalBinary() ([]byte, error) {
@@ -119,6 +130,50 @@ func (e Entry) Encode(w io.Writer) error {
 	if err := write(uint32(e.Dim)); err != nil {
 		return err
 	}
+	if err := write(uint32(len(e.Children))); err != nil {
+		return err
+	}
+	for _, child := range e.Children {
+		if err := writeString(child.ID); err != nil {
+			return err
+		}
+		childEmbedding := make([]byte, len(child.Embedding)*4)
+		for i, v := range child.Embedding {
+			binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(v))
+		}
+		if err := writeBytes(childEmbedding); err != nil {
+			return err
+		}
+		if child.Quantized != nil {
+			if err := write(uint8(1)); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.MSE); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.Signs); err != nil {
+				return err
+			}
+			if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+				return err
+			}
+		} else if err := write(uint8(0)); err != nil {
+			return err
+		}
+		if err := write(uint32(child.Dim)); err != nil {
+			return err
+		}
+		if err := writeString(child.Text); err != nil {
+			return err
+		}
+		childMetaJSON, err := json.Marshal(child.Metadata)
+		if err != nil {
+			return err
+		}
+		if err := writeBytes(childMetaJSON); err != nil {
+			return err
+		}
+	}
 	if err := writeString(e.Text); err != nil {
 		return err
 	}
@@ -168,7 +223,7 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	if err := read(&version); err != nil {
 		return entry, err
 	}
-	if version != 1 && version != 2 && version != 3 {
+	if version != 1 && version != 2 && version != 3 && version != 4 {
 		return entry, fmt.Errorf("wal: unsupported version %d", version)
 	}
 	if err := read(&entry.Kind); err != nil {
@@ -237,6 +292,73 @@ func ReadEntry(r io.Reader) (Entry, error) {
 			return entry, err
 		}
 		entry.Dim = int(dim)
+	}
+	if version >= 4 {
+		var childCount uint32
+		if err := read(&childCount); err != nil {
+			return entry, err
+		}
+		entry.Children = make([]ChildVector, 0, childCount)
+		for range childCount {
+			child := ChildVector{}
+			child.ID, err = readString()
+			if err != nil {
+				return entry, err
+			}
+			embeddingBytes, err := readBytes()
+			if err != nil {
+				return entry, err
+			}
+			if len(embeddingBytes)%4 != 0 {
+				return entry, fmt.Errorf("wal: invalid child embedding byte length %d", len(embeddingBytes))
+			}
+			child.Embedding = make([]float32, len(embeddingBytes)/4)
+			for i := range child.Embedding {
+				child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
+			}
+			var hasQuantized uint8
+			if err := read(&hasQuantized); err != nil {
+				return entry, err
+			}
+			if hasQuantized == 1 {
+				mse, err := readBytes()
+				if err != nil {
+					return entry, err
+				}
+				signs, err := readBytes()
+				if err != nil {
+					return entry, err
+				}
+				var resNormBits uint32
+				if err := read(&resNormBits); err != nil {
+					return entry, err
+				}
+				child.Quantized = &QuantizedVector{
+					MSE:     append([]byte(nil), mse...),
+					Signs:   append([]byte(nil), signs...),
+					ResNorm: math.Float32frombits(resNormBits),
+				}
+			}
+			var dim uint32
+			if err := read(&dim); err != nil {
+				return entry, err
+			}
+			child.Dim = int(dim)
+			child.Text, err = readString()
+			if err != nil {
+				return entry, err
+			}
+			metaJSON, err := readBytes()
+			if err != nil {
+				return entry, err
+			}
+			if len(metaJSON) > 0 {
+				if err := json.Unmarshal(metaJSON, &child.Metadata); err != nil {
+					return entry, err
+				}
+			}
+			entry.Children = append(entry.Children, child)
+		}
 	}
 	entry.Text, err = readString()
 	if err != nil {

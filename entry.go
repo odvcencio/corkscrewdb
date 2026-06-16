@@ -19,12 +19,38 @@ type Version struct {
 	Embedding    []float32
 	Text         string
 	Metadata     map[string]string
+	Children     []MultiVectorChildVersion
 	LamportClock uint64
 	ActorID      string
 	WallClock    time.Time
 	Tombstone    bool
 	quantized    *turboquant.IPQuantized
 	dim          int
+}
+
+// MultiVectorEntry is the input payload for a packed parent multivector write.
+type MultiVectorEntry struct {
+	Text     string
+	Metadata map[string]string
+	Children []MultiVectorChild
+}
+
+// MultiVectorChild is one compact child vector stored under a logical parent.
+type MultiVectorChild struct {
+	ID       string
+	Vector   []float32
+	Text     string
+	Metadata map[string]string
+}
+
+// MultiVectorChildVersion is one immutable packed child in a parent version.
+type MultiVectorChildVersion struct {
+	ID        string
+	Embedding []float32
+	Text      string
+	Metadata  map[string]string
+	quantized *turboquant.IPQuantized
+	dim       int
 }
 
 // SearchResult is one ranked similarity-search hit.
@@ -34,6 +60,19 @@ type SearchResult struct {
 	Text     string
 	Metadata map[string]string
 	Version  uint64
+}
+
+// ParentSearchResult is one parent result rolled up from the highest-scoring child.
+type ParentSearchResult struct {
+	ID            string
+	Score         float32
+	Text          string
+	Metadata      map[string]string
+	Version       uint64
+	ChildID       string
+	ChildScore    float32
+	ChildText     string
+	ChildMetadata map[string]string
 }
 
 func sortSearchResults(results []SearchResult) {
@@ -90,6 +129,45 @@ func WithMetadata(meta map[string]string) PutVectorOption {
 func WithText(text string) PutVectorOption {
 	return putVectorOptionFunc(func(cfg *putVectorConfig) {
 		cfg.text = text
+	})
+}
+
+type parentSearchConfig struct {
+	parentFilters  []FilterOption
+	childFilters   []FilterOption
+	childOverfetch int
+}
+
+// ParentSearchOption configures SearchParents and SearchParentsVector calls.
+type ParentSearchOption interface {
+	applyParentSearch(*parentSearchConfig)
+}
+
+type parentSearchOptionFunc func(*parentSearchConfig)
+
+func (f parentSearchOptionFunc) applyParentSearch(cfg *parentSearchConfig) {
+	f(cfg)
+}
+
+// WithParentFilters restricts parent results by exact parent metadata matches.
+func WithParentFilters(filters ...FilterOption) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.parentFilters = append([]FilterOption(nil), filters...)
+	})
+}
+
+// WithChildFilters restricts parent results by exact winning-child metadata matches.
+func WithChildFilters(filters ...FilterOption) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.childFilters = append([]FilterOption(nil), filters...)
+	})
+}
+
+// WithChildOverfetch reserves future approximate-index child overfetch control.
+// Local flat v1 parent search is exact and rejects positive overfetch values.
+func WithChildOverfetch(n int) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.childOverfetch = n
 	})
 }
 
@@ -206,6 +284,7 @@ func cloneVersion(v Version) Version {
 		Embedding:    cloneVector(v.Embedding),
 		Text:         v.Text,
 		Metadata:     cloneMetadata(v.Metadata),
+		Children:     cloneMultiVectorChildVersions(v.Children),
 		LamportClock: v.LamportClock,
 		ActorID:      v.ActorID,
 		WallClock:    v.WallClock,
@@ -213,6 +292,29 @@ func cloneVersion(v Version) Version {
 		quantized:    qv,
 		dim:          v.dim,
 	}
+}
+
+func cloneMultiVectorChildVersions(children []MultiVectorChildVersion) []MultiVectorChildVersion {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]MultiVectorChildVersion, len(children))
+	for i, child := range children {
+		var qv *turboquant.IPQuantized
+		if child.quantized != nil {
+			cloned := cloneQuantized(*child.quantized)
+			qv = &cloned
+		}
+		out[i] = MultiVectorChildVersion{
+			ID:        child.ID,
+			Embedding: cloneVector(child.Embedding),
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+			quantized: qv,
+			dim:       child.dim,
+		}
+	}
+	return out
 }
 
 func matchesFilters(meta map[string]string, filters []FilterOption) bool {
@@ -229,6 +331,16 @@ func collectPutVectorOptions(opts []PutVectorOption) putVectorConfig {
 	for _, opt := range opts {
 		if opt != nil {
 			opt.applyPutVector(&cfg)
+		}
+	}
+	return cfg
+}
+
+func collectParentSearchOptions(opts []ParentSearchOption) parentSearchConfig {
+	var cfg parentSearchConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyParentSearch(&cfg)
 		}
 	}
 	return cfg

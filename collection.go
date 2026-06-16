@@ -99,6 +99,96 @@ func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOpt
 	return c.putVectorRequest(id, vector, cfg, true)
 }
 
+// PutMultiVector stores many compact child vectors under one logical parent ID.
+// V1 supports only local flat quantized_only collections.
+func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) error {
+	if err := c.usable(); err != nil {
+		return err
+	}
+	if c.remote != nil {
+		return errors.New("corkscrewdb: PutMultiVector is unsupported over remote collections in v1")
+	}
+	if c.db.shouldFederate() {
+		return errors.New("corkscrewdb: PutMultiVector is unsupported for federated collections in v1")
+	}
+	if !c.isQuantizedOnly() {
+		return errors.New("corkscrewdb: PutMultiVector requires quantized_only vector storage in v1")
+	}
+	if strings.TrimSpace(parentID) == "" {
+		return errors.New("corkscrewdb: parent id is required")
+	}
+	if len(entry.Children) == 0 {
+		return errors.New("corkscrewdb: PutMultiVector requires at least one child")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	version := Version{
+		Text:         entry.Text,
+		Metadata:     cloneMetadata(entry.Metadata),
+		LamportClock: c.clock.Now(),
+		ActorID:      c.clock.ActorID(),
+		WallClock:    time.Now().UTC(),
+		Children:     make([]MultiVectorChildVersion, 0, len(entry.Children)),
+	}
+	seen := make(map[string]struct{}, len(entry.Children))
+	for _, child := range entry.Children {
+		childID := strings.TrimSpace(child.ID)
+		if childID == "" {
+			return errors.New("corkscrewdb: child id is required")
+		}
+		if _, ok := seen[childID]; ok {
+			return fmt.Errorf("corkscrewdb: duplicate child id %q", child.ID)
+		}
+		seen[childID] = struct{}{}
+		if err := c.validateRawVectorLocked(child.Vector); err != nil {
+			return err
+		}
+		if version.dim == 0 {
+			version.dim = len(child.Vector)
+		} else if len(child.Vector) != version.dim {
+			return fmt.Errorf("corkscrewdb: child vector dimension %d does not match parent dimension %d", len(child.Vector), version.dim)
+		}
+		qv := turboquant.NewIPWithSeed(len(child.Vector), c.bitWidth, c.seed).Quantize(child.Vector)
+		version.Children = append(version.Children, MultiVectorChildVersion{
+			ID:        childID,
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+			quantized: &qv,
+			dim:       len(child.Vector),
+		})
+	}
+	if err := c.validateVersionLocked(version); err != nil {
+		return err
+	}
+	walEntry := walpkg.Entry{
+		Kind:         walpkg.EntryPut,
+		CollectionID: c.name,
+		VectorID:     parentID,
+		Dim:          version.dim,
+		Children:     toWALChildren(version.Children),
+		Text:         version.Text,
+		Metadata:     cloneMetadata(version.Metadata),
+		LamportClock: version.LamportClock,
+		ActorID:      version.ActorID,
+		WallClock:    version.WallClock,
+	}
+	if err := c.wal.Append(walEntry); err != nil {
+		return err
+	}
+	if c.db.streamer != nil {
+		c.db.streamer.Record(c.name, walEntry)
+	}
+	createdDim, err := c.applyVersionLocked(parentID, version, true)
+	if err != nil {
+		return err
+	}
+	if createdDim {
+		return c.db.persistCollectionMeta(c.name, c.bitWidth, c.dim, c.seed, c.storage)
+	}
+	return nil
+}
+
 func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVectorConfig, federated bool) error {
 	if err := c.usable(); err != nil {
 		return err
@@ -157,6 +247,42 @@ func (c *Collection) SearchVector(query []float32, k int, filters ...FilterOptio
 	return c.searchVector(query, k, filters, true)
 }
 
+func (c *Collection) SearchParents(query string, k int, opts ...ParentSearchOption) ([]ParentSearchResult, error) {
+	if err := c.usable(); err != nil {
+		return nil, err
+	}
+	if c.remote != nil {
+		return nil, errors.New("corkscrewdb: SearchParents is unsupported over remote collections in v1")
+	}
+	if !c.isQuantizedOnly() {
+		return nil, errors.New("corkscrewdb: SearchParents requires quantized_only vector storage in v1")
+	}
+	if c.db.shouldFederate() {
+		return nil, errors.New("corkscrewdb: SearchParents is unsupported for federated collections in v1")
+	}
+	vector, err := c.encoder.Encode(query)
+	if err != nil {
+		return nil, err
+	}
+	return c.SearchParentsVector(vector, k, opts...)
+}
+
+func (c *Collection) SearchParentsVector(query []float32, k int, opts ...ParentSearchOption) ([]ParentSearchResult, error) {
+	if err := c.usable(); err != nil {
+		return nil, err
+	}
+	if c.remote != nil {
+		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported over remote collections in v1")
+	}
+	if !c.isQuantizedOnly() {
+		return nil, errors.New("corkscrewdb: SearchParentsVector requires quantized_only vector storage in v1")
+	}
+	if c.db.shouldFederate() {
+		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported for federated collections in v1")
+	}
+	return c.searchParentsVectorLocal(query, k, collectParentSearchOptions(opts))
+}
+
 func (c *Collection) searchVector(query []float32, k int, filters []FilterOption, federated bool) ([]SearchResult, error) {
 	if err := c.usable(); err != nil {
 		return nil, err
@@ -201,6 +327,27 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), dim)
 	}
 	return idx.Search(query, k, filters), nil
+}
+
+func (c *Collection) searchParentsVectorLocal(query []float32, k int, cfg parentSearchConfig) ([]ParentSearchResult, error) {
+	if err := c.usable(); err != nil {
+		return nil, err
+	}
+	c.mu.RLock()
+	idx := c.index
+	dim := c.dim
+	c.mu.RUnlock()
+	if idx == nil {
+		return nil, nil
+	}
+	if len(query) != dim {
+		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), dim)
+	}
+	flat, ok := idx.(*index)
+	if !ok {
+		return nil, errors.New("corkscrewdb: SearchParentsVector requires flat quantized_only index in v1")
+	}
+	return flat.SearchParents(query, k, cfg)
 }
 
 func (c *Collection) History(id string) ([]Version, error) {
@@ -350,9 +497,19 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		}
 		view.history[id] = visible
 		if ok && !latest.Tombstone && view.index != nil {
+			if flat, ok := view.index.(*index); ok {
+				flat.removePackedChildren(id)
+				view.index.Remove(id)
+			}
 			if latest.quantized != nil {
 				if flat, ok := view.index.(*index); ok {
 					flat.addQuantized(id, *latest.quantized, latest.Text, latest.Metadata, latest.LamportClock)
+				}
+			} else if len(latest.Children) > 0 {
+				if flat, ok := view.index.(*index); ok {
+					for _, child := range latest.Children {
+						flat.addPackedChild(id, latest, child)
+					}
 				}
 			} else {
 				view.index.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
@@ -390,6 +547,46 @@ func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterO
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), v.dim)
 	}
 	return v.index.Search(query, k, filters), nil
+}
+
+func (v *CollectionView) SearchParents(query string, k int, opts ...ParentSearchOption) ([]ParentSearchResult, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
+	if v.remote != nil {
+		return nil, errors.New("corkscrewdb: SearchParents is unsupported over remote collections in v1")
+	}
+	if normalizeVectorStorage(v.storage) != VectorStorageQuantizedOnly {
+		return nil, errors.New("corkscrewdb: SearchParents requires quantized_only vector storage in v1")
+	}
+	vector, err := v.encoder.Encode(query)
+	if err != nil {
+		return nil, err
+	}
+	return v.SearchParentsVector(vector, k, opts...)
+}
+
+func (v *CollectionView) SearchParentsVector(query []float32, k int, opts ...ParentSearchOption) ([]ParentSearchResult, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
+	if v.remote != nil {
+		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported over remote collections in v1")
+	}
+	if normalizeVectorStorage(v.storage) != VectorStorageQuantizedOnly {
+		return nil, errors.New("corkscrewdb: SearchParentsVector requires quantized_only vector storage in v1")
+	}
+	if v.index == nil {
+		return nil, nil
+	}
+	if len(query) != v.dim {
+		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), v.dim)
+	}
+	flat, ok := v.index.(*index)
+	if !ok {
+		return nil, errors.New("corkscrewdb: SearchParentsVector requires flat quantized_only index in v1")
+	}
+	return flat.SearchParents(query, k, collectParentSearchOptions(opts))
 }
 
 func (v *CollectionView) History(id string) ([]Version, error) {
@@ -541,6 +738,20 @@ func (c *Collection) validateVersionLocked(version Version) error {
 		if dim == 0 {
 			dim = version.dim
 		}
+		if len(version.Children) > 0 {
+			for _, child := range version.Children {
+				if strings.TrimSpace(child.ID) == "" {
+					return errors.New("corkscrewdb: child id is required")
+				}
+				if child.dim != 0 && child.dim != dim {
+					return fmt.Errorf("corkscrewdb: child vector dimension %d does not match collection dimension %d", child.dim, dim)
+				}
+				if err := validateQuantizedPayload(child.quantized, dim, c.bitWidth); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		return validateQuantizedPayload(version.quantized, dim, c.bitWidth)
 	}
 	if len(version.Embedding) == 0 {
@@ -587,10 +798,13 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	sortVersions(versions)
 	c.history[id] = versions
 	latest := versions[len(versions)-1]
-	if latest.Tombstone {
-		if c.index != nil {
-			c.index.Remove(id)
+	if c.index != nil {
+		c.index.Remove(id)
+		if flat, ok := c.index.(*index); ok {
+			flat.removePackedChildren(id)
 		}
+	}
+	if latest.Tombstone {
 	} else {
 		if c.index == nil {
 			if c.dim == 0 {
@@ -604,6 +818,14 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 				flat.addQuantized(id, *latest.quantized, latest.Text, latest.Metadata, latest.LamportClock)
 			} else {
 				return false, errors.New("corkscrewdb: quantized_only storage requires flat index")
+			}
+		} else if len(latest.Children) > 0 {
+			if flat, ok := c.index.(*index); ok {
+				for _, child := range latest.Children {
+					flat.addPackedChild(id, latest, child)
+				}
+			} else {
+				return false, errors.New("corkscrewdb: packed parent multivectors require flat index")
 			}
 		} else {
 			c.index.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
@@ -690,6 +912,7 @@ func (c *Collection) persistSnapshot() error {
 			}
 			if c.isQuantizedOnly() {
 				snapVersion.Quantized = toSnapshotQuantized(version.quantized)
+				snapVersion.Children = toSnapshotChildren(version.Children)
 			} else {
 				snapVersion.Embedding = cloneVector(version.Embedding)
 			}

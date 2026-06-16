@@ -58,6 +58,42 @@ func fromWALQuantized(qv *walpkg.QuantizedVector) *turboquant.IPQuantized {
 	return &out
 }
 
+func toWALChildren(children []MultiVectorChildVersion) []walpkg.ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]walpkg.ChildVector, len(children))
+	for i, child := range children {
+		out[i] = walpkg.ChildVector{
+			ID:        child.ID,
+			Embedding: cloneVector(child.Embedding),
+			Quantized: toWALQuantized(child.quantized),
+			Dim:       child.dim,
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+		}
+	}
+	return out
+}
+
+func fromWALChildren(children []walpkg.ChildVector) []MultiVectorChildVersion {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]MultiVectorChildVersion, len(children))
+	for i, child := range children {
+		out[i] = MultiVectorChildVersion{
+			ID:        child.ID,
+			Embedding: cloneVector(child.Embedding),
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+			quantized: fromWALQuantized(child.Quantized),
+			dim:       child.Dim,
+		}
+	}
+	return out
+}
+
 func toSnapshotQuantized(qv *turboquant.IPQuantized) *snap.QuantizedVector {
 	if qv == nil {
 		return nil
@@ -79,6 +115,42 @@ func fromSnapshotQuantized(qv *snap.QuantizedVector) *turboquant.IPQuantized {
 		ResNorm: qv.ResNorm,
 	}
 	return &out
+}
+
+func toSnapshotChildren(children []MultiVectorChildVersion) []snap.ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]snap.ChildVector, len(children))
+	for i, child := range children {
+		out[i] = snap.ChildVector{
+			ID:        child.ID,
+			Embedding: cloneVector(child.Embedding),
+			Quantized: toSnapshotQuantized(child.quantized),
+			Dim:       child.dim,
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+		}
+	}
+	return out
+}
+
+func fromSnapshotChildren(children []snap.ChildVector) []MultiVectorChildVersion {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]MultiVectorChildVersion, len(children))
+	for i, child := range children {
+		out[i] = MultiVectorChildVersion{
+			ID:        child.ID,
+			Embedding: cloneVector(child.Embedding),
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+			quantized: fromSnapshotQuantized(child.Quantized),
+			dim:       child.Dim,
+		}
+	}
+	return out
 }
 
 func validateQuantizedPayload(qv *turboquant.IPQuantized, dim, bitWidth int) error {
