@@ -64,7 +64,7 @@ func newHealthHandlerAndPrimary(t *testing.T, materializeAgentMemory bool) (*Hea
 		AddrRW:             listener.Addr().String(),
 		AddrRO:             listener.Addr().String(),
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

@@ -21,7 +21,7 @@ func newAdminHandler(t *testing.T) *AdminHandler {
 		AddrRW:             addr,
 		AddrRO:             addr,
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -104,9 +104,9 @@ func getAdminShards(t *testing.T, h *AdminHandler, adminCtx bool) (*httptest.Res
 func TestAdmin_CreateMissingContext500(t *testing.T) {
 	h := newAdminHandler(t)
 	rec, body := postAdminCollection(t, h, false, map[string]any{
-		"name":       "agent-memory",
-		"bit_width":  2,
-		"retention":  "keep-all",
+		"name":      "agent-memory",
+		"bit_width": 2,
+		"retention": "keep-all",
 	})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())

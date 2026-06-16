@@ -2,11 +2,13 @@ package corkscrewdb
 
 import "embed"
 
-//go:embed assets/manta-embed-v0/*.mll
-var eosEmbedV0Assets embed.FS
+const defaultEosProviderID = "corkscrewdb-default-embedder"
+
+//go:embed assets/corkscrewdb-default-embedder/*.mll
+var defaultEosProviderAssets embed.FS
 
 func newDefaultProvider() EmbeddingProvider {
-	provider, err := newEmbeddedEosProvider("manta-embed-v0", eosEmbedV0Assets, "assets/manta-embed-v0")
+	provider, err := newEmbeddedEosProvider(defaultEosProviderID, defaultEosProviderAssets, "assets/corkscrewdb-default-embedder")
 	if err == nil {
 		return provider
 	}

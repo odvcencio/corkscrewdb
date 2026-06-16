@@ -92,11 +92,28 @@ func TestOpenDefaultsToEosProvider(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
-	if db.manifest.Embedding.ID != "manta-embed-v0" {
-		t.Fatalf("default embedding provider id = %q, want %q", db.manifest.Embedding.ID, "manta-embed-v0")
+	if db.manifest.Embedding.ID != defaultEosProviderID {
+		t.Fatalf("default embedding provider id = %q, want %q", db.manifest.Embedding.ID, defaultEosProviderID)
 	}
-	if db.manifest.Embedding.Dim <= 0 {
-		t.Fatalf("default embedding dim = %d, want > 0", db.manifest.Embedding.Dim)
+	if db.manifest.Embedding.Dim != 256 {
+		t.Fatalf("default embedding dim = %d, want 256", db.manifest.Embedding.Dim)
+	}
+	vec, err := db.provider.Encode("hello world")
+	if err != nil {
+		t.Fatalf("encode with default provider: %v", err)
+	}
+	if len(vec) != 256 {
+		t.Fatalf("default embedding len = %d, want 256", len(vec))
+	}
+	var nonZero bool
+	for _, value := range vec {
+		if value != 0 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		t.Fatal("expected non-zero default Eos embedding")
 	}
 }
 

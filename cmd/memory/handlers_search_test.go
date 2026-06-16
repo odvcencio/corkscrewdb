@@ -23,7 +23,7 @@ func newSearchHandler(t *testing.T) (*SearchHandler, *MemoriesHandler) {
 		AddrRW:             addr,
 		AddrRO:             addr,
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

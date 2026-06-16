@@ -38,7 +38,7 @@ func LoadConfig() (Config, error) {
 		cfg.Listen = "0.0.0.0:8080"
 	}
 	if cfg.ExpectedProviderID == "" {
-		cfg.ExpectedProviderID = "manta-embed-v0"
+		cfg.ExpectedProviderID = "corkscrewdb-default-embedder"
 	}
 	required := map[string]string{
 		"CORKSCREWDB_ADDR_RW": cfg.AddrRW,

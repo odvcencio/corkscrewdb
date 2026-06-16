@@ -30,7 +30,7 @@ func newServerHarness(t *testing.T) (url, agentTok, adminTok string) {
 		Listen:             "127.0.0.1:0",
 		AgentTokens:        map[string]string{"birch": agent},
 		AdminToken:         admin,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

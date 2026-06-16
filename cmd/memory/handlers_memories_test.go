@@ -22,7 +22,7 @@ func newMemoriesHandler(t *testing.T) *MemoriesHandler {
 		AddrRW:             addr,
 		AddrRO:             addr,
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -379,4 +379,3 @@ func TestMemoriesHandlers_PostAgentOverridesSpoof(t *testing.T) {
 		t.Errorf("metadata[other] = %q, want ok (other fields should survive)", meta["other"])
 	}
 }
-

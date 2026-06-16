@@ -53,7 +53,7 @@ func TestDBClientsHappyPath(t *testing.T) {
 		AddrRW:             addr,
 		AddrRO:             addr,
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -102,8 +102,8 @@ func TestDBClientsWrongProviderID(t *testing.T) {
 	if !strings.Contains(msg, "wrong") {
 		t.Errorf("error must contain expected id %q: %v", "wrong", err)
 	}
-	if !strings.Contains(msg, "manta-embed-v0") {
-		t.Errorf("error must contain actual id %q: %v", "manta-embed-v0", err)
+	if !strings.Contains(msg, "corkscrewdb-default-embedder") {
+		t.Errorf("error must contain actual id %q: %v", "corkscrewdb-default-embedder", err)
 	}
 }
 
@@ -112,7 +112,7 @@ func TestDBClientsUnreachableRW(t *testing.T) {
 		AddrRW:             "127.0.0.1:1",
 		AddrRO:             "127.0.0.1:1",
 		CorkscrewDBToken:   "t",
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
@@ -140,7 +140,7 @@ func TestDBClientsStalenessRouting(t *testing.T) {
 		AddrRW:             addrRW,
 		AddrRO:             addrRO,
 		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
+		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
