@@ -9,12 +9,16 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(4)
+	snapshotVersion = uint8(5)
+
+	childEncodingLegacy                  = uint8(0)
+	childEncodingCompactQuantizedOrdinal = uint8(1)
 )
 
 // Data is one collection snapshot.
@@ -190,49 +194,22 @@ func marshal(data Data) ([]byte, error) {
 			} else if err := write(uint8(0)); err != nil {
 				return nil, err
 			}
+			childEncoding := childEncodingLegacy
+			if canUseCompactQuantizedOrdinalChildren(version.Children) {
+				childEncoding = childEncodingCompactQuantizedOrdinal
+			}
 			if err := write(uint32(len(version.Children))); err != nil {
 				return nil, err
 			}
-			for _, child := range version.Children {
-				if err := writeString(child.ID); err != nil {
+			if err := write(childEncoding); err != nil {
+				return nil, err
+			}
+			if childEncoding == childEncodingCompactQuantizedOrdinal {
+				if err := writeCompactQuantizedOrdinalChildren(mw, write, version.Children); err != nil {
 					return nil, err
 				}
-				childEmbedding := make([]byte, len(child.Embedding)*4)
-				for i, value := range child.Embedding {
-					binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(value))
-				}
-				if err := writeBytes(childEmbedding); err != nil {
-					return nil, err
-				}
-				if child.Quantized != nil {
-					if err := write(uint8(1)); err != nil {
-						return nil, err
-					}
-					if err := writeBytes(child.Quantized.MSE); err != nil {
-						return nil, err
-					}
-					if err := writeBytes(child.Quantized.Signs); err != nil {
-						return nil, err
-					}
-					if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
-						return nil, err
-					}
-				} else if err := write(uint8(0)); err != nil {
-					return nil, err
-				}
-				if err := write(uint32(child.Dim)); err != nil {
-					return nil, err
-				}
-				if err := writeString(child.Text); err != nil {
-					return nil, err
-				}
-				childMetaJSON, err := json.Marshal(child.Metadata)
-				if err != nil {
-					return nil, err
-				}
-				if err := writeBytes(childMetaJSON); err != nil {
-					return nil, err
-				}
+			} else if err := writeLegacyChildren(write, writeBytes, writeString, version.Children); err != nil {
+				return nil, err
 			}
 			if err := writeString(version.Text); err != nil {
 				return nil, err
@@ -266,4 +243,116 @@ func marshal(data Data) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func writeLegacyChildren(
+	write func(any) error,
+	writeBytes func([]byte) error,
+	writeString func(string) error,
+	children []ChildVector,
+) error {
+	for _, child := range children {
+		if err := writeString(child.ID); err != nil {
+			return err
+		}
+		childEmbedding := make([]byte, len(child.Embedding)*4)
+		for i, value := range child.Embedding {
+			binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(value))
+		}
+		if err := writeBytes(childEmbedding); err != nil {
+			return err
+		}
+		if child.Quantized != nil {
+			if err := write(uint8(1)); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.MSE); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.Signs); err != nil {
+				return err
+			}
+			if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+				return err
+			}
+		} else if err := write(uint8(0)); err != nil {
+			return err
+		}
+		if err := write(uint32(child.Dim)); err != nil {
+			return err
+		}
+		if err := writeString(child.Text); err != nil {
+			return err
+		}
+		childMetaJSON, err := json.Marshal(child.Metadata)
+		if err != nil {
+			return err
+		}
+		if err := writeBytes(childMetaJSON); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canUseCompactQuantizedOrdinalChildren(children []ChildVector) bool {
+	if len(children) == 0 {
+		return false
+	}
+	first := children[0]
+	if first.Quantized == nil || first.Dim <= 0 || len(first.Embedding) != 0 || first.Text != "" || len(first.Metadata) != 0 {
+		return false
+	}
+	mseLen := len(first.Quantized.MSE)
+	signsLen := len(first.Quantized.Signs)
+	if mseLen == 0 || signsLen == 0 {
+		return false
+	}
+	for i, child := range children {
+		if child.ID != strconv.Itoa(i) || child.Quantized == nil || child.Dim != first.Dim {
+			return false
+		}
+		if len(child.Embedding) != 0 || child.Text != "" || len(child.Metadata) != 0 {
+			return false
+		}
+		if len(child.Quantized.MSE) != mseLen || len(child.Quantized.Signs) != signsLen {
+			return false
+		}
+	}
+	return true
+}
+
+func writeCompactQuantizedOrdinalChildren(
+	w io.Writer,
+	write func(any) error,
+	children []ChildVector,
+) error {
+	dim := uint32(children[0].Dim)
+	mseLen := uint32(len(children[0].Quantized.MSE))
+	signsLen := uint32(len(children[0].Quantized.Signs))
+	if err := write(dim); err != nil {
+		return err
+	}
+	if err := write(mseLen); err != nil {
+		return err
+	}
+	if err := write(signsLen); err != nil {
+		return err
+	}
+	for _, child := range children {
+		if _, err := w.Write(child.Quantized.MSE); err != nil {
+			return err
+		}
+	}
+	for _, child := range children {
+		if _, err := w.Write(child.Quantized.Signs); err != nil {
+			return err
+		}
+	}
+	for _, child := range children {
+		if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

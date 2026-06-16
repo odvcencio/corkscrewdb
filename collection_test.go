@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +387,67 @@ func TestQuantizedOnlyPackedParentMultiVectorLifecycle(t *testing.T) {
 	}
 	if len(history) != 3 || !history[2].Tombstone {
 		t.Fatalf("history = %+v, want tombstone third version", history)
+	}
+}
+
+func TestQuantizedOnlyPackedParentCompactOrdinalChildrenReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "packed-parent-ordinal.csdb")
+	seed := int64(5581486560434873699)
+	query := []float32{0, 1, 0, 0}
+	children := []MultiVectorChild{
+		{ID: "0", Vector: query},
+		{ID: "1", Vector: []float32{1, 0, 0, 0}},
+		{ID: "2", Vector: []float32{0, 0, 1, 0}},
+	}
+
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithQuantizedOnlyPersistence())
+	if err := coll.PutMultiVector("parent-ordinal", MultiVectorEntry{Children: children}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := coll.SearchParentsVector(query, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) == 0 || before[0].ID != "parent-ordinal" || before[0].ChildID != "0" {
+		t.Fatalf("parent results before reopen = %+v, want parent-ordinal/0 first", before)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilesDoNotContainRawVector(t, filepath.Join(path, "collections", "vecs"), query)
+
+	db, err = Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	coll = db.Collection("vecs", WithQuantizedOnlyPersistence())
+	after, err := coll.SearchParentsVector(query, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) == 0 || after[0].ID != "parent-ordinal" || after[0].ChildID != "0" {
+		t.Fatalf("parent results after reopen = %+v, want parent-ordinal/0 first", after)
+	}
+	history, err := coll.History("parent-ordinal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || len(history[0].Embedding) != 0 || len(history[0].Children) != len(children) {
+		t.Fatalf("history = %+v, want one compact packed parent version", history)
+	}
+	for i, child := range history[0].Children {
+		if child.ID != strconv.Itoa(i) || child.Text != "" || len(child.Metadata) != 0 || len(child.Embedding) != 0 {
+			t.Fatalf("child[%d] fields = %+v, want compact ordinal child", i, child)
+		}
+		if child.quantized == nil || len(child.quantized.MSE) == 0 || len(child.quantized.Signs) == 0 {
+			t.Fatalf("child[%d] quantized payload = %+v, want non-empty", i, child.quantized)
+		}
 	}
 }
 

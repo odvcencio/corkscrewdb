@@ -10,7 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
+)
+
+const (
+	maxCompactOrdinalChildren        = 1 << 20
+	maxCompactChildBlockBytes uint64 = 512 << 20
 )
 
 func LoadFile(path string) (Data, error) {
@@ -51,6 +57,16 @@ func read(r io.Reader) (Data, error) {
 		}
 		return buf, nil
 	}
+	readFixedBytes := func(length uint64) ([]byte, error) {
+		if length > maxReadableBytes() {
+			return nil, fmt.Errorf("snapshot: byte block too large %d", length)
+		}
+		buf := make([]byte, int(length))
+		if _, err := io.ReadFull(mr, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
 	readString := func() (string, error) {
 		buf, err := readBytes()
 		return string(buf), err
@@ -68,7 +84,7 @@ func read(r io.Reader) (Data, error) {
 	if err := read(&formatVersion); err != nil {
 		return data, err
 	}
-	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 && formatVersion != 4 {
+	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 && formatVersion != 4 && formatVersion != 5 {
 		return data, fmt.Errorf("snapshot: unsupported version %d", formatVersion)
 	}
 
@@ -162,66 +178,122 @@ func read(r io.Reader) (Data, error) {
 				if err := read(&childCount); err != nil {
 					return data, err
 				}
-				version.Children = make([]ChildVector, 0, childCount)
-				for range childCount {
-					child := ChildVector{}
-					child.ID, err = readString()
-					if err != nil {
+				childEncoding := childEncodingLegacy
+				if formatVersion >= 5 {
+					if err := read(&childEncoding); err != nil {
 						return data, err
 					}
-					childEmbeddingBytes, err := readBytes()
-					if err != nil {
-						return data, err
-					}
-					if len(childEmbeddingBytes)%4 != 0 {
-						return data, fmt.Errorf("snapshot: invalid child embedding byte length %d", len(childEmbeddingBytes))
-					}
-					child.Embedding = make([]float32, len(childEmbeddingBytes)/4)
-					for i := range child.Embedding {
-						child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(childEmbeddingBytes[i*4:]))
-					}
-					var hasQuantized uint8
-					if err := read(&hasQuantized); err != nil {
-						return data, err
-					}
-					if hasQuantized == 1 {
-						mse, err := readBytes()
+				}
+				switch childEncoding {
+				case childEncodingLegacy:
+					version.Children = make([]ChildVector, 0, childCount)
+					for range childCount {
+						child := ChildVector{}
+						child.ID, err = readString()
 						if err != nil {
 							return data, err
 						}
-						signs, err := readBytes()
+						childEmbeddingBytes, err := readBytes()
 						if err != nil {
 							return data, err
 						}
+						if len(childEmbeddingBytes)%4 != 0 {
+							return data, fmt.Errorf("snapshot: invalid child embedding byte length %d", len(childEmbeddingBytes))
+						}
+						child.Embedding = make([]float32, len(childEmbeddingBytes)/4)
+						for i := range child.Embedding {
+							child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(childEmbeddingBytes[i*4:]))
+						}
+						var hasQuantized uint8
+						if err := read(&hasQuantized); err != nil {
+							return data, err
+						}
+						if hasQuantized == 1 {
+							mse, err := readBytes()
+							if err != nil {
+								return data, err
+							}
+							signs, err := readBytes()
+							if err != nil {
+								return data, err
+							}
+							var resNormBits uint32
+							if err := read(&resNormBits); err != nil {
+								return data, err
+							}
+							child.Quantized = &QuantizedVector{
+								MSE:     append([]byte(nil), mse...),
+								Signs:   append([]byte(nil), signs...),
+								ResNorm: math.Float32frombits(resNormBits),
+							}
+						}
+						var childDim uint32
+						if err := read(&childDim); err != nil {
+							return data, err
+						}
+						child.Dim = int(childDim)
+						child.Text, err = readString()
+						if err != nil {
+							return data, err
+						}
+						childMetaJSON, err := readBytes()
+						if err != nil {
+							return data, err
+						}
+						if len(childMetaJSON) > 0 {
+							if err := json.Unmarshal(childMetaJSON, &child.Metadata); err != nil {
+								return data, err
+							}
+						}
+						version.Children = append(version.Children, child)
+					}
+				case childEncodingCompactQuantizedOrdinal:
+					var childDim, mseLen, signsLen uint32
+					if err := read(&childDim); err != nil {
+						return data, err
+					}
+					if err := read(&mseLen); err != nil {
+						return data, err
+					}
+					if err := read(&signsLen); err != nil {
+						return data, err
+					}
+					mseBlockLen, signsBlockLen, resNormBlockLen, err := validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen)
+					if err != nil {
+						return data, err
+					}
+					mseBlock, err := readFixedBytes(mseBlockLen)
+					if err != nil {
+						return data, err
+					}
+					signsBlock, err := readFixedBytes(signsBlockLen)
+					if err != nil {
+						return data, err
+					}
+					if resNormBlockLen > maxReadableBytes() {
+						return data, fmt.Errorf("snapshot: compact child resnorm block too large %d", resNormBlockLen)
+					}
+					version.Children = make([]ChildVector, 0, childCount)
+					for i := range childCount {
 						var resNormBits uint32
 						if err := read(&resNormBits); err != nil {
 							return data, err
 						}
-						child.Quantized = &QuantizedVector{
-							MSE:     append([]byte(nil), mse...),
-							Signs:   append([]byte(nil), signs...),
-							ResNorm: math.Float32frombits(resNormBits),
+						mseStart := int(i) * int(mseLen)
+						signsStart := int(i) * int(signsLen)
+						child := ChildVector{
+							ID:  strconv.Itoa(int(i)),
+							Dim: int(childDim),
+							Quantized: &QuantizedVector{
+								MSE:     append([]byte(nil), mseBlock[mseStart:mseStart+int(mseLen)]...),
+								Signs:   append([]byte(nil), signsBlock[signsStart:signsStart+int(signsLen)]...),
+								ResNorm: math.Float32frombits(resNormBits),
+							},
 						}
+						version.Children = append(version.Children, child)
 					}
-					var childDim uint32
-					if err := read(&childDim); err != nil {
-						return data, err
-					}
-					child.Dim = int(childDim)
-					child.Text, err = readString()
-					if err != nil {
-						return data, err
-					}
-					childMetaJSON, err := readBytes()
-					if err != nil {
-						return data, err
-					}
-					if len(childMetaJSON) > 0 {
-						if err := json.Unmarshal(childMetaJSON, &child.Metadata); err != nil {
-							return data, err
-						}
-					}
-					version.Children = append(version.Children, child)
+				default:
+					return data, fmt.Errorf("snapshot: unsupported child encoding %d", childEncoding)
 				}
 			}
 			version.Text, err = readString()
@@ -268,4 +340,54 @@ func read(r io.Reader) (Data, error) {
 		return data, fmt.Errorf("snapshot: crc mismatch: computed %x, stored %x", computed, stored)
 	}
 	return data, nil
+}
+
+func validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen uint32) (uint64, uint64, uint64, error) {
+	if childCount == 0 {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child count is zero")
+	}
+	if childCount > maxCompactOrdinalChildren {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child count too large %d", childCount)
+	}
+	if childDim == 0 {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child dim is zero")
+	}
+	if mseLen == 0 {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE length is zero")
+	}
+	if signsLen == 0 {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs length is zero")
+	}
+	mseBlockLen, ok := checkedMulUint32(childCount, mseLen)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block size overflows")
+	}
+	signsBlockLen, ok := checkedMulUint32(childCount, signsLen)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs block size overflows")
+	}
+	resNormBlockLen, ok := checkedMulUint32(childCount, 4)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child resnorm block size overflows")
+	}
+	if mseBlockLen > maxCompactChildBlockBytes {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block too large %d", mseBlockLen)
+	}
+	if signsBlockLen > maxCompactChildBlockBytes {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs block too large %d", signsBlockLen)
+	}
+	totalBlockLen := mseBlockLen + signsBlockLen + resNormBlockLen
+	if totalBlockLen < mseBlockLen || totalBlockLen > maxCompactChildBlockBytes {
+		return 0, 0, 0, fmt.Errorf("snapshot: compact child block too large %d", totalBlockLen)
+	}
+	return mseBlockLen, signsBlockLen, resNormBlockLen, nil
+}
+
+func checkedMulUint32(a, b uint32) (uint64, bool) {
+	product := uint64(a) * uint64(b)
+	return product, product <= maxReadableBytes()
+}
+
+func maxReadableBytes() uint64 {
+	return uint64(int(^uint(0) >> 1))
 }
