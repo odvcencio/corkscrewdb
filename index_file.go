@@ -16,17 +16,17 @@ import (
 
 const (
 	indexMagic   = uint32(0x54514931) // TQI1
-	indexVersion = uint8(2)
+	indexVersion = uint8(3)
 )
 
-func saveIndexFile(path string, idx *index, maxLamport uint64) error {
+func saveIndexFile(path string, idx *index, maxLamport uint64, rawStore, sparse bool) error {
 	if idx == nil {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	payload, err := marshalIndexFile(idx, maxLamport)
+	payload, err := marshalIndexFile(idx, maxLamport, rawStore, sparse)
 	if err != nil {
 		return err
 	}
@@ -37,7 +37,7 @@ func saveIndexFile(path string, idx *index, maxLamport uint64) error {
 	return os.Rename(tmp, path)
 }
 
-func marshalIndexFile(idx *index, maxLamport uint64) ([]byte, error) {
+func marshalIndexFile(idx *index, maxLamport uint64, rawStore, sparse bool) ([]byte, error) {
 	var buf bytes.Buffer
 	h := crc32.NewIEEE()
 	mw := io.MultiWriter(&buf, h)
@@ -72,6 +72,19 @@ func marshalIndexFile(idx *index, maxLamport uint64) ([]byte, error) {
 		return nil, err
 	}
 	if err := write(maxLamport); err != nil {
+		return nil, err
+	}
+	var rawStoreByte, sparseByte uint8
+	if rawStore {
+		rawStoreByte = 1
+	}
+	if sparse {
+		sparseByte = 1
+	}
+	if err := write(rawStoreByte); err != nil {
+		return nil, err
+	}
+	if err := write(sparseByte); err != nil {
 		return nil, err
 	}
 	if err := write(uint32(len(entries))); err != nil {
@@ -111,9 +124,15 @@ func marshalIndexFile(idx *index, maxLamport uint64) ([]byte, error) {
 }
 
 func loadIndexFile(path string) (*index, uint64, error) {
+	idx, maxLamport, _, _, err := loadIndexFileV3(path)
+	return idx, maxLamport, err
+}
+
+// loadIndexFileV3 loads a v3 .tqi file and also returns the rawStore and sparse header flags.
+func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	defer file.Close()
 
@@ -140,73 +159,80 @@ func loadIndexFile(path string) (*index, uint64, error) {
 
 	var magic uint32
 	if err := read(&magic); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	if magic != indexMagic {
-		return nil, 0, fmt.Errorf("corkscrewdb: invalid index magic %x", magic)
+		return nil, 0, false, false, fmt.Errorf("corkscrewdb: invalid index magic %x", magic)
 	}
 	var version uint8
 	if err := read(&version); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
-	if version != 1 && version != 2 {
-		return nil, 0, fmt.Errorf("corkscrewdb: unsupported index version %d", version)
+	if version != 3 {
+		return nil, 0, false, false, fmt.Errorf("%w: tqi version %d", ErrFormatTooOld, version)
 	}
 	var dim uint32
 	if err := read(&dim); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	var bitWidth uint32
 	if err := read(&bitWidth); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	var seed int64
 	if err := read(&seed); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	var maxLamport uint64
 	if err := read(&maxLamport); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
+	}
+	var rawStoreByte, sparseByte uint8
+	if err := read(&rawStoreByte); err != nil {
+		return nil, 0, false, false, err
+	}
+	if err := read(&sparseByte); err != nil {
+		return nil, 0, false, false, err
 	}
 	var count uint32
 	if err := read(&count); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 
 	idx := newIndex(int(dim), int(bitWidth), seed)
 	for range count {
 		id, err := readString()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		mse, err := readBytes()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		signs, err := readBytes()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		var resNormBits uint32
 		if err := read(&resNormBits); err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		text, err := readString()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		metaJSON, err := readBytes()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		var version uint64
 		if err := read(&version); err != nil {
-			return nil, 0, err
+			return nil, 0, false, false, err
 		}
 		var meta map[string]string
 		if len(metaJSON) > 0 {
 			if err := json.Unmarshal(metaJSON, &meta); err != nil {
-				return nil, 0, err
+				return nil, 0, false, false, err
 			}
 		}
 		qv := turboquant.IPQuantized{
@@ -220,10 +246,10 @@ func loadIndexFile(path string) (*index, uint64, error) {
 	computed := h.Sum32()
 	var stored uint32
 	if err := binary.Read(file, binary.LittleEndian, &stored); err != nil {
-		return nil, 0, err
+		return nil, 0, false, false, err
 	}
 	if computed != stored {
-		return nil, 0, fmt.Errorf("corkscrewdb: index crc mismatch: computed %x, stored %x", computed, stored)
+		return nil, 0, false, false, fmt.Errorf("corkscrewdb: index crc mismatch: computed %x, stored %x", computed, stored)
 	}
-	return idx, maxLamport, nil
+	return idx, maxLamport, rawStoreByte != 0, sparseByte != 0, nil
 }

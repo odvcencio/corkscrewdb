@@ -13,7 +13,7 @@ import (
 
 const (
 	hnswMagic   = uint32(0x484E5357) // HNSW
-	hnswVersion = uint8(1)
+	hnswVersion = uint8(2)
 )
 
 func saveHNSWFile(path string, h *hnswIndex) error {
@@ -73,6 +73,25 @@ func marshalHNSWFile(h *hnswIndex) ([]byte, error) {
 		return nil, err
 	}
 
+	// Node IDs (reserve-only, Phase 1): persist per-node IDs so the Performance
+	// phase can switch traversal/delete onto stable IDs without a format bump.
+	// Phase 1 traversal still uses implicit slice positions; IDs are written and
+	// validated only.
+	nodeCount := uint32(h.flat.Len())
+	if err := write(nodeCount); err != nil {
+		return nil, err
+	}
+	entries := h.flat.snapshotEntries()
+	for _, e := range entries {
+		idBytes := []byte(e.id)
+		if err := write(uint32(len(idBytes))); err != nil {
+			return nil, err
+		}
+		if _, err := mw.Write(idBytes); err != nil {
+			return nil, err
+		}
+	}
+
 	// Number of layers.
 	if err := write(int32(len(h.layers))); err != nil {
 		return nil, err
@@ -128,8 +147,8 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 	if err := read(&version); err != nil {
 		return nil, err
 	}
-	if version != 1 {
-		return nil, fmt.Errorf("corkscrewdb: unsupported HNSW version %d", version)
+	if version != 2 {
+		return nil, fmt.Errorf("%w: hnsw version %d", ErrFormatTooOld, version)
 	}
 
 	var m, efConstruction, efSearch int32
@@ -149,6 +168,27 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 	}
 	if err := read(&entryNode); err != nil {
 		return nil, err
+	}
+
+	// Node IDs (reserve-only): read and validate the count matches flat.Len(),
+	// but do NOT use the IDs for traversal — Phase 1 still uses slice positions.
+	var nodeCount uint32
+	if err := read(&nodeCount); err != nil {
+		return nil, err
+	}
+	if int(nodeCount) != flat.Len() {
+		return nil, fmt.Errorf("corkscrewdb: hnsw node count mismatch: file has %d, flat index has %d", nodeCount, flat.Len())
+	}
+	for i := uint32(0); i < nodeCount; i++ {
+		var idLen uint32
+		if err := read(&idLen); err != nil {
+			return nil, err
+		}
+		idBuf := make([]byte, idLen)
+		if _, err := io.ReadFull(mr, idBuf); err != nil {
+			return nil, err
+		}
+		// ID is read but not consumed for traversal in Phase 1.
 	}
 
 	var numLayers int32
