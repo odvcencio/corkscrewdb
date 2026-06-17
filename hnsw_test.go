@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"sort"
 	"testing"
+
+	"m31labs.dev/turboquant"
 )
 
 func TestHNSWInsertAndSearch(t *testing.T) {
@@ -227,5 +229,35 @@ func TestHNSWRecallBruteForceComparison(t *testing.T) {
 	// We just want it to be reasonable.
 	if avgRecall < 0.70 {
 		t.Errorf("Recall@%d vs exact = %.2f, want >= 0.70", k, avgRecall)
+	}
+}
+
+func TestHNSWAddQuantizedBuildsFromCodes(t *testing.T) {
+	dim, bits, seed := 8, 2, int64(42)
+	qz := turboquant.NewIPWithSeed(dim, bits, seed)
+	h := newHNSWIndex(dim, bits, seed, defaultHNSWParams())
+	vecs := map[string][]float32{}
+	for i := 0; i < 200; i++ {
+		v := make([]float32, dim)
+		for j := range v {
+			v[j] = float32((i*7+j)%13) - 6
+		}
+		id := fmt.Sprintf("id-%d", i)
+		vecs[id] = v
+		qv := qz.Quantize(v)
+		h.AddQuantized(id, qv, "", nil, uint64(i+1)) // NO raw vector supplied
+	}
+	if h.Len() != 200 {
+		t.Fatalf("want 200 nodes, got %d", h.Len())
+	}
+	res := h.Search(vecs["id-100"], 5, nil)
+	found := false
+	for _, r := range res {
+		if r.ID == "id-100" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("self-vector not in top-5: %+v", res)
 	}
 }
