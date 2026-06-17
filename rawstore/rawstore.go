@@ -2,10 +2,8 @@ package rawstore
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,8 +13,6 @@ import (
 
 	"lukechampine.com/blake3"
 )
-
-func putF32(b []byte, v float32) { binary.LittleEndian.PutUint32(b, math.Float32bits(v)) }
 
 type location struct {
 	segment int

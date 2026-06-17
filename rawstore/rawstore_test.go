@@ -2,10 +2,14 @@ package rawstore
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func putF32(b []byte, v float32) { binary.LittleEndian.PutUint32(b, math.Float32bits(v)) }
 
 func floatBytes(vals ...float32) []byte {
 	out := make([]byte, len(vals)*4)

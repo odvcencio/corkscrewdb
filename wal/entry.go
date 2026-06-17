@@ -17,6 +17,16 @@ const (
 	walVersion = uint8(5) // v0.3.0 floor
 )
 
+// maxEntryFieldBytes bounds any single length-prefixed field (ActorID,
+// CollectionID, VectorID, MSE, Signs, Text, Metadata, children, sparse blocks)
+// read out of a WAL entry. No legitimate field can exceed the WAL segment max
+// size (defaultSegmentBytes, ~8 MiB), so a declared length above this ceiling
+// is interior corruption (an inflated length prefix), not a plausible
+// crash-truncated tail. This mirrors snapshot/loader.go's max-readable-bytes
+// defense and lets the reader distinguish corruption from a truncated tail
+// before io.ReadFull can swallow the rest of the file as ErrUnexpectedEOF.
+const maxEntryFieldBytes = uint32(defaultSegmentBytes)
+
 const (
 	EntryPut       = uint8(1)
 	EntryTombstone = uint8(2)
@@ -227,6 +237,12 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		if err := read(&length); err != nil {
 			return nil, err
 		}
+		// Bound the declared length before allocating/ReadFull so an inflated
+		// length prefix surfaces as corruption rather than being swallowed as a
+		// truncated tail when io.ReadFull consumes the rest of the file.
+		if length > maxEntryFieldBytes {
+			return nil, fmt.Errorf("wal: field length too large %d (max %d)", length, maxEntryFieldBytes)
+		}
 		buf := make([]byte, length)
 		if _, err := io.ReadFull(mr, buf); err != nil {
 			return nil, err
@@ -236,6 +252,20 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	readString := func() (string, error) {
 		buf, err := readBytes()
 		return string(buf), err
+	}
+	// readCount reads a u32 element count and bounds it against the segment
+	// ceiling so an inflated count cannot trigger a giant allocation or be
+	// swallowed as a truncated tail. Each element costs at least one byte, so no
+	// legitimate count can exceed maxEntryFieldBytes.
+	readCount := func(what string) (uint32, error) {
+		var count uint32
+		if err := read(&count); err != nil {
+			return 0, err
+		}
+		if count > maxEntryFieldBytes {
+			return 0, fmt.Errorf("wal: %s count too large %d (max %d)", what, count, maxEntryFieldBytes)
+		}
+		return count, nil
 	}
 
 	var entry Entry
@@ -326,8 +356,8 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		return entry, err
 	}
 	if hasSparse == 1 {
-		var count uint32
-		if err := read(&count); err != nil {
+		count, err := readCount("sparse")
+		if err != nil {
 			return entry, err
 		}
 		sparse := &SparseBlock{
@@ -348,8 +378,8 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		}
 		entry.Sparse = sparse
 	}
-	var childCount uint32
-	if err := read(&childCount); err != nil {
+	childCount, err := readCount("children")
+	if err != nil {
 		return entry, err
 	}
 	entry.Children = make([]ChildVector, 0, childCount)

@@ -962,12 +962,3 @@ func (c *Collection) pruneWALLocked() error {
 	}
 	return c.wal.PruneAndReset()
 }
-
-func sortVersions(versions []Version) {
-	sort.Slice(versions, func(i, j int) bool {
-		if versions[i].LamportClock != versions[j].LamportClock {
-			return versions[i].LamportClock < versions[j].LamportClock
-		}
-		return versions[i].ActorID < versions[j].ActorID
-	})
-}
