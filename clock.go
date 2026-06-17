@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	hlcLogicalBits = 20
-	hlcLogicalMask = (1 << hlcLogicalBits) - 1
+	hlcLogicalBits    = 20
+	hlcLogicalMask    = (1 << hlcLogicalBits) - 1
+	witnessMaxSkewMs  = uint64(60_000) // reject remote clocks more than 60 s ahead
 )
 
 // packHLC packs wall-clock milliseconds and a logical counter into a uint64.
@@ -73,14 +74,20 @@ func (h *HLC) Now() uint64 {
 	return h.clock
 }
 
-// Witness merges a remote HLC value into this clock, ensuring subsequent
-// Now() calls return values greater than the remote.
+// Witness merges a remote HLC value into this clock, rejecting any remote whose
+// physical component exceeds local wall-clock by more than witnessMaxSkewMs,
+// so one peer cannot poison the cluster's physical clock arbitrarily.
 func (h *HLC) Witness(remote uint64) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	remotePhys, _ := unpackHLC(remote)
+	maxPhys := wallNow() + witnessMaxSkewMs
+	if remotePhys > maxPhys {
+		return // reject: too far in the future
+	}
 	if remote > h.clock {
 		h.clock = remote
 	}
-	h.mu.Unlock()
 }
 
 // Current returns the last HLC value without advancing the clock.
