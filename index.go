@@ -222,6 +222,8 @@ func (idx *index) Search(query []float32, k int, filters []FilterOption) []Searc
 		if entry.child {
 			continue
 		}
+		// §7.4 filter pushdown: predicate evaluated BEFORE InnerProductPrepared so
+		// filtered rows pay zero scoring cost.
 		if !matchesFilters(entry.metadata, filters) {
 			continue
 		}
@@ -230,7 +232,7 @@ func (idx *index) Search(query []float32, k int, filters []FilterOption) []Searc
 			ID:       entry.id,
 			Score:    score,
 			Text:     entry.text,
-			Metadata: cloneMetadata(entry.metadata),
+			Metadata: entry.metadata, // returned by reference; callers must not mutate
 			Version:  entry.version,
 		}
 		if h.Len() < k {

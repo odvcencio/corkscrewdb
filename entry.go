@@ -190,6 +190,7 @@ type collectionConfig struct {
 	rawStore      bool // default true; cleared by WithoutRawStore
 	rawStoreSet   bool
 	sparseEnabled bool
+	scorer        Scorer // optional injected scorer; flat path uses defaultScorer when nil
 }
 
 // HNSWParams is the persisted HNSW configuration.
@@ -249,6 +250,13 @@ func WithoutRawStore() CollectionOption {
 // WithSparse enables the sparse channel for this collection.
 func WithSparse() CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.sparseEnabled = true })
+}
+
+// WithScorer injects a custom Scorer into the collection (frozen API seam).
+// The flat search path uses defaultScorer when no scorer is provided.
+// Full WithScorer injection into the flat path is deferred to the Performance phase.
+func WithScorer(s Scorer) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.scorer = s })
 }
 
 func cloneMetadata(meta map[string]string) map[string]string {
