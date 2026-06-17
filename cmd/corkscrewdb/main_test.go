@@ -49,6 +49,33 @@ func TestLoadServerProviderNoArtifactUsesEmbeddedDefault(t *testing.T) {
 	}
 }
 
+func TestLoadServerProviderWithEosArtifactDefaultsAlias(t *testing.T) {
+	artifact := filepath.Join("..", "..", "assets", "corkscrewdb-default-embedder", "corkscrewdb-default-embedder.mll")
+	provider, err := loadServerProvider(serverOpts{EosArtifact: artifact})
+	if err != nil {
+		t.Fatalf("load provider: %v", err)
+	}
+	defer provider.Close()
+
+	named, ok := provider.(interface{ ProviderID() string })
+	if !ok {
+		t.Fatal("expected Eos provider to expose ProviderID")
+	}
+	if got := named.ProviderID(); got != defaultEosProviderAlias {
+		t.Fatalf("provider id = %q, want %q", got, defaultEosProviderAlias)
+	}
+	if got := provider.Dim(); got != 256 {
+		t.Fatalf("provider dim = %d, want 256", got)
+	}
+	vec, err := provider.Encode("corkscrew local default embedder smoke")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(vec) != 256 {
+		t.Fatalf("embedding len = %d, want 256", len(vec))
+	}
+}
+
 // TestReplicationEndToEnd asserts that running corkscrewdb with
 // -replicate-from and -replicate-collections wires up a per-collection
 // Follower backed by a shared DBApplier and eventually pulls data written

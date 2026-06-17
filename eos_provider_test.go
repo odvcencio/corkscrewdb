@@ -1,6 +1,8 @@
 package corkscrewdb
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +11,37 @@ import (
 	eosruntime "m31labs.dev/eos/runtime"
 	"m31labs.dev/eos/runtime/backend"
 )
+
+func TestEmbeddedDefaultEosProviderAssetHashes(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "artifact",
+			path: "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll",
+			want: defaultEosProviderArtifactSHA256,
+		},
+		{
+			name: "tokenizer",
+			path: "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.tokenizer.mll",
+			want: defaultEosProviderTokenizerSHA256,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := defaultEosProviderAssets.ReadFile(tc.path)
+			if err != nil {
+				t.Fatalf("read embedded %s: %v", tc.path, err)
+			}
+			sum := sha256.Sum256(data)
+			if got := hex.EncodeToString(sum[:]); got != tc.want {
+				t.Fatalf("%s sha256 = %s, want %s", tc.name, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestLoadEosProviderEncodes(t *testing.T) {
 	path := writeTinyEosProviderPackage(t)
