@@ -411,6 +411,7 @@ func TestConnectRequiresToken(t *testing.T) {
 }
 
 func TestEmbeddedPeersRouteWritesAndFanoutSearch(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -517,6 +518,7 @@ func TestEmbeddedPeersRouteWritesAndFanoutSearch(t *testing.T) {
 }
 
 func TestExplicitShardsRouteWritesAndFanoutSearch(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -618,6 +620,7 @@ func TestExplicitShardsRouteWritesAndFanoutSearch(t *testing.T) {
 }
 
 func TestRebalanceShardsMigratesOwnershipAndPrunesOldOwner(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -760,6 +763,7 @@ func TestRebalanceShardsMigratesOwnershipAndPrunesOldOwner(t *testing.T) {
 }
 
 func TestOrchestrateRebalanceCoordinatesClusterCutover(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	listenerA, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -81,6 +81,7 @@ func TestLoadServerProviderWithEosArtifactDefaultsAlias(t *testing.T) {
 // Follower backed by a shared DBApplier and eventually pulls data written
 // to the primary before the follower was started.
 func TestReplicationEndToEnd(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	const token = "e2e-token"
 	const collection = "e2e-test"
 

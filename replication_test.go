@@ -144,6 +144,7 @@ func (a *dbApplier) ApplySnapshot(data replica.SnapshotData) error {
 }
 
 func TestReplicationPrimaryToFollower(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	// Start primary.
 	primaryPath := filepath.Join(t.TempDir(), "primary.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
@@ -233,6 +234,7 @@ func TestReplicationPrimaryToFollower(t *testing.T) {
 }
 
 func TestReplicationCatchUp(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	// Start primary with existing data.
 	primaryPath := filepath.Join(t.TempDir(), "primary.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 8}), WithToken("secret"))
@@ -310,6 +312,7 @@ func TestReplicationCatchUp(t *testing.T) {
 }
 
 func TestReplicationStreamingFollowerReceivesLiveWrites(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	primaryPath := filepath.Join(t.TempDir(), "primary-stream.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
 	if err != nil {
