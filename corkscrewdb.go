@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/corkscrewdb/rawstore"
 	"m31labs.dev/corkscrewdb/replica"
 	snap "m31labs.dev/corkscrewdb/snapshot"
 	walpkg "m31labs.dev/corkscrewdb/wal"
@@ -100,6 +101,7 @@ type DB struct {
 
 type manifest struct {
 	FormatVersion   int                       `json:"format_version"`
+	FormatFloor     string                    `json:"format_floor"`
 	ModuleVersion   string                    `json:"module_version"`
 	ActorID         string                    `json:"actor_id"`
 	DefaultBitWidth int                       `json:"default_bit_width"`
@@ -117,10 +119,13 @@ type embeddingConfig struct {
 }
 
 type collectionMeta struct {
-	BitWidth      int               `json:"bit_width"`
-	Seed          int64             `json:"seed"`
-	Dim           int               `json:"dim"`
-	VectorStorage VectorStorageMode `json:"vector_storage,omitempty"`
+	BitWidth      int         `json:"bit_width"`
+	Seed          int64       `json:"seed"`
+	Dim           int         `json:"dim"`
+	RawStore      bool        `json:"raw_store"`
+	SparseEnabled bool        `json:"sparse_enabled"`
+	IndexType     string      `json:"index_type"` // "flat" | "hnsw"
+	HNSW          *HNSWParams `json:"hnsw,omitempty"`
 }
 
 type providerIdentifier interface {
@@ -230,20 +235,20 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				err:      fmt.Errorf("corkscrewdb: collection %q already exists with quantizer seed %d", name, existing.seed),
 			}
 		}
-		if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) != existing.storage {
+		if cfg.rawStoreSet && cfg.rawStore != existing.rawStoreEnabled {
 			return &Collection{
 				db:       db,
 				name:     name,
 				bitWidth: existing.bitWidth,
 				seed:     existing.seed,
 				encoder:  db.encoder,
-				err:      fmt.Errorf("corkscrewdb: collection %q already exists with vector storage %q", name, existing.storage),
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with raw store %v", name, existing.rawStoreEnabled),
 			}
 		}
 		return existing
 	}
 
-	cfg := collectionConfig{bitWidth: db.manifest.DefaultBitWidth}
+	cfg := defaultCollectionConfig(db.manifest.DefaultBitWidth)
 	for _, opt := range opts {
 		if opt != nil {
 			opt.applyCollection(&cfg)
@@ -255,18 +260,17 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if cfg.seed < 0 {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
 	}
-	storage, err := validateVectorStorage(cfg.vectorStorage)
-	if err != nil {
-		return &Collection{db: db, name: name, encoder: db.encoder, err: err}
-	}
-	if storage == VectorStorageQuantizedOnly && cfg.indexType == IndexHNSW {
-		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantized_only vector storage supports only flat local indexes")}
-	}
 
 	meta := collectionMeta{
 		BitWidth:      cfg.bitWidth,
 		Seed:          cfg.seed,
-		VectorStorage: manifestVectorStorage(storage),
+		RawStore:      cfg.rawStore,
+		SparseEnabled: cfg.sparseEnabled,
+		IndexType:     indexTypeString(cfg.indexType),
+	}
+	if cfg.indexType == IndexHNSW {
+		hnsw := cfg.hnsw
+		meta.HNSW = &hnsw
 	}
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
@@ -432,7 +436,8 @@ func loadOrCreateManifest(path string, defaultBits int) (manifest, error) {
 		}
 		now := time.Now().UTC()
 		m := manifest{
-			FormatVersion:   1,
+			FormatVersion:   2,
+			FormatFloor:     "v0.3.0",
 			ModuleVersion:   PackageVersion,
 			ActorID:         generateActorID(),
 			DefaultBitWidth: defaultBits,
@@ -448,6 +453,9 @@ func loadOrCreateManifest(path string, defaultBits int) (manifest, error) {
 	var m manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return manifest{}, err
+	}
+	if m.FormatVersion < 2 {
+		return manifest{}, fmt.Errorf("%w: manifest format version %d", ErrFormatTooOld, m.FormatVersion)
 	}
 	if m.Collections == nil {
 		m.Collections = make(map[string]collectionMeta)
@@ -476,14 +484,22 @@ func (db *DB) saveManifestLocked() error {
 	return writeManifest(filepath.Join(db.path, "manifest.json"), db.manifest)
 }
 
-func (db *DB) persistCollectionMeta(name string, bitWidth, dim int, seed int64, storage VectorStorageMode) error {
+func (db *DB) persistCollectionMeta(name string, c *Collection) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	meta := db.manifest.Collections[name]
-	meta.BitWidth = bitWidth
-	meta.Dim = dim
-	meta.Seed = seed
-	meta.VectorStorage = manifestVectorStorage(storage)
+	meta.BitWidth = c.bitWidth
+	meta.Dim = c.dim
+	meta.Seed = c.seed
+	meta.RawStore = c.rawStoreEnabled
+	meta.SparseEnabled = c.sparseEnabled
+	meta.IndexType = indexTypeString(c.indexType)
+	if c.indexType == IndexHNSW {
+		hnsw := c.hnsw
+		meta.HNSW = &hnsw
+	} else {
+		meta.HNSW = nil
+	}
 	db.manifest.Collections[name] = meta
 	return db.saveManifestLocked()
 }
@@ -515,20 +531,13 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if data.Dim != 0 {
 				coll.dim = data.Dim
 			}
-			if data.Storage != "" {
-				storage, err := validateVectorStorage(VectorStorageMode(data.Storage))
-				if err != nil {
-					return nil, err
-				}
-				coll.storage = storage
-			}
 			for _, record := range data.Records {
 				for _, version := range record.Versions {
-					qv := fromSnapshotQuantized(version.Quantized)
 					if err := coll.loadVersion(record.ID, Version{
-						Embedding:    cloneVector(version.Embedding),
+						Quantized:    fromSnapshotQuantized(version.Quantized),
+						RawHash:      append([]byte(nil), version.RawHash...),
+						Sparse:       fromSnapshotSparse(version.Sparse),
 						Children:     fromSnapshotChildren(version.Children),
-						quantized:    qv,
 						dim:          data.Dim,
 						Text:         version.Text,
 						Metadata:     cloneMetadata(version.Metadata),
@@ -542,21 +551,6 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 				}
 			}
 			snapshotMax = data.MaxLamport
-			if !coll.isQuantizedOnly() {
-				if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
-					coll.mu.Lock()
-					// Check if an HNSW graph file exists; if so, wrap the flat index.
-					if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
-						coll.index = hw
-					} else {
-						coll.index = restored
-					}
-					if coll.dim == 0 {
-						coll.dim = restored.Dim()
-					}
-					coll.mu.Unlock()
-				}
-			}
 		}
 	}
 
@@ -574,11 +568,11 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if entry.LamportClock <= snapshotMax {
 				continue
 			}
-			qv := fromWALQuantized(entry.Quantized)
 			if err := coll.loadVersion(entry.VectorID, Version{
-				Embedding:    cloneVector(entry.Embedding),
+				Quantized:    fromWALQuantized(entry.Quantized),
+				RawHash:      append([]byte(nil), entry.RawHash...),
+				Sparse:       fromWALSparse(entry.Sparse),
 				Children:     fromWALChildren(entry.Children),
-				quantized:    qv,
 				dim:          entry.Dim,
 				Text:         entry.Text,
 				Metadata:     cloneMetadata(entry.Metadata),
@@ -602,8 +596,8 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 	coll.mu.Lock()
 	coll.dirty = false
 	coll.mu.Unlock()
-	if coll.dim != meta.Dim || coll.bitWidth != meta.BitWidth || coll.seed != meta.Seed || coll.storage != normalizeVectorStorage(meta.VectorStorage) {
-		if err := db.persistCollectionMeta(name, coll.bitWidth, coll.dim, coll.seed, coll.storage); err != nil {
+	if coll.dim != meta.Dim || coll.bitWidth != meta.BitWidth || coll.seed != meta.Seed {
+		if err := db.persistCollectionMeta(name, coll); err != nil {
 			return nil, err
 		}
 	}
@@ -624,18 +618,38 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Collection{
-		db:       db,
-		name:     name,
-		bitWidth: meta.BitWidth,
-		seed:     meta.Seed,
-		storage:  normalizeVectorStorage(meta.VectorStorage),
-		encoder:  db.encoder,
-		history:  make(map[string][]Version),
-		clock:    newHLC(db.manifest.ActorID),
-		wal:      manager,
-		dim:      meta.Dim,
-	}, nil
+	indexType := IndexFlat
+	if meta.IndexType == "hnsw" {
+		indexType = IndexHNSW
+	}
+	hnsw := defaultHNSWParams()
+	if meta.HNSW != nil {
+		hnsw = *meta.HNSW
+	}
+	coll := &Collection{
+		db:              db,
+		name:            name,
+		bitWidth:        meta.BitWidth,
+		seed:            meta.Seed,
+		encoder:         db.encoder,
+		rawStoreEnabled: meta.RawStore,
+		sparseEnabled:   meta.SparseEnabled,
+		indexType:       indexType,
+		hnsw:            hnsw,
+		history:         make(map[string][]Version),
+		clock:           newHLC(db.manifest.ActorID),
+		wal:             manager,
+		dim:             meta.Dim,
+	}
+	if meta.RawStore {
+		store, err := rawstore.Open(db.rawStoreDir(name))
+		if err != nil {
+			_ = manager.Close()
+			return nil, err
+		}
+		coll.rawStore = store
+	}
+	return coll, nil
 }
 
 func (db *DB) pruneWAL(name string) error {
@@ -682,6 +696,10 @@ func (db *DB) collectionHNSWPath(name string) string {
 
 func (db *DB) collectionWALDir(name string) string {
 	return filepath.Join(db.collectionDir(name), "wal")
+}
+
+func (db *DB) rawStoreDir(name string) string {
+	return filepath.Join(db.collectionDir(name), "raw")
 }
 
 func validCollectionName(name string) bool {

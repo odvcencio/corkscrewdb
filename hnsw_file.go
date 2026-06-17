@@ -103,7 +103,7 @@ func marshalHNSWFile(h *hnswIndex) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func loadHNSWFile(path string, flat *index, params hnswParams) (*hnswIndex, error) {
+func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -190,7 +190,7 @@ func loadHNSWFile(path string, flat *index, params hnswParams) (*hnswIndex, erro
 	}
 
 	// Use stored params if they differ from defaults, preferring the file's values.
-	loadedParams := hnswParams{
+	loadedParams := HNSWParams{
 		M:              int(m),
 		EfConstruction: int(efConstruction),
 		EfSearch:       int(efSearch),

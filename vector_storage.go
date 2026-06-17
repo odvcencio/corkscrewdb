@@ -1,38 +1,38 @@
 package corkscrewdb
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	snap "m31labs.dev/corkscrewdb/snapshot"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 	"m31labs.dev/turboquant"
 )
 
-var errQuantizedOnlyRemoteWrite = errors.New("corkscrewdb: quantized_only vector storage is unsupported for federated or remote writes")
+// errRemoteUnsupportedPendingDistribution gates every multi-node path that
+// would serialize stored versions / inline embeddings over the wire. WAL v5
+// dropped inline Embedding; the Distribution phase rebuilds replication to
+// stream codes over a new wire and pull raw by hash, at which point this error
+// and these gates are removed. Returning it IS the Phase 1 behavior.
+var errRemoteUnsupportedPendingDistribution = errors.New(
+	"corkscrewdb: multi-node replication/federation/rebalance is disabled in v0.3.0 Phase 1; restored in the Distribution phase (code-carrying replication over codes + raw pull-by-hash)")
 
-func normalizeVectorStorage(mode VectorStorageMode) VectorStorageMode {
-	if mode == "" {
-		return VectorStorageRaw
+func indexTypeString(t IndexType) string {
+	if t == IndexHNSW {
+		return "hnsw"
 	}
-	return mode
+	return "flat"
 }
 
-func validateVectorStorage(mode VectorStorageMode) (VectorStorageMode, error) {
-	mode = normalizeVectorStorage(mode)
-	switch mode {
-	case VectorStorageRaw, VectorStorageQuantizedOnly:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("corkscrewdb: unsupported vector storage mode %q", mode)
+// rawFloat32Bytes encodes a float32 slice little-endian for the raw store.
+func rawFloat32Bytes(vec []float32) []byte {
+	out := make([]byte, len(vec)*4)
+	for i, v := range vec {
+		binary.LittleEndian.PutUint32(out[i*4:], math.Float32bits(v))
 	}
-}
-
-func manifestVectorStorage(mode VectorStorageMode) VectorStorageMode {
-	if normalizeVectorStorage(mode) == VectorStorageRaw {
-		return ""
-	}
-	return mode
+	return out
 }
 
 func toWALQuantized(qv *turboquant.IPQuantized) *walpkg.QuantizedVector {
@@ -58,7 +58,24 @@ func fromWALQuantized(qv *walpkg.QuantizedVector) *turboquant.IPQuantized {
 	return &out
 }
 
-func toWALChildren(children []MultiVectorChildVersion) []walpkg.ChildVector {
+func toWALSparse(sv *SparseVector) *walpkg.SparseBlock {
+	if sv == nil || len(sv.Indices) == 0 {
+		return nil
+	}
+	return &walpkg.SparseBlock{
+		Indices: append([]uint32(nil), sv.Indices...),
+		Values:  append([]float32(nil), sv.Values...),
+	}
+}
+
+func fromWALSparse(sb *walpkg.SparseBlock) *SparseVector {
+	if sb == nil {
+		return nil
+	}
+	return &SparseVector{Indices: append([]uint32(nil), sb.Indices...), Values: append([]float32(nil), sb.Values...)}
+}
+
+func toWALChildren(children []ChildVector) []walpkg.ChildVector {
 	if len(children) == 0 {
 		return nil
 	}
@@ -66,8 +83,7 @@ func toWALChildren(children []MultiVectorChildVersion) []walpkg.ChildVector {
 	for i, child := range children {
 		out[i] = walpkg.ChildVector{
 			ID:        child.ID,
-			Embedding: cloneVector(child.Embedding),
-			Quantized: toWALQuantized(child.quantized),
+			Quantized: toWALQuantized(child.Quantized),
 			Dim:       child.dim,
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
@@ -76,18 +92,17 @@ func toWALChildren(children []MultiVectorChildVersion) []walpkg.ChildVector {
 	return out
 }
 
-func fromWALChildren(children []walpkg.ChildVector) []MultiVectorChildVersion {
+func fromWALChildren(children []walpkg.ChildVector) []ChildVector {
 	if len(children) == 0 {
 		return nil
 	}
-	out := make([]MultiVectorChildVersion, len(children))
+	out := make([]ChildVector, len(children))
 	for i, child := range children {
-		out[i] = MultiVectorChildVersion{
+		out[i] = ChildVector{
 			ID:        child.ID,
-			Embedding: cloneVector(child.Embedding),
+			Quantized: fromWALQuantized(child.Quantized),
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
-			quantized: fromWALQuantized(child.Quantized),
 			dim:       child.Dim,
 		}
 	}
@@ -117,7 +132,24 @@ func fromSnapshotQuantized(qv *snap.QuantizedVector) *turboquant.IPQuantized {
 	return &out
 }
 
-func toSnapshotChildren(children []MultiVectorChildVersion) []snap.ChildVector {
+func toSnapshotSparse(sv *SparseVector) *snap.SparseBlock {
+	if sv == nil || len(sv.Indices) == 0 {
+		return nil
+	}
+	return &snap.SparseBlock{
+		Indices: append([]uint32(nil), sv.Indices...),
+		Values:  append([]float32(nil), sv.Values...),
+	}
+}
+
+func fromSnapshotSparse(sb *snap.SparseBlock) *SparseVector {
+	if sb == nil {
+		return nil
+	}
+	return &SparseVector{Indices: append([]uint32(nil), sb.Indices...), Values: append([]float32(nil), sb.Values...)}
+}
+
+func toSnapshotChildren(children []ChildVector) []snap.ChildVector {
 	if len(children) == 0 {
 		return nil
 	}
@@ -125,8 +157,7 @@ func toSnapshotChildren(children []MultiVectorChildVersion) []snap.ChildVector {
 	for i, child := range children {
 		out[i] = snap.ChildVector{
 			ID:        child.ID,
-			Embedding: cloneVector(child.Embedding),
-			Quantized: toSnapshotQuantized(child.quantized),
+			Quantized: toSnapshotQuantized(child.Quantized),
 			Dim:       child.dim,
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
@@ -135,18 +166,17 @@ func toSnapshotChildren(children []MultiVectorChildVersion) []snap.ChildVector {
 	return out
 }
 
-func fromSnapshotChildren(children []snap.ChildVector) []MultiVectorChildVersion {
+func fromSnapshotChildren(children []snap.ChildVector) []ChildVector {
 	if len(children) == 0 {
 		return nil
 	}
-	out := make([]MultiVectorChildVersion, len(children))
+	out := make([]ChildVector, len(children))
 	for i, child := range children {
-		out[i] = MultiVectorChildVersion{
+		out[i] = ChildVector{
 			ID:        child.ID,
-			Embedding: cloneVector(child.Embedding),
+			Quantized: fromSnapshotQuantized(child.Quantized),
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
-			quantized: fromSnapshotQuantized(child.Quantized),
 			dim:       child.Dim,
 		}
 	}
@@ -158,7 +188,7 @@ func validateQuantizedPayload(qv *turboquant.IPQuantized, dim, bitWidth int) err
 		return errors.New("corkscrewdb: missing quantized embedding")
 	}
 	if dim <= 0 {
-		return errors.New("corkscrewdb: collection dimension is required for quantized_only versions")
+		return errors.New("corkscrewdb: collection dimension is required for quantized versions")
 	}
 	if bitWidth < 2 {
 		return fmt.Errorf("corkscrewdb: invalid quantized payload bit width %d", bitWidth)

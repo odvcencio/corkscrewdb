@@ -9,30 +9,24 @@ import (
 	"m31labs.dev/turboquant"
 )
 
-type hnswParams struct {
-	M              int // max connections per layer
-	EfConstruction int // build-time beam width
-	EfSearch       int // query-time beam width
-}
-
-func defaultHNSWParams() hnswParams {
-	return hnswParams{M: 16, EfConstruction: 200, EfSearch: 50}
+func defaultHNSWParams() HNSWParams {
+	return HNSWParams{M: 16, EfConstruction: 200, EfSearch: 50}
 }
 
 // hnswIndex wraps a flat index with an HNSW graph for sub-linear search.
 type hnswIndex struct {
 	mu        sync.RWMutex
-	flat      *index       // stores all vectors + quantized data
-	layers    [][][]int32  // layers[level][node] = neighbor indices
+	flat      *index      // stores all vectors + quantized data
+	layers    [][][]int32 // layers[level][node] = neighbor indices
 	maxLevel  int
 	entryNode int
-	params    hnswParams
+	params    HNSWParams
 	rng       *rand.Rand
 }
 
 var _ indexer = (*hnswIndex)(nil)
 
-func newHNSWIndex(dim, bitWidth int, seed int64, params hnswParams) *hnswIndex {
+func newHNSWIndex(dim, bitWidth int, seed int64, params HNSWParams) *hnswIndex {
 	if params.M <= 0 {
 		params.M = 16
 	}
@@ -111,6 +105,36 @@ func (h *hnswIndex) Add(id string, vec []float32, text string, metadata map[stri
 	nodeIdx := h.flat.idIndex[id]
 	h.flat.mu.RUnlock()
 
+	h.insertNode(nodeIdx, vec)
+}
+
+// AddQuantized inserts a node from stored codes only (no raw vector). The
+// graph-positioning query is reconstructed from the codes via Dequantize, so
+// construction never touches the raw store. Traversal already scores neighbors
+// on codes, so graph quality is unchanged versus the raw path.
+func (h *hnswIndex) AddQuantized(id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.flat.mu.Lock()
+	_, isUpdate := h.flat.idIndex[id]
+	h.flat.mu.Unlock()
+	if isUpdate {
+		h.removeLocked(id)
+	}
+
+	h.flat.addQuantized(id, qv, text, metadata, version)
+
+	h.flat.mu.RLock()
+	nodeIdx := h.flat.idIndex[id]
+	approx := h.flat.quantizer.Dequantize(qv) // code-only positioning vector
+	h.flat.mu.RUnlock()
+
+	h.insertNode(nodeIdx, approx)
+}
+
+// insertNode wires nodeIdx into the graph using queryVec to position it.
+func (h *hnswIndex) insertNode(nodeIdx int, queryVec []float32) {
 	nodeLevel := h.randomLevel()
 
 	// Ensure all layers up to nodeLevel have a slot for this node.
@@ -126,7 +150,7 @@ func (h *hnswIndex) Add(id string, vec []float32, text string, metadata map[stri
 		return
 	}
 
-	pq := h.flat.quantizer.PrepareQuery(vec)
+	pq := h.flat.quantizer.PrepareQuery(queryVec)
 
 	// Greedy traverse from top level down to nodeLevel+1.
 	current := h.entryNode

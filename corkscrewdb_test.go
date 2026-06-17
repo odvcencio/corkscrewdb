@@ -1,6 +1,7 @@
 package corkscrewdb
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,7 +9,53 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
+
+func TestOpenSurfacesWALInteriorCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.csdb")
+	db, err := Open(path, WithProvider(&mockProvider{dim: 4}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("docs", WithBitWidth(2))
+	if err := coll.PutVector("a", []float32{1, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.PutVector("b", []float32{0, 1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt an interior byte of the first WAL segment (valid bytes follow),
+	// without closing (close would snapshot + prune the WAL).
+	walDir := filepath.Join(path, "collections", "docs", "wal")
+	segments, err := walpkg.ListSegments(walDir)
+	if err != nil || len(segments) == 0 {
+		t.Fatalf("list segments err=%v segments=%v", err, segments)
+	}
+	raw, err := os.ReadFile(segments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[10] ^= 0xFF
+	if err := os.WriteFile(segments[0], raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path, WithProvider(&mockProvider{dim: 4})); err == nil {
+		t.Fatal("Open succeeded over interior-corrupted WAL")
+	} else {
+		var corrupt *walpkg.ErrWALCorrupt
+		if !errors.As(err, &corrupt) {
+			t.Fatalf("Open err = %v, want *walpkg.ErrWALCorrupt", err)
+		}
+	}
+}
 
 func TestOpenCloseRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -195,7 +242,7 @@ func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	}
 }
 
-func TestCloseWritesQuantizedIndexFile(t *testing.T) {
+func TestCloseWritesDurableSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "index-file.csdb")
 	db, err := Open(path, WithProvider(&mockProvider{dim: 8}))
@@ -210,9 +257,24 @@ func TestCloseWritesQuantizedIndexFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	indexPath := filepath.Join(path, "collections", "docs", "index", "quantized.tqi")
-	if _, err := os.Stat(indexPath); err != nil {
-		t.Fatalf("expected quantized index file: %v", err)
+	// The snapshot is the durable full-state copy (codes + raw hash refs);
+	// .tqi/graph.hnsw are regenerable caches no longer written on close.
+	matches, _ := filepath.Glob(filepath.Join(path, "collections", "docs", "snapshot-*.csdb"))
+	if len(matches) == 0 {
+		t.Fatal("expected a durable snapshot file")
+	}
+
+	db2, err := Open(path, WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	results, err := db2.Collection("docs").Search("alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "doc-1" {
+		t.Fatalf("reopen search = %v, want doc-1", results)
 	}
 }
 

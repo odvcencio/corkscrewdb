@@ -41,7 +41,6 @@ func (p *RPCPuller) PullEntries(req replica.PullRequest) (replica.PullResponse, 
 			Kind:         e.Kind,
 			CollectionID: e.CollectionID,
 			VectorID:     e.VectorID,
-			Embedding:    cloneVector(e.Embedding),
 			Text:         e.Text,
 			Metadata:     cloneMetadata(e.Metadata),
 			LamportClock: e.LamportClock,
@@ -105,7 +104,6 @@ func (p *RPCPuller) StreamEntries(ctx context.Context, req replica.PullRequest, 
 				Kind:         e.Kind,
 				CollectionID: e.CollectionID,
 				VectorID:     e.VectorID,
-				Embedding:    cloneVector(e.Embedding),
 				Text:         e.Text,
 				Metadata:     cloneMetadata(e.Metadata),
 				LamportClock: e.LamportClock,
@@ -136,34 +134,12 @@ func NewDBApplier(db *DB) (*DBApplier, error) {
 }
 
 func (a *DBApplier) ApplyReplicatedEntry(collection string, entry replica.Entry) error {
-	coll := a.db.Collection(collection)
-	return coll.loadVersion(entry.VectorID, Version{
-		Embedding:    cloneVector(entry.Embedding),
-		Text:         entry.Text,
-		Metadata:     cloneMetadata(entry.Metadata),
-		LamportClock: entry.LamportClock,
-		ActorID:      entry.ActorID,
-		WallClock:    entry.WallClock,
-		Tombstone:    entry.Kind == walpkg.EntryTombstone,
-	})
+	// WAL v5 dropped inline embeddings, so the follower-apply path can no longer
+	// reconstruct a stored version from the wire. Disabled pending Distribution.
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (a *DBApplier) ApplySnapshot(data replica.SnapshotData) error {
-	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth))
-	for _, record := range data.Entries {
-		for _, v := range record.Versions {
-			if err := coll.loadVersion(record.ID, Version{
-				Embedding:    cloneVector(v.Embedding),
-				Text:         v.Text,
-				Metadata:     cloneMetadata(v.Metadata),
-				LamportClock: v.LamportClock,
-				ActorID:      v.ActorID,
-				WallClock:    v.WallClock,
-				Tombstone:    v.Tombstone,
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	// Disabled pending Distribution (no usable raw vector over the wire).
+	return errRemoteUnsupportedPendingDistribution
 }

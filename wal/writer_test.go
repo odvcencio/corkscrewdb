@@ -15,8 +15,8 @@ func TestWriterAppendAndReaderReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := []Entry{
-		{Kind: EntryPut, CollectionID: "docs", VectorID: "a", Embedding: []float32{1, 2, 3}, LamportClock: 1, ActorID: "x", WallClock: time.Now().UTC()},
-		{Kind: EntryPut, CollectionID: "docs", VectorID: "b", Embedding: []float32{4, 5, 6}, LamportClock: 2, ActorID: "x", WallClock: time.Now().UTC()},
+		{Kind: EntryPut, CollectionID: "docs", VectorID: "a", Quantized: &QuantizedVector{MSE: []byte{1}, Signs: []byte{1}}, Dim: 3, LamportClock: 1, ActorID: "x", WallClock: time.Now().UTC()},
+		{Kind: EntryPut, CollectionID: "docs", VectorID: "b", Quantized: &QuantizedVector{MSE: []byte{2}, Signs: []byte{2}}, Dim: 3, LamportClock: 2, ActorID: "x", WallClock: time.Now().UTC()},
 		{Kind: EntryTombstone, CollectionID: "docs", VectorID: "a", LamportClock: 3, ActorID: "x", WallClock: time.Now().UTC()},
 	}
 	for _, entry := range entries {

@@ -31,7 +31,6 @@ func (a *rpcPullerAdapter) PullEntries(req replica.PullRequest) (replica.PullRes
 			Kind:         e.Kind,
 			CollectionID: e.CollectionID,
 			VectorID:     e.VectorID,
-			Embedding:    e.Embedding,
 			Text:         e.Text,
 			Metadata:     e.Metadata,
 			LamportClock: e.LamportClock,
@@ -93,7 +92,6 @@ func (a *rpcPullerAdapter) StreamEntries(ctx context.Context, req replica.PullRe
 				Kind:         e.Kind,
 				CollectionID: e.CollectionID,
 				VectorID:     e.VectorID,
-				Embedding:    e.Embedding,
 				Text:         e.Text,
 				Metadata:     e.Metadata,
 				LamportClock: e.LamportClock,
@@ -117,7 +115,6 @@ type dbApplier struct {
 func (a *dbApplier) ApplyReplicatedEntry(collection string, entry replica.Entry) error {
 	coll := a.db.Collection(collection)
 	return coll.loadVersion(entry.VectorID, Version{
-		Embedding:    cloneVector(entry.Embedding),
 		Text:         entry.Text,
 		Metadata:     cloneMetadata(entry.Metadata),
 		LamportClock: entry.LamportClock,
@@ -132,7 +129,6 @@ func (a *dbApplier) ApplySnapshot(data replica.SnapshotData) error {
 	for _, record := range data.Entries {
 		for _, v := range record.Versions {
 			if err := coll.loadVersion(record.ID, Version{
-				Embedding:    cloneVector(v.Embedding),
 				Text:         v.Text,
 				Metadata:     cloneMetadata(v.Metadata),
 				LamportClock: v.LamportClock,

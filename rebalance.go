@@ -4,8 +4,6 @@ import (
 	"errors"
 	"sort"
 	"strings"
-
-	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // RebalanceShards applies a new explicit shard layout to the local node.
@@ -261,62 +259,14 @@ func (db *DB) pullMigratedDataFromPeer(peer string, oldShards []ShardAssignment,
 }
 
 func (db *DB) importOwnedSnapshot(peer string, info RPCCollectionInfo, snapshot RPCPullSnapshotResponse, oldShards []ShardAssignment, oldMembers []string, newShards []ShardAssignment) error {
-	coll := db.Collection(info.Name, WithBitWidth(snapshot.BitWidth))
-	if coll.err != nil {
-		return coll.err
-	}
-	for _, record := range snapshot.Records {
-		if db.ownerForLayout(info.Name, record.ID, oldShards, oldMembers) != peer {
-			continue
-		}
-		if db.ownerForLayout(info.Name, record.ID, newShards, nil) != db.localMemberID() {
-			continue
-		}
-		for _, version := range record.Versions {
-			if err := coll.loadVersion(record.ID, Version{
-				Embedding:    cloneVector(version.Embedding),
-				Text:         version.Text,
-				Metadata:     cloneMetadata(version.Metadata),
-				LamportClock: version.LamportClock,
-				ActorID:      version.ActorID,
-				WallClock:    version.WallClock,
-				Tombstone:    version.Tombstone,
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	// Rebalance data migration requires streaming stored raw vectors, which WAL v5
+	// no longer carries inline. Disabled pending Distribution.
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (db *DB) importOwnedEntries(peer string, info RPCCollectionInfo, entries []RPCReplicaEntry, oldShards []ShardAssignment, oldMembers []string, newShards []ShardAssignment) error {
-	if len(entries) == 0 {
-		return nil
-	}
-	coll := db.Collection(info.Name, WithBitWidth(info.BitWidth))
-	if coll.err != nil {
-		return coll.err
-	}
-	for _, entry := range entries {
-		if db.ownerForLayout(info.Name, entry.VectorID, oldShards, oldMembers) != peer {
-			continue
-		}
-		if db.ownerForLayout(info.Name, entry.VectorID, newShards, nil) != db.localMemberID() {
-			continue
-		}
-		if err := coll.loadVersion(entry.VectorID, Version{
-			Embedding:    cloneVector(entry.Embedding),
-			Text:         entry.Text,
-			Metadata:     cloneMetadata(entry.Metadata),
-			LamportClock: entry.LamportClock,
-			ActorID:      entry.ActorID,
-			WallClock:    entry.WallClock,
-			Tombstone:    entry.Kind == walpkg.EntryTombstone,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Disabled pending Distribution (no usable raw vector over the wire).
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (db *DB) ownerForLayout(collection, id string, shards []ShardAssignment, legacyMembers []string) string {

@@ -711,7 +711,7 @@ func toProtoVersions(versions []Version) []*grpcapi.Version {
 	out := make([]*grpcapi.Version, len(versions))
 	for i, version := range versions {
 		out[i] = &grpcapi.Version{
-			Embedding:    cloneVector(version.Embedding),
+			Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
 			Text:         version.Text,
 			Metadata:     cloneMetadata(version.Metadata),
 			LamportClock: version.LamportClock,
@@ -730,7 +730,6 @@ func fromProtoVersions(versions []*grpcapi.Version) []Version {
 	out := make([]Version, len(versions))
 	for i, version := range versions {
 		out[i] = Version{
-			Embedding:    cloneVector(version.GetEmbedding()),
 			Text:         version.GetText(),
 			Metadata:     cloneMetadata(version.GetMetadata()),
 			LamportClock: version.GetLamportClock(),

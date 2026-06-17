@@ -141,8 +141,8 @@ func (idx *index) addQuantized(id string, qv turboquant.IPQuantized, text string
 	idx.entries = append(idx.entries, entry)
 }
 
-func (idx *index) addPackedChild(parentID string, parent Version, child MultiVectorChildVersion) {
-	if child.quantized == nil {
+func (idx *index) addPackedChild(parentID string, parent Version, child ChildVector) {
+	if child.Quantized == nil {
 		return
 	}
 	idx.mu.Lock()
@@ -150,7 +150,7 @@ func (idx *index) addPackedChild(parentID string, parent Version, child MultiVec
 	id := packedChildIndexID(parentID, child.ID)
 	entry := indexEntry{
 		id:             id,
-		qv:             cloneQuantized(*child.quantized),
+		qv:             cloneQuantized(*child.Quantized),
 		text:           child.Text,
 		metadata:       cloneMetadata(child.Metadata),
 		version:        parent.LamportClock,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"io"
 	"math"
@@ -15,22 +16,26 @@ import (
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(5)
+	snapshotVersion = uint8(6) // v0.3.0 floor
 
 	childEncodingLegacy                  = uint8(0)
 	childEncodingCompactQuantizedOrdinal = uint8(1)
 )
 
+// ErrFormatTooOld is returned when a snapshot predates the v0.3.0 floor.
+var ErrFormatTooOld = errors.New("snapshot: format older than v0.3.0 floor")
+
 // Data is one collection snapshot.
 type Data struct {
-	Collection string
-	BitWidth   int
-	Seed       int64
-	Dim        int
-	Storage    string
-	MaxLamport uint64
-	CreatedAt  time.Time
-	Records    []Record
+	Collection    string
+	BitWidth      int
+	Seed          int64
+	Dim           int
+	RawStore      bool
+	SparseEnabled bool
+	MaxLamport    uint64
+	CreatedAt     time.Time
+	Records       []Record
 }
 
 // Record is one vector ID plus full version history.
@@ -41,8 +46,9 @@ type Record struct {
 
 // Version is one immutable version stored in a snapshot.
 type Version struct {
-	Embedding    []float32
 	Quantized    *QuantizedVector
+	RawHash      []byte
+	Sparse       *SparseBlock
 	Children     []ChildVector
 	Text         string
 	Metadata     map[string]string
@@ -59,10 +65,15 @@ type QuantizedVector struct {
 	ResNorm float32
 }
 
+// SparseBlock is a sparse channel persisted in the snapshot.
+type SparseBlock struct {
+	Indices []uint32
+	Values  []float32
+}
+
 // ChildVector stores one packed child vector inside a parent snapshot version.
 type ChildVector struct {
 	ID        string
-	Embedding []float32
 	Quantized *QuantizedVector
 	Dim       int
 	Text      string
@@ -151,7 +162,17 @@ func marshal(data Data) ([]byte, error) {
 	if err := write(uint32(data.Dim)); err != nil {
 		return nil, err
 	}
-	if err := writeString(data.Storage); err != nil {
+	var rawStoreByte, sparseByte uint8
+	if data.RawStore {
+		rawStoreByte = 1
+	}
+	if data.SparseEnabled {
+		sparseByte = 1
+	}
+	if err := write(rawStoreByte); err != nil {
+		return nil, err
+	}
+	if err := write(sparseByte); err != nil {
 		return nil, err
 	}
 	if err := write(data.MaxLamport); err != nil {
@@ -171,13 +192,6 @@ func marshal(data Data) ([]byte, error) {
 			return nil, err
 		}
 		for _, version := range record.Versions {
-			embedding := make([]byte, len(version.Embedding)*4)
-			for i, value := range version.Embedding {
-				binary.LittleEndian.PutUint32(embedding[i*4:], math.Float32bits(value))
-			}
-			if err := writeBytes(embedding); err != nil {
-				return nil, err
-			}
 			if version.Quantized != nil {
 				if err := write(uint8(1)); err != nil {
 					return nil, err
@@ -190,6 +204,38 @@ func marshal(data Data) ([]byte, error) {
 				}
 				if err := write(math.Float32bits(version.Quantized.ResNorm)); err != nil {
 					return nil, err
+				}
+			} else if err := write(uint8(0)); err != nil {
+				return nil, err
+			}
+			// RawHash block: presence byte + 32 bytes iff present.
+			if len(version.RawHash) == 32 {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if _, err := mw.Write(version.RawHash); err != nil {
+					return nil, err
+				}
+			} else if err := write(uint8(0)); err != nil {
+				return nil, err
+			}
+			// Sparse block: presence byte + count(u32) + indices + values.
+			if version.Sparse != nil && len(version.Sparse.Indices) > 0 {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if err := write(uint32(len(version.Sparse.Indices))); err != nil {
+					return nil, err
+				}
+				for _, idx := range version.Sparse.Indices {
+					if err := write(idx); err != nil {
+						return nil, err
+					}
+				}
+				for _, val := range version.Sparse.Values {
+					if err := write(math.Float32bits(val)); err != nil {
+						return nil, err
+					}
 				}
 			} else if err := write(uint8(0)); err != nil {
 				return nil, err
@@ -255,13 +301,6 @@ func writeLegacyChildren(
 		if err := writeString(child.ID); err != nil {
 			return err
 		}
-		childEmbedding := make([]byte, len(child.Embedding)*4)
-		for i, value := range child.Embedding {
-			binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(value))
-		}
-		if err := writeBytes(childEmbedding); err != nil {
-			return err
-		}
 		if child.Quantized != nil {
 			if err := write(uint8(1)); err != nil {
 				return err
@@ -300,7 +339,7 @@ func canUseCompactQuantizedOrdinalChildren(children []ChildVector) bool {
 		return false
 	}
 	first := children[0]
-	if first.Quantized == nil || first.Dim <= 0 || len(first.Embedding) != 0 || first.Text != "" || len(first.Metadata) != 0 {
+	if first.Quantized == nil || first.Dim <= 0 || first.Text != "" || len(first.Metadata) != 0 {
 		return false
 	}
 	mseLen := len(first.Quantized.MSE)
@@ -312,7 +351,7 @@ func canUseCompactQuantizedOrdinalChildren(children []ChildVector) bool {
 		if child.ID != strconv.Itoa(i) || child.Quantized == nil || child.Dim != first.Dim {
 			return false
 		}
-		if len(child.Embedding) != 0 || child.Text != "" || len(child.Metadata) != 0 {
+		if child.Text != "" || len(child.Metadata) != 0 {
 			return false
 		}
 		if len(child.Quantized.MSE) != mseLen || len(child.Quantized.Signs) != signsLen {

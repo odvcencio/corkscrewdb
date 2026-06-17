@@ -180,9 +180,6 @@ func (db *DB) remoteCollection(name string, opts ...CollectionOption) *Collectio
 			}
 			existing.bitWidth = cfg.bitWidth
 		}
-		if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) == VectorStorageQuantizedOnly {
-			return &Collection{db: db, name: name, remote: db.remote, err: errors.New("corkscrewdb: quantized_only vector storage is unsupported over remote collections")}
-		}
 		return existing
 	}
 
@@ -191,9 +188,6 @@ func (db *DB) remoteCollection(name string, opts ...CollectionOption) *Collectio
 		if opt != nil {
 			opt.applyCollection(&cfg)
 		}
-	}
-	if cfg.vectorStorage != "" && normalizeVectorStorage(cfg.vectorStorage) == VectorStorageQuantizedOnly {
-		return &Collection{db: db, name: name, remote: db.remote, err: errors.New("corkscrewdb: quantized_only vector storage is unsupported over remote collections")}
 	}
 	if err := db.remote.EnsureCollection(name, cfg.bitWidth); err != nil {
 		return &Collection{db: db, name: name, remote: db.remote, err: err}
@@ -251,7 +245,7 @@ func (s *transportServer) Put(req RPCPutRequest, _ *RPCEmpty) error {
 		return err
 	}
 	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errQuantizedOnlyRemoteWrite
+		return errRemoteUnsupportedPendingDistribution
 	}
 	return s.db.Collection(req.Collection).put(req.ID, req.Entry, !req.Internal)
 }
@@ -261,7 +255,7 @@ func (s *transportServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error 
 		return err
 	}
 	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errQuantizedOnlyRemoteWrite
+		return errRemoteUnsupportedPendingDistribution
 	}
 	opts := make([]PutVectorOption, 0, 2)
 	if req.Text != "" {
@@ -323,7 +317,7 @@ func (s *transportServer) Delete(req RPCDeleteRequest, _ *RPCEmpty) error {
 		return err
 	}
 	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errQuantizedOnlyRemoteWrite
+		return errRemoteUnsupportedPendingDistribution
 	}
 	return s.db.Collection(req.Collection).delete(req.ID, !req.Internal)
 }
@@ -435,7 +429,7 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 		return RPCPullEntriesResponse{}, err
 	}
 	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return RPCPullEntriesResponse{}, errors.New("corkscrewdb: replication pull entries is unsupported for quantized_only vector storage")
+		return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
 	}
 	if s.db.streamer == nil {
 		return RPCPullEntriesResponse{}, nil
@@ -451,7 +445,7 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 			Kind:         e.Kind,
 			CollectionID: e.CollectionID,
 			VectorID:     e.VectorID,
-			Embedding:    cloneVector(e.Embedding),
+			Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
 			Text:         e.Text,
 			Metadata:     cloneMetadata(e.Metadata),
 			LamportClock: e.LamportClock,
@@ -467,7 +461,7 @@ func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait ti
 		return RPCPullEntriesResponse{}, err
 	}
 	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return RPCPullEntriesResponse{}, errors.New("corkscrewdb: replication stream entries is unsupported for quantized_only vector storage")
+		return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
 	}
 	if s.db.streamer == nil {
 		return RPCPullEntriesResponse{}, nil
@@ -483,7 +477,7 @@ func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait ti
 			Kind:         e.Kind,
 			CollectionID: e.CollectionID,
 			VectorID:     e.VectorID,
-			Embedding:    cloneVector(e.Embedding),
+			Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
 			Text:         e.Text,
 			Metadata:     cloneMetadata(e.Metadata),
 			LamportClock: e.LamportClock,
@@ -504,8 +498,8 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPull
 	if !ok {
 		return fmt.Errorf("corkscrewdb: collection %q not found", req.Collection)
 	}
-	if coll.isQuantizedOnly() {
-		return errors.New("corkscrewdb: replication pull snapshot is unsupported for quantized_only vector storage")
+	if !coll.rawStoreEnabled {
+		return errRemoteUnsupportedPendingDistribution
 	}
 
 	coll.mu.RLock()
@@ -521,7 +515,7 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPull
 		record := RPCSnapshotRecord{ID: id, Versions: make([]RPCSnapshotVersion, len(versions))}
 		for i, v := range versions {
 			record.Versions[i] = RPCSnapshotVersion{
-				Embedding:    cloneVector(v.Embedding),
+				Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
 				Text:         v.Text,
 				Metadata:     cloneMetadata(v.Metadata),
 				LamportClock: v.LamportClock,
@@ -539,7 +533,7 @@ func (s *transportServer) collectionUsesQuantizedOnly(name string) bool {
 	s.db.mu.RLock()
 	coll := s.db.collections[name]
 	s.db.mu.RUnlock()
-	return coll != nil && coll.isQuantizedOnly()
+	return coll != nil && !coll.rawStoreEnabled
 }
 
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {

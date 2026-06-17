@@ -84,8 +84,8 @@ func read(r io.Reader) (Data, error) {
 	if err := read(&formatVersion); err != nil {
 		return data, err
 	}
-	if formatVersion != 1 && formatVersion != 2 && formatVersion != 3 && formatVersion != 4 && formatVersion != 5 {
-		return data, fmt.Errorf("snapshot: unsupported version %d", formatVersion)
+	if formatVersion != 6 {
+		return data, fmt.Errorf("snapshot: %w: version %d", ErrFormatTooOld, formatVersion)
 	}
 
 	var err error
@@ -106,12 +106,15 @@ func read(r io.Reader) (Data, error) {
 		return data, err
 	}
 	data.Dim = int(dim)
-	if formatVersion >= 3 {
-		data.Storage, err = readString()
-		if err != nil {
-			return data, err
-		}
+	var rawStoreByte, sparseByte uint8
+	if err := read(&rawStoreByte); err != nil {
+		return data, err
 	}
+	if err := read(&sparseByte); err != nil {
+		return data, err
+	}
+	data.RawStore = rawStoreByte == 1
+	data.SparseEnabled = sparseByte == 1
 	if err := read(&data.MaxLamport); err != nil {
 		return data, err
 	}
@@ -137,52 +140,78 @@ func read(r io.Reader) (Data, error) {
 		}
 		record := Record{ID: id, Versions: make([]Version, 0, versionCount)}
 		for range versionCount {
-			embeddingBytes, err := readBytes()
-			if err != nil {
+			version := Version{}
+			var hasQuantized uint8
+			if err := read(&hasQuantized); err != nil {
 				return data, err
 			}
-			if len(embeddingBytes)%4 != 0 {
-				return data, fmt.Errorf("snapshot: invalid embedding byte length %d", len(embeddingBytes))
-			}
-			version := Version{Embedding: make([]float32, len(embeddingBytes)/4)}
-			for i := range version.Embedding {
-				version.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
-			}
-			if formatVersion >= 3 {
-				var hasQuantized uint8
-				if err := read(&hasQuantized); err != nil {
+			if hasQuantized == 1 {
+				mse, err := readBytes()
+				if err != nil {
 					return data, err
 				}
-				if hasQuantized == 1 {
-					mse, err := readBytes()
-					if err != nil {
-						return data, err
-					}
-					signs, err := readBytes()
-					if err != nil {
-						return data, err
-					}
-					var resNormBits uint32
-					if err := read(&resNormBits); err != nil {
-						return data, err
-					}
-					version.Quantized = &QuantizedVector{
-						MSE:     append([]byte(nil), mse...),
-						Signs:   append([]byte(nil), signs...),
-						ResNorm: math.Float32frombits(resNormBits),
-					}
+				signs, err := readBytes()
+				if err != nil {
+					return data, err
+				}
+				var resNormBits uint32
+				if err := read(&resNormBits); err != nil {
+					return data, err
+				}
+				version.Quantized = &QuantizedVector{
+					MSE:     append([]byte(nil), mse...),
+					Signs:   append([]byte(nil), signs...),
+					ResNorm: math.Float32frombits(resNormBits),
 				}
 			}
-			if formatVersion >= 4 {
+			// RawHash block.
+			var hasRawHash uint8
+			if err := read(&hasRawHash); err != nil {
+				return data, err
+			}
+			if hasRawHash == 1 {
+				rawHash := make([]byte, 32)
+				if _, err := io.ReadFull(mr, rawHash); err != nil {
+					return data, err
+				}
+				version.RawHash = rawHash
+			}
+			// Sparse block.
+			var hasSparse uint8
+			if err := read(&hasSparse); err != nil {
+				return data, err
+			}
+			if hasSparse == 1 {
+				var count uint32
+				if err := read(&count); err != nil {
+					return data, err
+				}
+				sparse := &SparseBlock{
+					Indices: make([]uint32, count),
+					Values:  make([]float32, count),
+				}
+				for i := range sparse.Indices {
+					if err := read(&sparse.Indices[i]); err != nil {
+						return data, err
+					}
+				}
+				for i := range sparse.Values {
+					var bits uint32
+					if err := read(&bits); err != nil {
+						return data, err
+					}
+					sparse.Values[i] = math.Float32frombits(bits)
+				}
+				version.Sparse = sparse
+			}
+			{
 				var childCount uint32
 				if err := read(&childCount); err != nil {
 					return data, err
 				}
-				childEncoding := childEncodingLegacy
-				if formatVersion >= 5 {
-					if err := read(&childEncoding); err != nil {
-						return data, err
-					}
+				var childEncoding uint8
+				if err := read(&childEncoding); err != nil {
+					return data, err
 				}
 				switch childEncoding {
 				case childEncodingLegacy:
@@ -192,17 +221,6 @@ func read(r io.Reader) (Data, error) {
 						child.ID, err = readString()
 						if err != nil {
 							return data, err
-						}
-						childEmbeddingBytes, err := readBytes()
-						if err != nil {
-							return data, err
-						}
-						if len(childEmbeddingBytes)%4 != 0 {
-							return data, fmt.Errorf("snapshot: invalid child embedding byte length %d", len(childEmbeddingBytes))
-						}
-						child.Embedding = make([]float32, len(childEmbeddingBytes)/4)
-						for i := range child.Embedding {
-							child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(childEmbeddingBytes[i*4:]))
 						}
 						var hasQuantized uint8
 						if err := read(&hasQuantized); err != nil {

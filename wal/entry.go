@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -13,7 +14,7 @@ import (
 
 const (
 	walMagic   = uint16(0x4357)
-	walVersion = uint8(4)
+	walVersion = uint8(5) // v0.3.0 floor
 )
 
 const (
@@ -21,14 +22,18 @@ const (
 	EntryTombstone = uint8(2)
 )
 
+// ErrFormatTooOld is returned when a WAL segment predates the v0.3.0 floor.
+var ErrFormatTooOld = errors.New("wal: format older than v0.3.0 floor")
+
 // Entry is one durable collection mutation in the append-only WAL.
 type Entry struct {
 	Kind         uint8
 	CollectionID string
 	VectorID     string
-	Embedding    []float32
 	Quantized    *QuantizedVector
 	Dim          int
+	RawHash      []byte
+	Sparse       *SparseBlock
 	Children     []ChildVector
 	Text         string
 	Metadata     map[string]string
@@ -44,10 +49,15 @@ type QuantizedVector struct {
 	ResNorm float32
 }
 
+// SparseBlock is a sparse channel persisted in the WAL/snapshot.
+type SparseBlock struct {
+	Indices []uint32
+	Values  []float32
+}
+
 // ChildVector stores one packed child vector inside a parent WAL entry.
 type ChildVector struct {
 	ID        string
-	Embedding []float32
 	Quantized *QuantizedVector
 	Dim       int
 	Text      string
@@ -104,13 +114,6 @@ func (e Entry) Encode(w io.Writer) error {
 		return err
 	}
 
-	embeddingBytes := make([]byte, len(e.Embedding)*4)
-	for i, v := range e.Embedding {
-		binary.LittleEndian.PutUint32(embeddingBytes[i*4:], math.Float32bits(v))
-	}
-	if err := writeBytes(embeddingBytes); err != nil {
-		return err
-	}
 	if e.Quantized != nil {
 		if err := write(uint8(1)); err != nil {
 			return err
@@ -130,18 +133,43 @@ func (e Entry) Encode(w io.Writer) error {
 	if err := write(uint32(e.Dim)); err != nil {
 		return err
 	}
+	// RawHash block: presence byte + 32 bytes iff present.
+	if len(e.RawHash) == 32 {
+		if err := write(uint8(1)); err != nil {
+			return err
+		}
+		if _, err := mw.Write(e.RawHash); err != nil {
+			return err
+		}
+	} else if err := write(uint8(0)); err != nil {
+		return err
+	}
+	// Sparse block: presence byte + count(u32) + indices + values.
+	if e.Sparse != nil && len(e.Sparse.Indices) > 0 {
+		if err := write(uint8(1)); err != nil {
+			return err
+		}
+		if err := write(uint32(len(e.Sparse.Indices))); err != nil {
+			return err
+		}
+		for _, idx := range e.Sparse.Indices {
+			if err := write(idx); err != nil {
+				return err
+			}
+		}
+		for _, val := range e.Sparse.Values {
+			if err := write(math.Float32bits(val)); err != nil {
+				return err
+			}
+		}
+	} else if err := write(uint8(0)); err != nil {
+		return err
+	}
 	if err := write(uint32(len(e.Children))); err != nil {
 		return err
 	}
 	for _, child := range e.Children {
 		if err := writeString(child.ID); err != nil {
-			return err
-		}
-		childEmbedding := make([]byte, len(child.Embedding)*4)
-		for i, v := range child.Embedding {
-			binary.LittleEndian.PutUint32(childEmbedding[i*4:], math.Float32bits(v))
-		}
-		if err := writeBytes(childEmbedding); err != nil {
 			return err
 		}
 		if child.Quantized != nil {
@@ -223,8 +251,8 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	if err := read(&version); err != nil {
 		return entry, err
 	}
-	if version != 1 && version != 2 && version != 3 && version != 4 {
-		return entry, fmt.Errorf("wal: unsupported version %d", version)
+	if version != 5 {
+		return entry, fmt.Errorf("wal: %w: version %d", ErrFormatTooOld, version)
 	}
 	if err := read(&entry.Kind); err != nil {
 		return entry, err
@@ -252,18 +280,85 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		return entry, err
 	}
 
-	embeddingBytes, err := readBytes()
-	if err != nil {
+	var hasQuantized uint8
+	if err := read(&hasQuantized); err != nil {
 		return entry, err
 	}
-	if len(embeddingBytes)%4 != 0 {
-		return entry, fmt.Errorf("wal: invalid embedding byte length %d", len(embeddingBytes))
+	if hasQuantized == 1 {
+		mse, err := readBytes()
+		if err != nil {
+			return entry, err
+		}
+		signs, err := readBytes()
+		if err != nil {
+			return entry, err
+		}
+		var resNormBits uint32
+		if err := read(&resNormBits); err != nil {
+			return entry, err
+		}
+		entry.Quantized = &QuantizedVector{
+			MSE:     append([]byte(nil), mse...),
+			Signs:   append([]byte(nil), signs...),
+			ResNorm: math.Float32frombits(resNormBits),
+		}
 	}
-	entry.Embedding = make([]float32, len(embeddingBytes)/4)
-	for i := range entry.Embedding {
-		entry.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
+	var dim uint32
+	if err := read(&dim); err != nil {
+		return entry, err
 	}
-	if version >= 3 {
+	entry.Dim = int(dim)
+	// RawHash block.
+	var hasRawHash uint8
+	if err := read(&hasRawHash); err != nil {
+		return entry, err
+	}
+	if hasRawHash == 1 {
+		rawHash := make([]byte, 32)
+		if _, err := io.ReadFull(mr, rawHash); err != nil {
+			return entry, err
+		}
+		entry.RawHash = rawHash
+	}
+	// Sparse block.
+	var hasSparse uint8
+	if err := read(&hasSparse); err != nil {
+		return entry, err
+	}
+	if hasSparse == 1 {
+		var count uint32
+		if err := read(&count); err != nil {
+			return entry, err
+		}
+		sparse := &SparseBlock{
+			Indices: make([]uint32, count),
+			Values:  make([]float32, count),
+		}
+		for i := range sparse.Indices {
+			if err := read(&sparse.Indices[i]); err != nil {
+				return entry, err
+			}
+		}
+		for i := range sparse.Values {
+			var bits uint32
+			if err := read(&bits); err != nil {
+				return entry, err
+			}
+			sparse.Values[i] = math.Float32frombits(bits)
+		}
+		entry.Sparse = sparse
+	}
+	var childCount uint32
+	if err := read(&childCount); err != nil {
+		return entry, err
+	}
+	entry.Children = make([]ChildVector, 0, childCount)
+	for range childCount {
+		child := ChildVector{}
+		child.ID, err = readString()
+		if err != nil {
+			return entry, err
+		}
 		var hasQuantized uint8
 		if err := read(&hasQuantized); err != nil {
 			return entry, err
@@ -281,84 +376,31 @@ func ReadEntry(r io.Reader) (Entry, error) {
 			if err := read(&resNormBits); err != nil {
 				return entry, err
 			}
-			entry.Quantized = &QuantizedVector{
+			child.Quantized = &QuantizedVector{
 				MSE:     append([]byte(nil), mse...),
 				Signs:   append([]byte(nil), signs...),
 				ResNorm: math.Float32frombits(resNormBits),
 			}
 		}
-		var dim uint32
-		if err := read(&dim); err != nil {
+		var childDim uint32
+		if err := read(&childDim); err != nil {
 			return entry, err
 		}
-		entry.Dim = int(dim)
-	}
-	if version >= 4 {
-		var childCount uint32
-		if err := read(&childCount); err != nil {
+		child.Dim = int(childDim)
+		child.Text, err = readString()
+		if err != nil {
 			return entry, err
 		}
-		entry.Children = make([]ChildVector, 0, childCount)
-		for range childCount {
-			child := ChildVector{}
-			child.ID, err = readString()
-			if err != nil {
-				return entry, err
-			}
-			embeddingBytes, err := readBytes()
-			if err != nil {
-				return entry, err
-			}
-			if len(embeddingBytes)%4 != 0 {
-				return entry, fmt.Errorf("wal: invalid child embedding byte length %d", len(embeddingBytes))
-			}
-			child.Embedding = make([]float32, len(embeddingBytes)/4)
-			for i := range child.Embedding {
-				child.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(embeddingBytes[i*4:]))
-			}
-			var hasQuantized uint8
-			if err := read(&hasQuantized); err != nil {
-				return entry, err
-			}
-			if hasQuantized == 1 {
-				mse, err := readBytes()
-				if err != nil {
-					return entry, err
-				}
-				signs, err := readBytes()
-				if err != nil {
-					return entry, err
-				}
-				var resNormBits uint32
-				if err := read(&resNormBits); err != nil {
-					return entry, err
-				}
-				child.Quantized = &QuantizedVector{
-					MSE:     append([]byte(nil), mse...),
-					Signs:   append([]byte(nil), signs...),
-					ResNorm: math.Float32frombits(resNormBits),
-				}
-			}
-			var dim uint32
-			if err := read(&dim); err != nil {
-				return entry, err
-			}
-			child.Dim = int(dim)
-			child.Text, err = readString()
-			if err != nil {
-				return entry, err
-			}
-			metaJSON, err := readBytes()
-			if err != nil {
-				return entry, err
-			}
-			if len(metaJSON) > 0 {
-				if err := json.Unmarshal(metaJSON, &child.Metadata); err != nil {
-					return entry, err
-				}
-			}
-			entry.Children = append(entry.Children, child)
+		metaJSON, err := readBytes()
+		if err != nil {
+			return entry, err
 		}
+		if len(metaJSON) > 0 {
+			if err := json.Unmarshal(metaJSON, &child.Metadata); err != nil {
+				return entry, err
+			}
+		}
+		entry.Children = append(entry.Children, child)
 	}
 	entry.Text, err = readString()
 	if err != nil {
@@ -384,4 +426,38 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		return entry, fmt.Errorf("wal: crc mismatch: computed %x, stored %x", computed, stored)
 	}
 	return entry, nil
+}
+
+// countingReader counts the bytes consumed from the underlying reader so the
+// WAL reader can distinguish a clean frame boundary from a truncated tail.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// readEntryCounting reads one entry and classifies a read failure:
+//   - clean tail (io.EOF with nothing consumed) is mapped to io.EOF,
+//   - a truncated trailing frame (short read after the first byte) is mapped to
+//     io.ErrUnexpectedEOF,
+//   - any other failure (CRC mismatch / bad magic / format) is interior
+//     corruption and surfaces as-is.
+func readEntryCounting(r io.Reader) (Entry, int64, error) {
+	cr := &countingReader{r: r}
+	entry, err := ReadEntry(cr)
+	if err != nil {
+		if errors.Is(err, io.EOF) && cr.n == 0 {
+			return entry, 0, io.EOF // clean tail
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return entry, cr.n, io.ErrUnexpectedEOF // truncated tail
+		}
+		return entry, cr.n, err // CRC / magic / format = interior corruption
+	}
+	return entry, cr.n, nil
 }

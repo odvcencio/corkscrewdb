@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/corkscrewdb/rawstore"
 	snap "m31labs.dev/corkscrewdb/snapshot"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 	"m31labs.dev/turboquant"
@@ -22,9 +23,14 @@ type Collection struct {
 	name     string
 	bitWidth int
 	seed     int64
-	storage  VectorStorageMode
 	encoder  *encoder
 	remote   remoteClient
+
+	rawStore        *rawstore.Store
+	rawStoreEnabled bool
+	sparseEnabled   bool
+	indexType       IndexType
+	hnsw            HNSWParams
 
 	mu      sync.RWMutex
 	index   indexer
@@ -40,7 +46,6 @@ type Collection struct {
 type CollectionView struct {
 	name    string
 	encoder *encoder
-	storage VectorStorageMode
 	index   indexer
 	history map[string][]Version
 	err     error
@@ -62,17 +67,7 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		return c.remote.Put(c.name, id, entry, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		if c.isQuantizedOnly() {
-			return errQuantizedOnlyRemoteWrite
-		}
-		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
-		if err != nil {
-			return err
-		}
-		if err := client.EnsureCollection(c.name, c.bitWidth); err != nil {
-			return err
-		}
-		return client.Put(c.name, id, entry, true)
+		return errRemoteUnsupportedPendingDistribution
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -91,7 +86,7 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		}
 		vector = encoded
 	}
-	return c.putVector(id, vector, text, metadata, federated)
+	return c.putVector(id, vector, text, metadata, entry.Sparse, federated)
 }
 
 func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOption) error {
@@ -111,9 +106,6 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 	if c.db.shouldFederate() {
 		return errors.New("corkscrewdb: PutMultiVector is unsupported for federated collections in v1")
 	}
-	if !c.isQuantizedOnly() {
-		return errors.New("corkscrewdb: PutMultiVector requires quantized_only vector storage in v1")
-	}
 	if strings.TrimSpace(parentID) == "" {
 		return errors.New("corkscrewdb: parent id is required")
 	}
@@ -129,7 +121,7 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 		LamportClock: c.clock.Now(),
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
-		Children:     make([]MultiVectorChildVersion, 0, len(entry.Children)),
+		Children:     make([]ChildVector, 0, len(entry.Children)),
 	}
 	seen := make(map[string]struct{}, len(entry.Children))
 	for _, child := range entry.Children {
@@ -150,11 +142,11 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 			return fmt.Errorf("corkscrewdb: child vector dimension %d does not match parent dimension %d", len(child.Vector), version.dim)
 		}
 		qv := turboquant.NewIPWithSeed(len(child.Vector), c.bitWidth, c.seed).Quantize(child.Vector)
-		version.Children = append(version.Children, MultiVectorChildVersion{
+		version.Children = append(version.Children, ChildVector{
 			ID:        childID,
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
-			quantized: &qv,
+			Quantized: &qv,
 			dim:       len(child.Vector),
 		})
 	}
@@ -184,7 +176,7 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 		return err
 	}
 	if createdDim {
-		return c.db.persistCollectionMeta(c.name, c.bitWidth, c.dim, c.seed, c.storage)
+		return c.db.persistCollectionMeta(c.name, c)
 	}
 	return nil
 }
@@ -197,17 +189,7 @@ func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVector
 		return c.remote.PutVector(c.name, id, vector, cfg.text, cfg.metadata, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		if c.isQuantizedOnly() {
-			return errQuantizedOnlyRemoteWrite
-		}
-		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
-		if err != nil {
-			return err
-		}
-		if err := client.EnsureCollection(c.name, c.bitWidth); err != nil {
-			return err
-		}
-		return client.PutVector(c.name, id, vector, cfg.text, cfg.metadata, true)
+		return errRemoteUnsupportedPendingDistribution
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -215,7 +197,7 @@ func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVector
 	if len(vector) == 0 {
 		return errors.New("corkscrewdb: vector is required")
 	}
-	return c.putVector(id, cloneVector(vector), cfg.text, cfg.metadata, federated)
+	return c.putVector(id, cloneVector(vector), cfg.text, cfg.metadata, nil, federated)
 }
 
 func (c *Collection) Search(query string, k int, filters ...FilterOption) ([]SearchResult, error) {
@@ -254,9 +236,6 @@ func (c *Collection) SearchParents(query string, k int, opts ...ParentSearchOpti
 	if c.remote != nil {
 		return nil, errors.New("corkscrewdb: SearchParents is unsupported over remote collections in v1")
 	}
-	if !c.isQuantizedOnly() {
-		return nil, errors.New("corkscrewdb: SearchParents requires quantized_only vector storage in v1")
-	}
 	if c.db.shouldFederate() {
 		return nil, errors.New("corkscrewdb: SearchParents is unsupported for federated collections in v1")
 	}
@@ -273,9 +252,6 @@ func (c *Collection) SearchParentsVector(query []float32, k int, opts ...ParentS
 	}
 	if c.remote != nil {
 		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported over remote collections in v1")
-	}
-	if !c.isQuantizedOnly() {
-		return nil, errors.New("corkscrewdb: SearchParentsVector requires quantized_only vector storage in v1")
 	}
 	if c.db.shouldFederate() {
 		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported for federated collections in v1")
@@ -390,14 +366,7 @@ func (c *Collection) delete(id string, federated bool) error {
 		return c.remote.Delete(c.name, id, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		if c.isQuantizedOnly() {
-			return errQuantizedOnlyRemoteWrite
-		}
-		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
-		if err != nil {
-			return err
-		}
-		return client.Delete(c.name, id, true)
+		return errRemoteUnsupportedPendingDistribution
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -442,7 +411,7 @@ func (c *Collection) delete(id string, federated bool) error {
 
 // AtTime returns a point-in-time view of the collection at the given wall-clock time.
 func (c *Collection) AtTime(t time.Time) *CollectionView {
-	hlc := packHLC(uint64(t.UnixMilli()), 0)
+	hlc := packHLC(uint64(t.UnixMilli()), hlcLogicalMask) // capture all same-ms logical counters
 	return c.At(hlc)
 }
 
@@ -464,7 +433,6 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 	view := &CollectionView{
 		name:    c.name,
 		encoder: c.encoder,
-		storage: c.storage,
 		history: make(map[string][]Version),
 	}
 
@@ -501,9 +469,9 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 				flat.removePackedChildren(id)
 				view.index.Remove(id)
 			}
-			if latest.quantized != nil {
+			if latest.Quantized != nil {
 				if flat, ok := view.index.(*index); ok {
-					flat.addQuantized(id, *latest.quantized, latest.Text, latest.Metadata, latest.LamportClock)
+					flat.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
 				}
 			} else if len(latest.Children) > 0 {
 				if flat, ok := view.index.(*index); ok {
@@ -511,8 +479,6 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 						flat.addPackedChild(id, latest, child)
 					}
 				}
-			} else {
-				view.index.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
 			}
 		}
 	}
@@ -556,9 +522,6 @@ func (v *CollectionView) SearchParents(query string, k int, opts ...ParentSearch
 	if v.remote != nil {
 		return nil, errors.New("corkscrewdb: SearchParents is unsupported over remote collections in v1")
 	}
-	if normalizeVectorStorage(v.storage) != VectorStorageQuantizedOnly {
-		return nil, errors.New("corkscrewdb: SearchParents requires quantized_only vector storage in v1")
-	}
 	vector, err := v.encoder.Encode(query)
 	if err != nil {
 		return nil, err
@@ -572,9 +535,6 @@ func (v *CollectionView) SearchParentsVector(query []float32, k int, opts ...Par
 	}
 	if v.remote != nil {
 		return nil, errors.New("corkscrewdb: SearchParentsVector is unsupported over remote collections in v1")
-	}
-	if normalizeVectorStorage(v.storage) != VectorStorageQuantizedOnly {
-		return nil, errors.New("corkscrewdb: SearchParentsVector requires quantized_only vector storage in v1")
 	}
 	if v.index == nil {
 		return nil, nil
@@ -619,22 +579,28 @@ func (c *Collection) RebuildIndex(target IndexType) error {
 
 	switch target {
 	case IndexHNSW:
-		if c.isQuantizedOnly() {
-			return errors.New("corkscrewdb: HNSW rebuild is unsupported for quantized_only vector storage")
+		params := c.hnsw
+		if params.M == 0 && params.EfConstruction == 0 && params.EfSearch == 0 {
+			params = defaultHNSWParams()
 		}
-		hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, defaultHNSWParams())
-		// Re-insert all live entries using the raw embeddings from history.
+		hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, params)
+		// Re-insert all live entries directly from stored codes (no raw vector).
 		for id, versions := range c.history {
 			if len(versions) == 0 {
 				continue
 			}
 			latest := versions[len(versions)-1]
-			if latest.Tombstone || len(latest.Embedding) == 0 {
+			if latest.Tombstone || latest.Quantized == nil {
 				continue
 			}
-			hw.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
+			hw.AddQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
 		}
 		c.index = hw
+		c.indexType = IndexHNSW
+		c.hnsw = params
+		if err := c.db.persistCollectionMeta(c.name, c); err != nil {
+			return err
+		}
 	case IndexFlat:
 		switch idx := c.index.(type) {
 		case *index:
@@ -643,6 +609,10 @@ func (c *Collection) RebuildIndex(target IndexType) error {
 			c.index = idx.flat
 		default:
 			return errors.New("corkscrewdb: unknown index type")
+		}
+		c.indexType = IndexFlat
+		if err := c.db.persistCollectionMeta(c.name, c); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("corkscrewdb: unsupported index type %d", target)
@@ -667,10 +637,22 @@ func (c *Collection) usable() error {
 	return nil
 }
 
-func (c *Collection) putVector(id string, vector []float32, text string, metadata map[string]string, federated bool) error {
+func (c *Collection) putVector(id string, vector []float32, text string, metadata map[string]string, sparse *SparseVector, federated bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if sparse != nil {
+		if !c.sparseEnabled {
+			return errors.New("corkscrewdb: sparse vector supplied but collection was not created WithSparse")
+		}
+		if err := validateSparseVector(sparse); err != nil {
+			return err
+		}
+	}
+
+	if err := c.validateRawVectorLocked(vector); err != nil {
+		return err
+	}
 	version := Version{
 		Text:         text,
 		Metadata:     cloneMetadata(metadata),
@@ -678,15 +660,18 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		ActorID:      c.clock.ActorID(),
 		WallClock:    time.Now().UTC(),
 	}
-	if c.isQuantizedOnly() {
-		if err := c.validateRawVectorLocked(vector); err != nil {
+	// Codes are always present (the hot tier).
+	qv := turboquant.NewIPWithSeed(len(vector), c.bitWidth, c.seed).Quantize(vector)
+	version.Quantized = &qv
+	version.dim = len(vector)
+	version.Sparse = cloneSparseVector(sparse)
+	// Raw blob is fsynced BEFORE the WAL append below (cold tier).
+	if c.rawStoreEnabled {
+		hash, err := c.rawStore.Put(rawFloat32Bytes(vector))
+		if err != nil {
 			return err
 		}
-		qv := turboquant.NewIPWithSeed(len(vector), c.bitWidth, c.seed).Quantize(vector)
-		version.quantized = &qv
-		version.dim = len(vector)
-	} else {
-		version.Embedding = cloneVector(vector)
+		version.RawHash = hash
 	}
 	if err := c.validateVersionLocked(version); err != nil {
 		return err
@@ -695,17 +680,15 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		Kind:         walpkg.EntryPut,
 		CollectionID: c.name,
 		VectorID:     id,
+		Quantized:    toWALQuantized(version.Quantized),
+		Dim:          version.dim,
+		RawHash:      version.RawHash,
+		Sparse:       toWALSparse(version.Sparse),
 		Text:         version.Text,
 		Metadata:     cloneMetadata(version.Metadata),
 		LamportClock: version.LamportClock,
 		ActorID:      version.ActorID,
 		WallClock:    version.WallClock,
-	}
-	if c.isQuantizedOnly() {
-		entry.Quantized = toWALQuantized(version.quantized)
-		entry.Dim = version.dim
-	} else {
-		entry.Embedding = cloneVector(version.Embedding)
 	}
 	if err := c.wal.Append(entry); err != nil {
 		return err
@@ -718,7 +701,7 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		return err
 	}
 	if createdDim {
-		return c.db.persistCollectionMeta(c.name, c.bitWidth, c.dim, c.seed, c.storage)
+		return c.db.persistCollectionMeta(c.name, c)
 	}
 	return nil
 }
@@ -727,40 +710,31 @@ func (c *Collection) validateVersionLocked(version Version) error {
 	if version.Tombstone {
 		return nil
 	}
-	if c.isQuantizedOnly() {
-		if c.dim == 0 && version.dim == 0 {
-			return errors.New("corkscrewdb: collection dimension is required for quantized_only versions")
-		}
-		if c.dim != 0 && version.dim != 0 && version.dim != c.dim {
-			return fmt.Errorf("corkscrewdb: vector dimension %d does not match collection dimension %d", version.dim, c.dim)
-		}
-		dim := c.dim
-		if dim == 0 {
-			dim = version.dim
-		}
-		if len(version.Children) > 0 {
-			for _, child := range version.Children {
-				if strings.TrimSpace(child.ID) == "" {
-					return errors.New("corkscrewdb: child id is required")
-				}
-				if child.dim != 0 && child.dim != dim {
-					return fmt.Errorf("corkscrewdb: child vector dimension %d does not match collection dimension %d", child.dim, dim)
-				}
-				if err := validateQuantizedPayload(child.quantized, dim, c.bitWidth); err != nil {
-					return err
-				}
+	if c.dim == 0 && version.dim == 0 {
+		return errors.New("corkscrewdb: collection dimension is required for dense versions")
+	}
+	if c.dim != 0 && version.dim != 0 && version.dim != c.dim {
+		return fmt.Errorf("corkscrewdb: vector dimension %d does not match collection dimension %d", version.dim, c.dim)
+	}
+	dim := c.dim
+	if dim == 0 {
+		dim = version.dim
+	}
+	if len(version.Children) > 0 {
+		for _, child := range version.Children {
+			if strings.TrimSpace(child.ID) == "" {
+				return errors.New("corkscrewdb: child id is required")
 			}
-			return nil
+			if child.dim != 0 && child.dim != dim {
+				return fmt.Errorf("corkscrewdb: child vector dimension %d does not match collection dimension %d", child.dim, dim)
+			}
+			if err := validateQuantizedPayload(child.Quantized, dim, c.bitWidth); err != nil {
+				return err
+			}
 		}
-		return validateQuantizedPayload(version.quantized, dim, c.bitWidth)
+		return nil
 	}
-	if len(version.Embedding) == 0 {
-		return errors.New("corkscrewdb: empty embedding")
-	}
-	if c.dim != 0 && len(version.Embedding) != c.dim {
-		return fmt.Errorf("corkscrewdb: vector dimension %d does not match collection dimension %d", len(version.Embedding), c.dim)
-	}
-	return nil
+	return validateQuantizedPayload(version.Quantized, dim, c.bitWidth)
 }
 
 func (c *Collection) validateRawVectorLocked(vector []float32) error {
@@ -777,58 +751,64 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	if err := c.validateVersionLocked(version); err != nil {
 		return false, err
 	}
-	// Dedup: skip if we already have this exact (actorID, lamportClock) for this ID.
-	for _, existing := range c.history[id] {
-		if existing.LamportClock == version.LamportClock && existing.ActorID == version.ActorID {
-			return false, nil
-		}
-	}
 	createdDim := false
 	if !version.Tombstone && c.dim == 0 && version.dim > 0 {
 		c.dim = version.dim
 		createdDim = true
 	}
-	if !version.Tombstone && c.dim == 0 && len(version.Embedding) > 0 {
-		c.dim = len(version.Embedding)
-		c.index = newIndex(c.dim, c.bitWidth, c.seed)
-		createdDim = true
-	}
 
-	versions := append(c.history[id], cloneVersion(version))
-	sortVersions(versions)
+	// O(log v) ordered insert by (LamportClock, ActorID) with neighborhood dedup.
+	versions := c.history[id]
+	pos := sort.Search(len(versions), func(i int) bool {
+		if versions[i].LamportClock != version.LamportClock {
+			return versions[i].LamportClock >= version.LamportClock
+		}
+		return versions[i].ActorID >= version.ActorID
+	})
+	// Neighborhood dedup: identical (LamportClock, ActorID) already present?
+	if pos < len(versions) && versions[pos].LamportClock == version.LamportClock && versions[pos].ActorID == version.ActorID {
+		return false, nil
+	}
+	cloned := cloneVersion(version)
+	versions = append(versions, Version{})
+	copy(versions[pos+1:], versions[pos:])
+	versions[pos] = cloned
 	c.history[id] = versions
 	latest := versions[len(versions)-1]
+
 	if c.index != nil {
 		c.index.Remove(id)
 		if flat, ok := c.index.(*index); ok {
 			flat.removePackedChildren(id)
 		}
 	}
-	if latest.Tombstone {
-	} else {
+	if !latest.Tombstone {
 		if c.index == nil {
-			if c.dim == 0 {
-				c.dim = len(latest.Embedding)
-				createdDim = true
-			}
-			c.index = newIndex(c.dim, c.bitWidth, c.seed)
-		}
-		if latest.quantized != nil {
-			if flat, ok := c.index.(*index); ok {
-				flat.addQuantized(id, *latest.quantized, latest.Text, latest.Metadata, latest.LamportClock)
+			if c.indexType == IndexHNSW && len(latest.Children) == 0 {
+				c.index = newHNSWIndex(c.dim, c.bitWidth, c.seed, c.hnsw)
 			} else {
-				return false, errors.New("corkscrewdb: quantized_only storage requires flat index")
+				c.index = newIndex(c.dim, c.bitWidth, c.seed)
 			}
-		} else if len(latest.Children) > 0 {
-			if flat, ok := c.index.(*index); ok {
+		}
+		switch idx := c.index.(type) {
+		case *index:
+			if latest.Quantized != nil {
+				idx.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
+			} else if len(latest.Children) > 0 {
 				for _, child := range latest.Children {
-					flat.addPackedChild(id, latest, child)
+					idx.addPackedChild(id, latest, child)
 				}
+			} else {
+				return false, errors.New("corkscrewdb: non-tombstone version missing quantized payload")
+			}
+		case *hnswIndex:
+			if latest.Quantized != nil {
+				idx.AddQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
 			} else {
 				return false, errors.New("corkscrewdb: packed parent multivectors require flat index")
 			}
-		} else {
-			c.index.Add(id, latest.Embedding, latest.Text, latest.Metadata, latest.LamportClock)
+		default:
+			return false, errors.New("corkscrewdb: unknown index type")
 		}
 		if c.dim == 0 {
 			c.dim = c.index.Dim()
@@ -850,7 +830,7 @@ func (c *Collection) loadVersion(id string, version Version) error {
 		return err
 	}
 	if createdDim {
-		return c.db.persistCollectionMeta(c.name, c.bitWidth, c.dim, c.seed, c.storage)
+		return c.db.persistCollectionMeta(c.name, c)
 	}
 	return nil
 }
@@ -874,6 +854,11 @@ func (c *Collection) close() error {
 			errs = append(errs, err)
 		}
 	}
+	if c.rawStore != nil {
+		if err := c.rawStore.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -885,14 +870,15 @@ func (c *Collection) persistSnapshot() error {
 	}
 	maxLamport := c.clock.Current()
 	data := snap.Data{
-		Collection: c.name,
-		BitWidth:   c.bitWidth,
-		Seed:       c.seed,
-		Dim:        c.dim,
-		Storage:    string(c.storage),
-		MaxLamport: maxLamport,
-		CreatedAt:  time.Now().UTC(),
-		Records:    make([]snap.Record, 0, len(c.history)),
+		Collection:    c.name,
+		BitWidth:      c.bitWidth,
+		Seed:          c.seed,
+		Dim:           c.dim,
+		RawStore:      c.rawStoreEnabled,
+		SparseEnabled: c.sparseEnabled,
+		MaxLamport:    maxLamport,
+		CreatedAt:     time.Now().UTC(),
+		Records:       make([]snap.Record, 0, len(c.history)),
 	}
 	ids := make([]string, 0, len(c.history))
 	for id := range c.history {
@@ -903,6 +889,9 @@ func (c *Collection) persistSnapshot() error {
 		record := snap.Record{ID: id, Versions: make([]snap.Version, 0, len(c.history[id]))}
 		for _, version := range c.history[id] {
 			snapVersion := snap.Version{
+				Quantized:    toSnapshotQuantized(version.Quantized),
+				Sparse:       toSnapshotSparse(version.Sparse),
+				Children:     toSnapshotChildren(version.Children),
 				Text:         version.Text,
 				Metadata:     cloneMetadata(version.Metadata),
 				LamportClock: version.LamportClock,
@@ -910,11 +899,8 @@ func (c *Collection) persistSnapshot() error {
 				WallClock:    version.WallClock,
 				Tombstone:    version.Tombstone,
 			}
-			if c.isQuantizedOnly() {
-				snapVersion.Quantized = toSnapshotQuantized(version.quantized)
-				snapVersion.Children = toSnapshotChildren(version.Children)
-			} else {
-				snapVersion.Embedding = cloneVector(version.Embedding)
+			if c.rawStoreEnabled && len(version.RawHash) == 32 {
+				snapVersion.RawHash = append([]byte(nil), version.RawHash...)
 			}
 			record.Versions = append(record.Versions, snapVersion)
 		}
@@ -926,32 +912,27 @@ func (c *Collection) persistSnapshot() error {
 	if err := writeSnapshotFile(path, data); err != nil {
 		return err
 	}
-	if !c.isQuantizedOnly() {
-		c.mu.RLock()
-		if c.clock.Current() != maxLamport {
-			c.mu.RUnlock()
-			return c.db.pruneSnapshots(c.name, path)
-		}
-		if err := c.saveIndexSnapshotLocked(maxLamport); err != nil {
-			c.mu.RUnlock()
-			return err
-		}
-		c.mu.RUnlock()
-		c.mu.Lock()
-		if c.clock.Current() == maxLamport {
-			c.dirty = false
-		}
-		c.mu.Unlock()
-		return c.db.pruneSnapshots(c.name, path)
-	}
 
 	c.mu.Lock()
 	if c.clock.Current() != maxLamport {
+		// A concurrent write landed after the snapshot was taken; keep the WAL.
 		c.mu.Unlock()
 		return c.db.pruneSnapshots(c.name, path)
 	}
-	// For quantized_only, the snapshot is the only durable full-state copy after
-	// pruning. Keep writers blocked between this clock check and WAL reset.
+	// The snapshot is the durable full-state copy after pruning. Keep writers
+	// blocked between this clock check and the raw-store GC + WAL reset.
+	if c.rawStoreEnabled && c.rawStore != nil {
+		// reachable = union(history RawHashes, post-snapshot-WAL RawHashes).
+		// Phase 1: single-writer under c.mu, MaxLamport == c.clock.Current(), so the
+		// post-snapshot-WAL term is empty and reachable == the history RawHash set.
+		// (Distribution phase, which adds concurrent/streamed writes, must restore the
+		// second term of the union here.)
+		reachable := c.reachableRawHashesLocked()
+		if err := c.rawStore.GC(reachable); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+	}
 	if err := c.pruneWALLocked(); err != nil {
 		c.mu.Unlock()
 		return err
@@ -961,31 +942,25 @@ func (c *Collection) persistSnapshot() error {
 	return c.db.pruneSnapshots(c.name, path)
 }
 
+// reachableRawHashesLocked returns the set of raw-store keys referenced by the
+// current in-memory history. Caller must hold c.mu.
+func (c *Collection) reachableRawHashesLocked() map[string]struct{} {
+	reachable := make(map[string]struct{})
+	for _, versions := range c.history {
+		for _, version := range versions {
+			if len(version.RawHash) == 32 {
+				reachable[string(version.RawHash)] = struct{}{}
+			}
+		}
+	}
+	return reachable
+}
+
 func (c *Collection) pruneWALLocked() error {
 	if c.wal == nil {
 		return nil
 	}
 	return c.wal.PruneAndReset()
-}
-
-func (c *Collection) saveIndexSnapshotLocked(maxLamport uint64) error {
-	if flat, ok := c.index.(*index); ok {
-		if err := saveIndexFile(c.db.collectionIndexPath(c.name), flat, maxLamport); err != nil {
-			return err
-		}
-	} else if hw, ok := c.index.(*hnswIndex); ok {
-		if err := saveIndexFile(c.db.collectionIndexPath(c.name), hw.flat, maxLamport); err != nil {
-			return err
-		}
-		if err := saveHNSWFile(c.db.collectionHNSWPath(c.name), hw); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *Collection) isQuantizedOnly() bool {
-	return normalizeVectorStorage(c.storage) == VectorStorageQuantizedOnly
 }
 
 func sortVersions(versions []Version) {

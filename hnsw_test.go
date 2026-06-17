@@ -65,7 +65,7 @@ func TestHNSWRecall(t *testing.T) {
 	k := 10
 	rng := rand.New(rand.NewSource(123))
 
-	hw := newHNSWIndex(dim, 4, 77, hnswParams{
+	hw := newHNSWIndex(dim, 4, 77, HNSWParams{
 		M:              16,
 		EfConstruction: 200,
 		EfSearch:       100,
@@ -175,7 +175,7 @@ func TestHNSWRecallBruteForceComparison(t *testing.T) {
 	k := 10
 	rng := rand.New(rand.NewSource(555))
 
-	hw := newHNSWIndex(dim, 4, 77, hnswParams{
+	hw := newHNSWIndex(dim, 4, 77, HNSWParams{
 		M:              16,
 		EfConstruction: 200,
 		EfSearch:       100,

@@ -3,6 +3,7 @@ package corkscrewdb
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -166,9 +167,9 @@ func TestCollectionWithQuantizerSeedPersistsAndValidates(t *testing.T) {
 	}
 }
 
-func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
+func TestWithoutRawStorePutSearchReopenHistoryAndPersistence(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "quantized-only.csdb")
+	path := filepath.Join(dir, "no-raw.csdb")
 	seed := int64(5581486560434873699)
 	raw := []float32{0.1234567, -0.2345678, 0.3456789, -0.456789}
 
@@ -176,7 +177,7 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithoutRawStore())
 	if err := coll.PutVector("v1", raw, WithText("unit-x"), WithMetadata(map[string]string{"source": "code"})); err != nil {
 		t.Fatal(err)
 	}
@@ -190,8 +191,11 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 	if len(history) != 1 {
 		t.Fatalf("history len = %d, want 1", len(history))
 	}
-	if len(history[0].Embedding) != 0 {
-		t.Fatalf("quantized_only history embedding len = %d, want 0", len(history[0].Embedding))
+	if len(history[0].RawHash) != 0 {
+		t.Fatalf("WithoutRawStore history RawHash len = %d, want 0", len(history[0].RawHash))
+	}
+	if history[0].Quantized == nil {
+		t.Fatalf("history version missing quantized payload: %+v", history[0])
 	}
 	if history[0].Text != "unit-x" || history[0].Metadata["source"] != "code" {
 		t.Fatalf("history metadata/text not preserved: %+v", history[0])
@@ -212,25 +216,26 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 	if !hasResult(atResults, "v1") {
 		t.Fatalf("at results = %v, want v1", atResults)
 	}
-	if err := coll.RebuildIndex(IndexHNSW); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("RebuildIndex(IndexHNSW) err = %v, want unsupported", err)
+	// HNSW now builds from codes on any collection, raw store or not.
+	if err := coll.RebuildIndex(IndexHNSW); err != nil {
+		t.Fatalf("RebuildIndex(IndexHNSW) err = %v, want success", err)
 	}
-	if got := db.manifest.Collections["vecs"].VectorStorage; got != VectorStorageQuantizedOnly {
-		t.Fatalf("manifest vector storage = %q, want quantized_only", got)
+	if got := db.manifest.Collections["vecs"].RawStore; got {
+		t.Fatalf("manifest raw store = %v, want false", got)
 	}
 
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	indexPath := filepath.Join(path, "collections", "vecs", "index", "quantized.tqi")
-	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
-		t.Fatalf("quantized_only should not write .tqi index file, stat err=%v", err)
+	rvsMatches, _ := filepath.Glob(filepath.Join(path, "collections", "vecs", "raw", "raw-*.rvs"))
+	if len(rvsMatches) != 0 {
+		t.Fatalf("WithoutRawStore wrote .rvs segments: %v", rvsMatches)
 	}
 	assertFilesDoNotContainRawVector(t, filepath.Join(path, "collections", "vecs"), raw)
 	walBytes := totalWALBytes(t, filepath.Join(path, "collections", "vecs", "wal"))
 	if walBytes > 128 {
-		t.Fatalf("WAL bytes after quantized_only snapshot prune = %d, want compact empty tail", walBytes)
+		t.Fatalf("WAL bytes after snapshot prune = %d, want compact empty tail", walBytes)
 	}
 
 	db, err = Open(path, WithProvider(&mockProvider{dim: 4}))
@@ -238,7 +243,7 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	coll = db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll = db.Collection("vecs", WithoutRawStore())
 	reopened, err := coll.SearchVector(raw, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -250,8 +255,8 @@ func TestQuantizedOnlyPutSearchReopenHistoryAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reopenedHistory) != 1 || len(reopenedHistory[0].Embedding) != 0 || reopenedHistory[0].Text != "unit-x" {
-		t.Fatalf("reopened history = %+v, want text with no raw embedding", reopenedHistory)
+	if len(reopenedHistory) != 1 || len(reopenedHistory[0].RawHash) != 0 || reopenedHistory[0].Text != "unit-x" {
+		t.Fatalf("reopened history = %+v, want text with no raw hash", reopenedHistory)
 	}
 }
 
@@ -266,7 +271,7 @@ func TestQuantizedOnlyPackedParentMultiVectorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithoutRawStore())
 	if err := coll.PutVector("single", oldQuery, WithText("single vector"), WithMetadata(map[string]string{"kind": "single"})); err != nil {
 		t.Fatal(err)
 	}
@@ -284,11 +289,11 @@ func TestQuantizedOnlyPackedParentMultiVectorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || len(history[0].Children) != 2 || len(history[0].Embedding) != 0 {
-		t.Fatalf("history = %+v, want one packed parent version with children and no raw embedding", history)
+	if len(history) != 1 || len(history[0].Children) != 2 {
+		t.Fatalf("history = %+v, want one packed parent version with children", history)
 	}
-	if len(history[0].Children[0].Embedding) != 0 || history[0].Children[0].quantized == nil {
-		t.Fatalf("child history = %+v, want quantized-only child payload", history[0].Children[0])
+	if history[0].Children[0].Quantized == nil {
+		t.Fatalf("child history = %+v, want quantized child payload", history[0].Children[0])
 	}
 	firstClock := history[0].LamportClock
 
@@ -324,7 +329,7 @@ func TestQuantizedOnlyPackedParentMultiVectorLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	coll = db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll = db.Collection("vecs", WithoutRawStore())
 	reopened, err := coll.SearchParentsVector(oldQuery, 5, WithChildFilters(Filter("slot", "old")))
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +410,7 @@ func TestQuantizedOnlyPackedParentCompactOrdinalChildrenReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizerSeed(seed), WithoutRawStore())
 	if err := coll.PutMultiVector("parent-ordinal", MultiVectorEntry{Children: children}); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +431,7 @@ func TestQuantizedOnlyPackedParentCompactOrdinalChildrenReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	coll = db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll = db.Collection("vecs", WithoutRawStore())
 	after, err := coll.SearchParentsVector(query, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -438,15 +443,15 @@ func TestQuantizedOnlyPackedParentCompactOrdinalChildrenReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || len(history[0].Embedding) != 0 || len(history[0].Children) != len(children) {
+	if len(history) != 1 || len(history[0].Children) != len(children) {
 		t.Fatalf("history = %+v, want one compact packed parent version", history)
 	}
 	for i, child := range history[0].Children {
-		if child.ID != strconv.Itoa(i) || child.Text != "" || len(child.Metadata) != 0 || len(child.Embedding) != 0 {
+		if child.ID != strconv.Itoa(i) || child.Text != "" || len(child.Metadata) != 0 {
 			t.Fatalf("child[%d] fields = %+v, want compact ordinal child", i, child)
 		}
-		if child.quantized == nil || len(child.quantized.MSE) == 0 || len(child.quantized.Signs) == 0 {
-			t.Fatalf("child[%d] quantized payload = %+v, want non-empty", i, child.quantized)
+		if child.Quantized == nil || len(child.Quantized.MSE) == 0 || len(child.Quantized.Signs) == 0 {
+			t.Fatalf("child[%d] quantized payload = %+v, want non-empty", i, child.Quantized)
 		}
 	}
 }
@@ -458,16 +463,16 @@ func TestPackedParentMultiVectorRejectsUnsupportedSurfacesAndInvalidInput(t *tes
 	}
 	defer db.Close()
 
-	raw := db.Collection("raw")
-	err = raw.PutMultiVector("parent", MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}})
-	if err == nil || !strings.Contains(err.Error(), "requires quantized_only") {
-		t.Fatalf("raw PutMultiVector err = %v, want quantized_only requirement", err)
+	// PutMultiVector now works on any local flat collection (raw store on or off).
+	rawColl := db.Collection("raw")
+	if err := rawColl.PutMultiVector("parent", MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}}); err != nil {
+		t.Fatalf("raw PutMultiVector err = %v, want success", err)
 	}
-	if _, err := raw.SearchParentsVector([]float32{1, 0}, 1); err == nil || !strings.Contains(err.Error(), "requires quantized_only") {
-		t.Fatalf("raw SearchParentsVector err = %v, want quantized_only requirement", err)
+	if _, err := rawColl.SearchParentsVector([]float32{1, 0}, 1); err != nil {
+		t.Fatalf("raw SearchParentsVector err = %v, want success", err)
 	}
 
-	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithoutRawStore())
 	tests := []struct {
 		name    string
 		id      string
@@ -498,7 +503,7 @@ func TestPackedParentMultiVectorRejectsUnsupportedSurfacesAndInvalidInput(t *tes
 		t.Fatal(err)
 	}
 	defer federated.Close()
-	fedColl := federated.Collection("vecs", WithQuantizedOnlyPersistence())
+	fedColl := federated.Collection("vecs", WithoutRawStore())
 	err = fedColl.PutMultiVector("parent", MultiVectorEntry{Children: []MultiVectorChild{{ID: "c1", Vector: []float32{1, 0}}}})
 	if err == nil || !strings.Contains(err.Error(), "federated") {
 		t.Fatalf("federated PutMultiVector err = %v, want unsupported", err)
@@ -508,29 +513,46 @@ func TestPackedParentMultiVectorRejectsUnsupportedSurfacesAndInvalidInput(t *tes
 	}
 }
 
-func TestQuantizedOnlyRejectsHNSWCreationAndReplicationExport(t *testing.T) {
+func TestWithoutRawStoreHNSWNowWorksAndReplicationExportDisabled(t *testing.T) {
 	db, err := Open(t.TempDir(), WithProvider(&mockProvider{dim: 4}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	bad := db.Collection("bad", WithQuantizedOnlyPersistence(), WithIndexType(IndexHNSW))
-	if err := bad.usable(); err == nil || !strings.Contains(err.Error(), "flat local indexes") {
-		t.Fatalf("quantized_only HNSW creation err = %v, want flat local indexes", err)
+	// HNSW now works on every collection, raw store or not.
+	hnsw := db.Collection("hnsw", WithoutRawStore(), WithIndexType(IndexHNSW))
+	if err := hnsw.usable(); err != nil {
+		t.Fatalf("WithoutRawStore HNSW creation err = %v, want success", err)
 	}
 
-	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithoutRawStore())
 	if err := coll.PutVector("v1", []float32{1, 0, 0, 0}); err != nil {
 		t.Fatal(err)
 	}
 	server := &transportServer{db: db}
-	if _, err := server.pullEntries(RPCPullEntriesRequest{Collection: "vecs"}); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("pullEntries err = %v, want unsupported", err)
+	// Replication export of a WithoutRawStore collection is disabled pending Distribution.
+	if _, err := server.pullEntries(RPCPullEntriesRequest{Collection: "vecs"}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("pullEntries err = %v, want errRemoteUnsupportedPendingDistribution", err)
 	}
 	var snapResp RPCPullSnapshotResponse
-	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "vecs"}, &snapResp); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("PullSnapshot err = %v, want unsupported", err)
+	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "vecs"}, &snapResp); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("PullSnapshot err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+}
+
+func TestRemotePathsDisabledPendingDistribution(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "gated.csdb"), WithProvider(nil),
+		WithShards(twoNodeShardLayout(LocalShardOwner, "127.0.0.1:1")...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, remoteID := pickPeerOwnedIDs(t, db, "vecs", db.localMemberID(), "127.0.0.1:1")
+	coll := db.Collection("vecs")
+	if err := coll.PutVector(remoteID, []float32{1, 0, 0, 0}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("federated PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
 	}
 }
 
@@ -542,7 +564,7 @@ func TestQuantizedOnlySnapshotDoesNotPruneConcurrentWALWrite(t *testing.T) {
 	}
 	defer db.Close()
 
-	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithoutRawStore())
 	if err := coll.PutVector("v1", []float32{1, 0, 0, 0}); err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +604,7 @@ func TestQuantizedOnlyDropCollectionDirtyDoesNotDeadlock(t *testing.T) {
 	}
 	defer db.Close()
 
-	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithoutRawStore())
 	if err := coll.PutVector("v1", []float32{1, 0, 0, 0}); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +623,7 @@ func TestQuantizedOnlyDropCollectionDirtyDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-func TestQuantizedOnlyRejectsFederatedRemoteWrite(t *testing.T) {
+func TestFederatedRemoteWriteDisabledPendingDistribution(t *testing.T) {
 	serverDB, addr := startRemoteTestServer(t, WithProvider(nil))
 	_ = serverDB
 
@@ -612,43 +634,22 @@ func TestQuantizedOnlyRejectsFederatedRemoteWrite(t *testing.T) {
 	defer db.Close()
 
 	_, remoteID := pickPeerOwnedIDs(t, db, "vecs", db.localMemberID(), addr)
-	coll := db.Collection("vecs", WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs")
 	err = coll.PutVector(remoteID, []float32{1, 0, 0, 0})
-	if err == nil || !strings.Contains(err.Error(), "quantized_only") || !strings.Contains(err.Error(), "federated or remote writes") {
-		t.Fatalf("federated quantized_only PutVector err = %v, want unsupported", err)
+	if !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("federated PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
 	}
 
 	serverDB.mu.RLock()
 	_, created := serverDB.manifest.Collections["vecs"]
 	serverDB.mu.RUnlock()
 	if created {
-		t.Fatal("federated quantized_only write created a peer collection")
+		t.Fatal("federated write created a peer collection")
 	}
 }
 
-func TestQuantizedOnlyRejectsRemoteExistingWrite(t *testing.T) {
-	serverDB, addr := startRemoteTestServer(t, WithProvider(nil))
-	coll := serverDB.Collection("vecs", WithQuantizedOnlyPersistence())
-	if err := coll.PutVector("local", []float32{1, 0, 0, 0}); err != nil {
-		t.Fatal(err)
-	}
-
-	client, err := Connect(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	remoteColl := client.Collection("vecs")
-	err = remoteColl.PutVector("remote", []float32{0, 1, 0, 0})
-	if err == nil || !strings.Contains(err.Error(), "quantized_only") || !strings.Contains(err.Error(), "remote writes") {
-		t.Fatalf("remote quantized_only PutVector err = %v, want unsupported", err)
-	}
-
-	withOption := client.Collection("vecs", WithQuantizedOnlyPersistence())
-	if err := withOption.usable(); err == nil || !strings.Contains(err.Error(), "unsupported over remote collections") {
-		t.Fatalf("remote quantized_only option err = %v, want unsupported", err)
-	}
+func TestRemoteExistingWriteDisabledPendingDistribution(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 }
 
 func TestQuantizedOnlyRejectsMalformedSnapshotPayload(t *testing.T) {
@@ -657,7 +658,7 @@ func TestQuantizedOnlyRejectsMalformedSnapshotPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coll := db.Collection("vecs", WithBitWidth(4), WithQuantizedOnlyPersistence())
+	coll := db.Collection("vecs", WithBitWidth(4), WithoutRawStore())
 	seed := coll.seed
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -669,7 +670,6 @@ func TestQuantizedOnlyRejectsMalformedSnapshotPayload(t *testing.T) {
 		BitWidth:   4,
 		Seed:       seed,
 		Dim:        4,
-		Storage:    string(VectorStorageQuantizedOnly),
 		MaxLamport: 1,
 		CreatedAt:  time.Now().UTC(),
 		Records: []snap.Record{

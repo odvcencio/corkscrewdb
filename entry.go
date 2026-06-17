@@ -12,19 +12,21 @@ type Entry struct {
 	Text     string
 	Vector   []float32
 	Metadata map[string]string
+	Sparse   *SparseVector
 }
 
 // Version is one immutable version in an entry's history.
 type Version struct {
-	Embedding    []float32
+	Quantized    *turboquant.IPQuantized // ALWAYS present for non-tombstone dense versions
+	RawHash      []byte                  // blake3-256 ref into the raw store; nil iff WithoutRawStore or tombstone
+	Sparse       *SparseVector           // optional lexical/learned-sparse channel
+	Children     []ChildVector           // multivector children (quantized; ordinal-compactible)
 	Text         string
 	Metadata     map[string]string
-	Children     []MultiVectorChildVersion
 	LamportClock uint64
 	ActorID      string
 	WallClock    time.Time
 	Tombstone    bool
-	quantized    *turboquant.IPQuantized
 	dim          int
 }
 
@@ -43,13 +45,12 @@ type MultiVectorChild struct {
 	Metadata map[string]string
 }
 
-// MultiVectorChildVersion is one immutable packed child in a parent version.
-type MultiVectorChildVersion struct {
+// ChildVector is one immutable packed child in a parent version (quantized-only).
+type ChildVector struct {
 	ID        string
-	Embedding []float32
+	Quantized *turboquant.IPQuantized
 	Text      string
 	Metadata  map[string]string
-	quantized *turboquant.IPQuantized
 	dim       int
 }
 
@@ -181,24 +182,25 @@ const (
 	IndexHNSW
 )
 
-// VectorStorageMode controls how vector payloads are stored durably.
-type VectorStorageMode string
-
-const (
-	// VectorStorageRaw stores raw float embeddings in WAL and snapshots.
-	VectorStorageRaw VectorStorageMode = "raw"
-	// VectorStorageQuantizedOnly stores only TurboQuant payloads in WAL and snapshots.
-	VectorStorageQuantizedOnly VectorStorageMode = "quantized_only"
-)
-
 type collectionConfig struct {
-	bitWidth        int
-	seed            int64
-	indexType       IndexType
-	hnswM           int
-	hnswEfConstruct int
-	hnswEfSearch    int
-	vectorStorage   VectorStorageMode
+	bitWidth      int
+	seed          int64
+	indexType     IndexType
+	hnsw          HNSWParams
+	rawStore      bool // default true; cleared by WithoutRawStore
+	rawStoreSet   bool
+	sparseEnabled bool
+}
+
+// HNSWParams is the persisted HNSW configuration.
+type HNSWParams struct {
+	M              int // max connections per layer (default 16)
+	EfConstruction int // build-time beam width (default 200)
+	EfSearch       int // query-time beam width (default 50)
+}
+
+func defaultCollectionConfig(bitWidth int) collectionConfig {
+	return collectionConfig{bitWidth: bitWidth, rawStore: true}
 }
 
 // CollectionOption configures Collection creation.
@@ -228,30 +230,25 @@ func WithQuantizerSeed(seed int64) CollectionOption {
 
 // WithIndexType selects the vector index algorithm.
 func WithIndexType(t IndexType) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.indexType = t })
+}
+
+// WithHNSWParams configures and persists HNSW-specific parameters.
+func WithHNSWParams(p HNSWParams) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.hnsw = p })
+}
+
+// WithoutRawStore opts out of the default content-addressed raw vector store.
+func WithoutRawStore() CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
-		cfg.indexType = t
+		cfg.rawStore = false
+		cfg.rawStoreSet = true
 	})
 }
 
-// WithHNSWParams configures HNSW-specific parameters.
-func WithHNSWParams(m, efConstruction, efSearch int) CollectionOption {
-	return collectionOptionFunc(func(cfg *collectionConfig) {
-		cfg.hnswM = m
-		cfg.hnswEfConstruct = efConstruction
-		cfg.hnswEfSearch = efSearch
-	})
-}
-
-// WithVectorStorage selects how vectors are persisted for a collection.
-func WithVectorStorage(mode VectorStorageMode) CollectionOption {
-	return collectionOptionFunc(func(cfg *collectionConfig) {
-		cfg.vectorStorage = mode
-	})
-}
-
-// WithQuantizedOnlyPersistence stores only quantized vector payloads durably.
-func WithQuantizedOnlyPersistence() CollectionOption {
-	return WithVectorStorage(VectorStorageQuantizedOnly)
+// WithSparse enables the sparse channel for this collection.
+func WithSparse() CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.sparseEnabled = true })
 }
 
 func cloneMetadata(meta map[string]string) map[string]string {
@@ -276,41 +273,41 @@ func cloneVector(vec []float32) []float32 {
 
 func cloneVersion(v Version) Version {
 	var qv *turboquant.IPQuantized
-	if v.quantized != nil {
-		cloned := cloneQuantized(*v.quantized)
+	if v.Quantized != nil {
+		cloned := cloneQuantized(*v.Quantized)
 		qv = &cloned
 	}
 	return Version{
-		Embedding:    cloneVector(v.Embedding),
+		Quantized:    qv,
+		RawHash:      append([]byte(nil), v.RawHash...),
+		Sparse:       cloneSparseVector(v.Sparse),
 		Text:         v.Text,
 		Metadata:     cloneMetadata(v.Metadata),
-		Children:     cloneMultiVectorChildVersions(v.Children),
+		Children:     cloneChildVectors(v.Children),
 		LamportClock: v.LamportClock,
 		ActorID:      v.ActorID,
 		WallClock:    v.WallClock,
 		Tombstone:    v.Tombstone,
-		quantized:    qv,
 		dim:          v.dim,
 	}
 }
 
-func cloneMultiVectorChildVersions(children []MultiVectorChildVersion) []MultiVectorChildVersion {
+func cloneChildVectors(children []ChildVector) []ChildVector {
 	if len(children) == 0 {
 		return nil
 	}
-	out := make([]MultiVectorChildVersion, len(children))
+	out := make([]ChildVector, len(children))
 	for i, child := range children {
 		var qv *turboquant.IPQuantized
-		if child.quantized != nil {
-			cloned := cloneQuantized(*child.quantized)
+		if child.Quantized != nil {
+			cloned := cloneQuantized(*child.Quantized)
 			qv = &cloned
 		}
-		out[i] = MultiVectorChildVersion{
+		out[i] = ChildVector{
 			ID:        child.ID,
-			Embedding: cloneVector(child.Embedding),
+			Quantized: qv,
 			Text:      child.Text,
 			Metadata:  cloneMetadata(child.Metadata),
-			quantized: qv,
 			dim:       child.dim,
 		}
 	}

@@ -3,6 +3,7 @@ package snapshot
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,7 +27,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 				ID: "doc-1",
 				Versions: []Version{
 					{
-						Embedding:    []float32{0.1, 0.2, 0.3},
+						Quantized:    &QuantizedVector{MSE: []byte{1, 2}, Signs: []byte{3}, ResNorm: 0.5},
 						Text:         "hello world",
 						Metadata:     map[string]string{"source": "test"},
 						LamportClock: 7,
@@ -66,7 +67,6 @@ func TestSnapshotCompactOrdinalQuantizedChildrenRejectsHugeLength(t *testing.T) 
 		BitWidth:   2,
 		Seed:       42,
 		Dim:        4,
-		Storage:    "quantized_only",
 		MaxLamport: 12,
 		CreatedAt:  time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC),
 		Records: []Record{
@@ -122,7 +122,6 @@ func TestSnapshotPackedChildrenRoundTrip(t *testing.T) {
 		BitWidth:   4,
 		Seed:       42,
 		Dim:        4,
-		Storage:    "quantized_only",
 		MaxLamport: 9,
 		CreatedAt:  time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC),
 		Records: []Record{
@@ -156,7 +155,7 @@ func TestSnapshotPackedChildrenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Storage != "quantized_only" || len(got.Records) != 1 || len(got.Records[0].Versions) != 1 {
+	if len(got.Records) != 1 || len(got.Records[0].Versions) != 1 {
 		t.Fatalf("got = %+v", got)
 	}
 	children := got.Records[0].Versions[0].Children
@@ -185,7 +184,6 @@ func TestSnapshotCompactOrdinalQuantizedChildrenRoundTrip(t *testing.T) {
 		BitWidth:   2,
 		Seed:       42,
 		Dim:        128,
-		Storage:    "quantized_only",
 		MaxLamport: 11,
 		CreatedAt:  time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC),
 		Records: []Record{
@@ -221,7 +219,7 @@ func TestSnapshotCompactOrdinalQuantizedChildrenRoundTrip(t *testing.T) {
 		t.Fatalf("child count = %d, want %d", len(gotChildren), len(children))
 	}
 	for i, child := range gotChildren {
-		if child.ID != strconv.Itoa(i) || child.Dim != 128 || len(child.Embedding) != 0 || child.Text != "" || len(child.Metadata) != 0 {
+		if child.ID != strconv.Itoa(i) || child.Dim != 128 || child.Text != "" || len(child.Metadata) != 0 {
 			t.Fatalf("child[%d] identity fields = %+v", i, child)
 		}
 		if child.Quantized == nil {
@@ -231,5 +229,50 @@ func TestSnapshotCompactOrdinalQuantizedChildrenRoundTrip(t *testing.T) {
 		if string(child.Quantized.MSE) != string(wantChild.MSE) || string(child.Quantized.Signs) != string(wantChild.Signs) || child.Quantized.ResNorm != wantChild.ResNorm {
 			t.Fatalf("child[%d] quantized = %+v, want %+v", i, child.Quantized, wantChild)
 		}
+	}
+}
+
+func TestSnapshotV6RawHashAndSparse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot-00000000000000000007.csdb")
+	rawHash := make([]byte, 32)
+	for i := range rawHash {
+		rawHash[i] = byte(i)
+	}
+	in := Data{
+		Collection: "c", BitWidth: 2, Seed: 5, Dim: 4, RawStore: true, SparseEnabled: true,
+		MaxLamport: 7, CreatedAt: time.Unix(0, 0).UTC(),
+		Records: []Record{{ID: "a", Versions: []Version{{
+			Quantized:    &QuantizedVector{MSE: []byte{1, 2}, Signs: []byte{3}, ResNorm: 1.0},
+			RawHash:      rawHash,
+			Sparse:       &SparseBlock{Indices: []uint32{2, 9}, Values: []float32{0.5, 0.1}},
+			LamportClock: 7, ActorID: "x",
+		}}}},
+	}
+	if err := WriteFile(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.RawStore || !out.SparseEnabled || out.Dim != 4 {
+		t.Fatalf("header mismatch: %+v", out)
+	}
+	v := out.Records[0].Versions[0]
+	if len(v.RawHash) != 32 || v.RawHash[5] != 5 {
+		t.Fatalf("rawhash mismatch: %x", v.RawHash)
+	}
+	if v.Sparse == nil || len(v.Sparse.Indices) != 2 || v.Sparse.Values[0] != 0.5 {
+		t.Fatalf("sparse mismatch: %+v", v.Sparse)
+	}
+}
+
+func TestSnapshotFloorGuardRejectsV5(t *testing.T) {
+	// magic + version=5
+	bad := []byte{0x42, 0x44, 0x53, 0x43, 0x05}
+	_, err := read(bytes.NewReader(bad))
+	if !errors.Is(err, ErrFormatTooOld) {
+		t.Fatalf("want ErrFormatTooOld, got %v", err)
 	}
 }
