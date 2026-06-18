@@ -46,6 +46,14 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 	if len(normalized) == 0 {
 		return errors.New("corkscrewdb: shard assignments are required")
 	}
+	// A fenced cluster rebalance's symmetric-diff range freeze is only
+	// well-defined when BOTH the current (L0) and target (L1) layouts route
+	// every moving key via explicit shard ranges. If the current layout is
+	// legacy peer-hash-mod (no explicit shards), reject — require WithShards
+	// (§5.5).
+	if !db.fencedRebalanceSafe(normalized) {
+		return ErrLegacyRebalanceUnsafe
+	}
 
 	targets := db.rebalanceTargets(normalized)
 	for _, target := range targets {
@@ -379,6 +387,21 @@ func (db *DB) importVersion(coll *Collection, id string, rawStore bool, v import
 		WallClock:    v.WallClock,
 		Tombstone:    v.Tombstone,
 	})
+}
+
+// fencedRebalanceSafe reports whether a fenced cluster rebalance to next (L1)
+// is safe to range-freeze: both the current explicit layout (L0) and the target
+// (L1) must route every key via explicit shard ranges. A non-empty explicit
+// layout is guaranteed by normalizeShardAssignments to cover [0, maxUint64], so
+// the only legacy-fallthrough case is an empty current layout (legacy
+// peer-hash-mod) or an empty target. next is already normalized (non-empty,
+// full-coverage) when this is called.
+func (db *DB) fencedRebalanceSafe(next []ShardAssignment) bool {
+	if len(next) == 0 {
+		return false
+	}
+	current := db.shardAssignments()
+	return len(current) != 0
 }
 
 func (db *DB) ownerForLayout(collection, id string, shards []ShardAssignment, legacyMembers []string) string {
