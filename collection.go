@@ -334,7 +334,7 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 	if len(corpus) == 0 {
 		return nil
 	}
-	scorer := c.scorerForSearch(flat, corpus)
+	scorer := c.scorerForSearch(flat, corpus, len(filters) > 0)
 
 	flat.mu.RLock()
 	pq := flat.quantizer.PrepareQuery(query)
@@ -344,6 +344,18 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 		return matchesFilters(entry.metadata, filters)
 	}
 	hits := scorer.ScoreTopK(pq, k, accept)
+	flat.mu.RUnlock()
+	// An injected scorer (e.g. GPU) may decline a query (k-bounds, re-pack failure)
+	// by returning empty when results were expected — fall back to the default
+	// certified scorer so the query is never silently truncated (§6.2).
+	if len(hits) == 0 && c.scorer != nil && k > 0 && len(corpus) > 0 {
+		ds := newDefaultScorer(flat.quantizer)
+		ds.SetCorpus(corpus)
+		flat.mu.RLock()
+		hits = ds.ScoreTopK(pq, k, accept)
+		flat.mu.RUnlock()
+	}
+	flat.mu.RLock()
 	results := make([]SearchResult, 0, len(hits))
 	for _, h := range hits {
 		entry := flat.entries[rowToEntry[h.Index]]
@@ -371,8 +383,12 @@ type corpusSetter interface {
 // defaultScorer over the supplied live corpus when none was injected. An injected
 // scorer that implements corpusSetter is refreshed with the live corpus so its
 // row indices align with corpusSnapshot.
-func (c *Collection) scorerForSearch(flat *index, corpus []turboquant.IPQuantized) Scorer {
-	if c.scorer != nil {
+//
+// When hasFilters is true the injected scorer is BYPASSED in favor of the default
+// scorer: a device/GPU scorer has no on-device accept predicate, and filtering
+// after top-k could drop below k (§6.2). The default scorer pushes the filter down.
+func (c *Collection) scorerForSearch(flat *index, corpus []turboquant.IPQuantized, hasFilters bool) Scorer {
+	if c.scorer != nil && !hasFilters {
 		if cs, ok := c.scorer.(corpusSetter); ok {
 			cs.SetCorpus(corpus)
 		}
