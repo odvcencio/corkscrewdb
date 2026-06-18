@@ -561,11 +561,11 @@ func (f *failingClient) FreezeRebalance(shards []ShardAssignment, epoch uint64, 
 	return f.remoteClient.FreezeRebalance(shards, epoch, coordinator)
 }
 
-func (f *failingClient) PrepareRebalance(shards []ShardAssignment, epoch uint64) error {
+func (f *failingClient) PrepareRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
 	if err := f.shouldFail("prepare"); err != nil {
 		return err
 	}
-	return f.remoteClient.PrepareRebalance(shards, epoch)
+	return f.remoteClient.PrepareRebalance(shards, epoch, coordinator)
 }
 
 func (f *failingClient) CommitRebalance(shards []ShardAssignment, epoch uint64) error {
@@ -804,6 +804,104 @@ func TestPreparedParticipantQueriesCoordinatorOnRestart(t *testing.T) {
 	})
 }
 
+// TestForceAbortedEpochRecoversAsAbort is the Bug 1 force-abort regression: a
+// participant reaches PREPARED at epoch N (floor still 0), then the operator
+// runs ForceAbortRebalance(N) on the coordinator — bumping the coordinator's
+// floor PAST N — WITHOUT the abort broadcast ever reaching the (down)
+// participant. On restart the participant queries the coordinator for epoch N;
+// the coordinator's per-epoch outcome must be ABORT (the floor moved past N
+// without committing N), so the participant reverts to L0 and unfreezes. The
+// old `committed >= epoch ⇒ COMMIT` rule would mis-resolve this as COMMIT and
+// silently apply a force-aborted layout.
+func TestForceAbortedEpochRecoversAsAbort(t *testing.T) {
+	maxKey := ^uint64(0)
+	pending := []ShardAssignment{{ID: "s", Owner: "other", Start: 0, End: maxKey}}
+
+	const epoch = 5
+	// Coordinator starts with no commit record for epoch 5 (floor 0).
+	coord := startServedNode(t, "coord-forceabort", WithProvider(nil), WithToken("s"))
+
+	// Participant reaches PREPARED at epoch 5 with coord as its coordinator, then
+	// goes down (Close) — it will NOT receive the abort broadcast.
+	path := filepath.Join(t.TempDir(), "p-forceabort.csdb")
+	driveToPrepared(t, path, coord.addr, epoch, pending)
+
+	// Operator force-aborts epoch 5 on the coordinator. This bumps the coordinator
+	// floor strictly past 5; the participant is down so it never sees the abort.
+	if err := coord.db.ForceAbortRebalance(epoch); err != nil {
+		t.Fatal(err)
+	}
+	if coord.db.committedEpoch() <= epoch {
+		t.Fatalf("force-abort floor = %d, want > %d", coord.db.committedEpoch(), epoch)
+	}
+	// Sanity: the coordinator's per-epoch outcome for epoch 5 is ABORT, NOT commit.
+	if d, _ := coord.db.resolveRebalanceDecision(epoch); d != decisionAbort {
+		t.Fatalf("resolveRebalanceDecision(%d) = %v, want decisionAbort (force-aborted)", epoch, d)
+	}
+
+	// Participant restarts and recovers by querying the coordinator.
+	p, err := Open(path, WithProvider(nil), WithToken("s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if p.rebalanceSnapshot().phase != phaseIdle {
+		t.Fatalf("participant not IDLE after force-abort recovery: %v", p.rebalanceSnapshot().phase)
+	}
+	// It must have reverted to L0 (the original two-shard layout), NOT committed
+	// the single-shard force-aborted L1.
+	if got := len(p.shardAssignments()); got != 2 {
+		t.Fatalf("participant did not revert to L0 after force-abort: shards = %+v (want 2)", p.shardAssignments())
+	}
+}
+
+// TestSupersededEpochRecoversAsAbort is the Bug 1 supersession regression: a
+// DIFFERENT layout commits at epoch N+1 on the coordinator, then a stale
+// epoch-N PREPARED participant recovers. The coordinator's per-epoch outcome
+// for N must be ABORT (a newer rebalance committed, the floor is now N+1), so
+// the participant reverts to L0 instead of applying its stale L1_N and creating
+// a split-brain layout. The old `committed >= epoch ⇒ COMMIT` rule would
+// mis-resolve this as COMMIT.
+func TestSupersededEpochRecoversAsAbort(t *testing.T) {
+	maxKey := ^uint64(0)
+	staleL1 := []ShardAssignment{{ID: "s", Owner: "other", Start: 0, End: maxKey}}
+
+	const staleEpoch = 5
+	// Coordinator commits a DIFFERENT layout at epoch 6 (the floor becomes 6).
+	coord := startServedNode(t, "coord-superseded", WithProvider(nil), WithToken("s"))
+	differentL1 := []ShardAssignment{
+		{ID: "s-a", Owner: coord.addr, Start: 0, End: maxKey / 2},
+		{ID: "s-b", Owner: "other", Start: maxKey/2 + 1, End: maxKey},
+	}
+	if err := coord.db.applyShardLayout(differentL1, staleEpoch+1); err != nil {
+		t.Fatal(err)
+	}
+	if coord.db.committedEpoch() != staleEpoch+1 {
+		t.Fatalf("coordinator floor = %d, want %d", coord.db.committedEpoch(), staleEpoch+1)
+	}
+	// The coordinator's per-epoch outcome for the stale epoch is ABORT.
+	if d, _ := coord.db.resolveRebalanceDecision(staleEpoch); d != decisionAbort {
+		t.Fatalf("resolveRebalanceDecision(%d) = %v, want decisionAbort (superseded)", staleEpoch, d)
+	}
+
+	// A stale participant reaches PREPARED at epoch 5 (it missed the newer epoch).
+	path := filepath.Join(t.TempDir(), "p-superseded.csdb")
+	driveToPrepared(t, path, coord.addr, staleEpoch, staleL1)
+
+	p, err := Open(path, WithProvider(nil), WithToken("s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if p.rebalanceSnapshot().phase != phaseIdle {
+		t.Fatalf("stale participant not IDLE after supersession recovery: %v", p.rebalanceSnapshot().phase)
+	}
+	// It reverts to L0 (two shards), NOT the stale single-shard L1_5.
+	if got := len(p.shardAssignments()); got != 2 {
+		t.Fatalf("stale participant applied superseded L1_5 instead of reverting to L0: shards = %+v (want 2)", p.shardAssignments())
+	}
+}
+
 func TestCoordinatorCrashRecovery(t *testing.T) {
 	t.Run("after durable decide -> commit-forward", func(t *testing.T) {
 		a, b, l1, movingID := twoNode2PC(t)
@@ -966,4 +1064,183 @@ func TestCoordinatorStaleCommitTreatsAsAbort(t *testing.T) {
 	if a.db.rebalanceSnapshot().phase != phaseIdle {
 		t.Fatalf("coordinator phase after stale-commit = %v, want IDLE", a.db.rebalanceSnapshot().phase)
 	}
+}
+
+// reservePort returns a free 127.0.0.1 address and closes its listener so the
+// caller can bind it later.
+func reservePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+// serveAt opens a DB at path, binds it to addr, serves it, and registers
+// cleanup. Returns the DB.
+func serveAt(t *testing.T, path, addr string, opts ...Option) *DB {
+	t.Helper()
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path, opts...)
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	db.registerServeAddr(addr)
+	done := make(chan error, 1)
+	go func() { done <- db.Serve(l) }()
+	t.Cleanup(func() {
+		_ = l.Close()
+		_ = db.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("serve %s did not exit", addr)
+		}
+	})
+	return db
+}
+
+// TestPureGainerPersistsCoordinatorAndRecovers is the Bug 2 regression: a pure
+// gainer (gains keys, loses none, is NOT the coordinator) never receives Freeze,
+// so before the fix it persisted an EMPTY coordinator address on PREPARED. If it
+// then crashes and the coordinator owns no shards (in no peer's shard set and
+// not in the gainer's static WithPeers), recovery's peer-iteration fallback
+// cannot find the coordinator and the gainer is fenced forever. With the fix,
+// PrepareRebalance carries the coordinator address so the gainer persists it and
+// recovery dials the coordinator directly.
+//
+// Topology:
+//   - C (coordinator) owns NO shards under L0 or L1 — it only drives.
+//   - H (holder/loser) owns everything under L0; loses the [0,mid] band to G.
+//   - G (pure gainer) gains [0,mid] from H under L1, loses nothing -> never freezes.
+//
+// G's static peers list ONLY H (never C), and C is in neither L0 nor L1's shard
+// owners, so the only way G can reach C on recovery is the persisted coordinator.
+func TestPureGainerPersistsCoordinatorAndRecovers(t *testing.T) {
+	addrC := reservePort(t)
+	addrH := reservePort(t)
+	addrG := reservePort(t)
+
+	maxKey := ^uint64(0)
+	mid := maxKey / 2
+
+	// L0: H owns everything. C and G own nothing.
+	l0 := []ShardAssignment{{ID: "all", Owner: addrH, Start: 0, End: maxKey}}
+	// L1: G gains [0,mid] from H; H keeps the rest. C still owns nothing.
+	l1 := []ShardAssignment{
+		{ID: "g", Owner: addrG, Start: 0, End: mid},
+		{ID: "h", Owner: addrH, Start: mid + 1, End: maxKey},
+	}
+
+	prov := func() Option { return WithProvider(&mockProvider{dim: 16}) }
+
+	// Coordinator C: knows H and G as peers (it must reach them to drive), owns
+	// nothing. It uses L0 so its rebalanceRoles diff is well-defined.
+	dbC := serveAt(t, filepath.Join(t.TempDir(), "pg-c.csdb"), addrC,
+		prov(), WithToken("s"), WithPeers(addrH, addrG), WithShards(l0...))
+	// Holder/loser H: owns everything; peers know C and G.
+	dbH := serveAt(t, filepath.Join(t.TempDir(), "pg-h.csdb"), addrH,
+		prov(), WithToken("s"), WithPeers(addrC, addrG), WithShards(l0...))
+
+	// Pure gainer G: peers list ONLY H (NOT C). Owns nothing under L0.
+	pathG := filepath.Join(t.TempDir(), "pg-g.csdb")
+	lG, err := net.Listen("tcp", addrG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbG, err := Open(pathG, prov(), WithToken("s"), WithPeers(addrH), WithShards(l0...))
+	if err != nil {
+		_ = lG.Close()
+		t.Fatal(err)
+	}
+	dbG.registerServeAddr(addrG)
+	doneG := make(chan error, 1)
+	go func() { doneG <- dbG.Serve(lG) }()
+
+	// Seed a moving key on H that G gains under L1 (key in [0,mid]).
+	var movingID string
+	for i := 0; i < 200000; i++ {
+		id := "doc-pg-" + strconv.Itoa(i)
+		if k := shardKey("docs", id); k <= mid {
+			movingID = id
+			break
+		}
+	}
+	if movingID == "" {
+		t.Fatal("no moving key found")
+	}
+	if err := dbH.Collection("docs", WithBitWidth(2)).PutVector(movingID, unitVec(16, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail G's CommitRebalance so G stays PREPARED after the durable decide. The
+	// coordinator C holds a durable commit record (floor == epoch) so a later
+	// recovery query resolves COMMIT.
+	injectFailingPeer(t, dbC, addrG, "commit", 0, errors.New("injected commit failure to strand gainer"))
+
+	err = dbC.OrchestrateRebalance(l1...)
+	if err == nil {
+		t.Fatal("OrchestrateRebalance returned nil despite injected commit failure")
+	}
+
+	// Bug 2 core assertion: the pure gainer persisted the REAL coordinator
+	// address on PREPARED (not an empty string).
+	stG := dbG.rebalanceSnapshot()
+	if stG.phase != phasePrepared {
+		t.Fatalf("gainer phase = %v, want PREPARED", stG.phase)
+	}
+	if stG.coordinator != addrC {
+		t.Fatalf("gainer persisted coordinator = %q, want %q (Bug 2: empty coordinator)", stG.coordinator, addrC)
+	}
+
+	// Crash G: close it (stop serving). Its persisted manifest holds PREPARED +
+	// the coordinator address.
+	_ = lG.Close()
+	if err := dbG.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-doneG:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve G did not exit")
+	}
+
+	// Reopen G WITHOUT C in its peers (peers = [H]) and with C absent from its
+	// shard set (still L0 = H owns all). Peer-iteration over G's shard set yields
+	// only H, which cannot answer C's decision — recovery MUST dial the persisted
+	// coordinator C directly. Recovery runs during Open.
+	dbG2, err := Open(pathG, prov(), WithToken("s"), WithPeers(addrH))
+	if err != nil {
+		t.Fatalf("reopen gainer err = %v", err)
+	}
+	defer dbG2.Close()
+	// Restore G's served identity so a routed write to its now-owned range is
+	// recognized as local (the recovered layout names addrG as the owner).
+	dbG2.registerServeAddr(addrG)
+
+	// Converged: G resolved COMMIT via the persisted coordinator (NOT peer
+	// iteration over its shard set, which lists only H), applied L1, and unfroze.
+	// Before the fix, G's persisted coordinator was "" and peer-iteration over its
+	// shards (only H, which has no decision for C's epoch) could not resolve it —
+	// G would stay fenced forever in PREPARED.
+	if ph := dbG2.rebalanceSnapshot().phase; ph != phaseIdle {
+		t.Fatalf("gainer not IDLE after recovery via persisted coordinator: %v (fenced forever?)", ph)
+	}
+	if got := len(dbG2.shardAssignments()); got != 2 {
+		t.Fatalf("gainer did not apply L1 on recovery: shards = %+v (want 2)", dbG2.shardAssignments())
+	}
+	// The moving key is no longer fenced on G (it owns [0,mid] under L1 now); a
+	// routed write to it succeeds rather than being rejected with
+	// ErrRebalanceInProgress.
+	if err := dbG2.Collection("docs", WithBitWidth(2)).Put(movingID, Entry{Vector: unitVec(16, 2)}); err != nil {
+		t.Fatalf("post-recovery write to gained key err = %v, want nil (unfrozen)", err)
+	}
+	_ = movingID
 }

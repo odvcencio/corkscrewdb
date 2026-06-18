@@ -213,7 +213,7 @@ func (db *DB) pullTarget(target string, epoch uint64, l1 []ShardAssignment, coor
 	if err != nil {
 		return err
 	}
-	return client.PrepareRebalance(l1, epoch)
+	return client.PrepareRebalance(l1, epoch, coord)
 }
 
 // commitAll sends Commit to every target, applying L1 + unfreezing. Commit is
@@ -432,13 +432,18 @@ func (db *DB) pullRebalanceShards(epoch uint64, coordinator string, next []Shard
 }
 
 // resolveRebalanceDecision is the coordinator's answer to a recovered
-// participant's ResolveRebalance(epoch) query (§5.3). The coordinator returns
-// DECISION_COMMIT iff its durable manifest shows the epoch committed
-// (RebalanceEpoch >= epoch); otherwise DECISION_ABORT. The committed floor is
-// returned so the caller can detect supersession by a higher epoch.
+// participant's ResolveRebalance(epoch) query (§5.3). The committed floor
+// (RebalanceEpoch) records the LAST epoch whose layout was actually committed,
+// so a per-epoch outcome is exact: COMMIT iff THIS epoch is the committed one
+// (committedEpoch == epoch); ABORT when the floor moved PAST epoch without
+// committing it — either an operator force-abort bumped the floor (committed >
+// epoch, no layout for epoch) or a DIFFERENT, newer rebalance committed
+// (supersession). A `>=`-on-one-floor test would conflate these and wrongly
+// COMMIT a force-aborted or superseded epoch. The committed floor is returned
+// so a stale caller can see the supersession explicitly.
 func (db *DB) resolveRebalanceDecision(epoch uint64) (rebalanceDecision, uint64) {
 	committed := db.committedEpoch()
-	if committed >= epoch {
+	if committed == epoch {
 		return decisionCommit, committed
 	}
 	return decisionAbort, committed
@@ -448,10 +453,13 @@ func (db *DB) resolveRebalanceDecision(epoch uint64) (rebalanceDecision, uint64)
 // (§5.3). Three cases:
 //
 //  1. This node holds a durable commit record for the in-flight epoch
-//     (phase=COMMITTING, RebalanceEpoch >= epoch): finish commit-forward.
+//     (phase=COMMITTING, RebalanceEpoch == epoch): finish commit-forward. A
+//     floor PAST epoch means this record was superseded (force-abort / newer
+//     commit) — revert to L0 instead.
 //  2. This node was a participant (FROZEN/PREPARED) with a recorded coordinator
-//     address: dial the coordinator and call ResolveRebalance(epoch). COMMIT =>
-//     apply L1 + unfreeze; ABORT (or supersession) => revert to L0.
+//     address: dial the coordinator and call ResolveRebalance(epoch). COMMIT
+//     (committedEpoch == epoch) => apply L1 + unfreeze; ABORT (force-abort or
+//     supersession, committedEpoch != epoch) => revert to L0.
 //  3. This node was the coordinator (it drove the epoch) with NO commit record:
 //     self-abort and broadcast Abort to FROZEN/PREPARED participants.
 func (db *DB) recoverPendingRebalance() error {
@@ -462,10 +470,18 @@ func (db *DB) recoverPendingRebalance() error {
 	epoch := st.epoch
 	committed := db.committedEpoch()
 
-	// Case 1: we durably decided commit (COMMITTING with the floor at/above the
-	// in-flight epoch) — finish applying L1 locally and unfreeze.
-	if st.phase == phaseCommitting && committed >= epoch {
+	// Case 1: we durably decided commit (COMMITTING with the floor EXACTLY at the
+	// in-flight epoch — commitEpoch set RebalanceEpoch == epoch) — finish applying
+	// L1 locally and unfreeze. A floor strictly past epoch means a force-abort or
+	// a newer rebalance superseded this one; fall through to abort-revert.
+	if st.phase == phaseCommitting && committed == epoch {
 		return db.applyShardLayout(st.pending, epoch)
+	}
+	if st.phase == phaseCommitting && committed > epoch {
+		// Our durable commit record was superseded (force-abort / newer commit
+		// bumped the floor past epoch). Never apply the stale L1; revert to L0.
+		db.clearRebalance()
+		return nil
 	}
 
 	local := db.localMemberID()
@@ -498,11 +514,14 @@ func (db *DB) recoverPendingRebalance() error {
 		// blocking behavior (§5.6); it is safe (no split-brain), not live.
 		return nil
 	}
-	if decision == decisionCommit && committedEpoch >= epoch {
+	// Apply L1 only when the coordinator reports THIS epoch as the committed one.
+	// A COMMIT with a floor past epoch would be a supersession (a force-abort or a
+	// different, newer rebalance committed) — defensively treat it as ABORT.
+	if decision == decisionCommit && committedEpoch == epoch {
 		return db.applyShardLayout(st.pending, epoch)
 	}
-	// ABORT, or the coordinator moved on to a higher epoch (supersession) =>
-	// revert to L0.
+	// ABORT, or the coordinator moved on to a higher epoch (force-abort /
+	// supersession) => revert to L0 and unfreeze.
 	db.clearRebalance()
 	return nil
 }

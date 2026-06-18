@@ -456,6 +456,11 @@ type RPCRebalanceRequest struct {
 	Token  string
 	Shards []ShardAssignment
 	Epoch  uint64
+	// Coordinator is the coordinator's serve address. PrepareRebalance carries it
+	// so a pure gainer (gains keys, loses none, so it never received Freeze)
+	// persists the real coordinator on PREPARED and crash recovery can dial it
+	// directly. Empty for Commit/Prune.
+	Coordinator string
 }
 
 // rebalanceDecision is the durable outcome a coordinator reports for a
@@ -586,7 +591,14 @@ func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty)
 		// Legacy unfenced prepare (single-node RebalanceShards over the wire).
 		return s.db.prepareRebalanceShards(req.Shards)
 	}
-	coord := s.db.rebalanceSnapshot().coordinator
+	// Prefer the coordinator address carried in the request: a pure gainer that
+	// never froze has no recorded coordinator, so the request is the only source
+	// of the address it must persist on PREPARED. Fall back to any already-
+	// recorded coordinator (a freeze+pull participant) for backward compatibility.
+	coord := strings.TrimSpace(req.Coordinator)
+	if coord == "" {
+		coord = s.db.rebalanceSnapshot().coordinator
+	}
 	return s.db.pullRebalanceShards(req.Epoch, coord, req.Shards)
 }
 

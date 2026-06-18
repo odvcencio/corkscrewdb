@@ -2217,10 +2217,15 @@ func (x *PullSnapshotResponse) GetSparseEnabled() bool {
 }
 
 type RebalanceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	Shards        []*ShardAssignment     `protobuf:"bytes,2,rep,name=shards,proto3" json:"shards,omitempty"`
-	Epoch         uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Token  string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Shards []*ShardAssignment     `protobuf:"bytes,2,rep,name=shards,proto3" json:"shards,omitempty"`
+	Epoch  uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// coordinator serve address, persisted by a pure-gainer participant on
+	// PrepareRebalance so crash recovery can dial the coordinator directly even
+	// when it never received Freeze (it loses no keys) and the coordinator shed
+	// all its shards. Empty for Commit/Prune.
+	Coordinator   string `protobuf:"bytes,4,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2274,6 +2279,13 @@ func (x *RebalanceRequest) GetEpoch() uint64 {
 		return x.Epoch
 	}
 	return 0
+}
+
+func (x *RebalanceRequest) GetCoordinator() string {
+	if x != nil {
+		return x.Coordinator
+	}
+	return ""
 }
 
 // Raw pull-by-hash (Deliverable 2).
@@ -2824,11 +2836,12 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"maxLamport\x12B\n" +
 	"\arecords\x18\x06 \x03(\v2(.corkscrewdb.transport.v1.SnapshotRecordR\arecords\x12\x1b\n" +
 	"\traw_store\x18\a \x01(\bR\brawStore\x12%\n" +
-	"\x0esparse_enabled\x18\b \x01(\bR\rsparseEnabled\"\x81\x01\n" +
+	"\x0esparse_enabled\x18\b \x01(\bR\rsparseEnabled\"\xa3\x01\n" +
 	"\x10RebalanceRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12A\n" +
 	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards\x12\x14\n" +
-	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\"Y\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12 \n" +
+	"\vcoordinator\x18\x04 \x01(\tR\vcoordinator\"Y\n" +
 	"\rGetRawRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1e\n" +
 	"\n" +

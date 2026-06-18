@@ -250,11 +250,12 @@ func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotRe
 	return fromProtoPullSnapshotResponse(resp), nil
 }
 
-func (c *grpcClient) PrepareRebalance(shards []ShardAssignment, epoch uint64) error {
+func (c *grpcClient) PrepareRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
 	_, err := c.client.PrepareRebalance(context.Background(), &grpcapi.RebalanceRequest{
-		Token:  c.token,
-		Shards: toProtoShardAssignments(shards),
-		Epoch:  epoch,
+		Token:       c.token,
+		Shards:      toProtoShardAssignments(shards),
+		Epoch:       epoch,
+		Coordinator: coordinator,
 	})
 	return normalizeTransportError(err)
 }
@@ -559,9 +560,10 @@ func (s *grpcServer) PullSnapshot(_ context.Context, req *grpcapi.PullSnapshotRe
 
 func (s *grpcServer) PrepareRebalance(_ context.Context, req *grpcapi.RebalanceRequest) (*grpcapi.Empty, error) {
 	if err := s.handler.PrepareRebalance(RPCRebalanceRequest{
-		Token:  req.GetToken(),
-		Shards: fromProtoShardAssignments(req.GetShards()),
-		Epoch:  req.GetEpoch(),
+		Token:       req.GetToken(),
+		Shards:      fromProtoShardAssignments(req.GetShards()),
+		Epoch:       req.GetEpoch(),
+		Coordinator: req.GetCoordinator(),
 	}, &RPCEmpty{}); err != nil {
 		return nil, grpcStatusError(err)
 	}

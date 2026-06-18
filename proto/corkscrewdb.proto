@@ -262,6 +262,11 @@ message RebalanceRequest {
   string token = 1;
   repeated ShardAssignment shards = 2;
   uint64 epoch = 3;
+  // coordinator serve address, persisted by a pure-gainer participant on
+  // PrepareRebalance so crash recovery can dial the coordinator directly even
+  // when it never received Freeze (it loses no keys) and the coordinator shed
+  // all its shards. Empty for Commit/Prune.
+  string coordinator = 4;
 }
 
 // Raw pull-by-hash (Deliverable 2).
