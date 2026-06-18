@@ -14,6 +14,15 @@ import (
 	"lukechampine.com/blake3"
 )
 
+// ErrNotFound and ErrIntegrity are the two distinct Get failure modes. The
+// follower's retry policy depends on telling them apart: not-found is terminal
+// (the blob is gone; no retry helps), integrity-mismatch is retriable (a
+// transient read/corruption, or another replica may serve clean bytes).
+var (
+	ErrNotFound  = errors.New("rawstore: key not found")
+	ErrIntegrity = errors.New("rawstore: integrity check failed")
+)
+
 type location struct {
 	segment int
 	offset  int64 // byte offset of the frame start within the segment
@@ -148,7 +157,7 @@ func (s *Store) Get(key []byte) ([]byte, error) {
 	loc, ok := s.index[string(key)]
 	s.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("rawstore: key %x not found", key)
+		return nil, fmt.Errorf("%w: %x", ErrNotFound, key)
 	}
 	f, err := os.Open(segmentPath(s.dir, loc.segment))
 	if err != nil {
@@ -164,7 +173,7 @@ func (s *Store) Get(key []byte) ([]byte, error) {
 	}
 	sum := blake3.Sum256(val)
 	if !bytes.Equal(sum[:], gotKey) || !bytes.Equal(gotKey, key) {
-		return nil, fmt.Errorf("rawstore: integrity check failed for key %x", key)
+		return nil, fmt.Errorf("%w: %x", ErrIntegrity, key)
 	}
 	return val, nil
 }
