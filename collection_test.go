@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	snap "m31labs.dev/corkscrewdb/snapshot"
 	walpkg "m31labs.dev/corkscrewdb/wal"
+	"m31labs.dev/turboquant"
 )
 
 func TestCollectionPutSearchHistoryDeleteAndAt(t *testing.T) {
@@ -838,4 +841,212 @@ func walContainsVectorID(t *testing.T, dir, id string) bool {
 		}
 	}
 	return false
+}
+
+// spyScorer wraps a defaultScorer and counts ScoreTopK calls to witness that the
+// flat search path routes through the injected Scorer seam (Task 3 / §10). It
+// lazily builds its inner defaultScorer from the quantizer carried by the first
+// corpus set, so it can be injected before the collection's quantizer exists.
+type spyScorer struct {
+	quantizer  *turboquant.IPQuantizer
+	inner      *defaultScorer
+	corpus     []turboquant.IPQuantized
+	topKCalls  int
+	multiCalls int
+}
+
+func (s *spyScorer) ensureInner() {
+	if s.inner == nil {
+		s.inner = newDefaultScorer(s.quantizer)
+	}
+}
+
+func (s *spyScorer) SetCorpus(corpus []turboquant.IPQuantized) {
+	s.corpus = corpus
+	s.ensureInner()
+	s.inner.SetCorpus(corpus)
+}
+
+func (s *spyScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept func(i int) bool) []ScoredHit {
+	s.topKCalls++
+	s.ensureInner()
+	return s.inner.ScoreTopK(pq, k, accept)
+}
+
+func (s *spyScorer) ScoreTopKMulti(pqs []turboquant.PreparedQuery, k int, accept func(i int) bool) [][]ScoredHit {
+	s.multiCalls++
+	s.ensureInner()
+	return s.inner.ScoreTopKMulti(pqs, k, accept)
+}
+
+func (s *spyScorer) Close() error {
+	if s.inner != nil {
+		return s.inner.Close()
+	}
+	return nil
+}
+
+func TestCollectionUsesInjectedScorer(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const seed = int64(424242)
+	spy := &spyScorer{}
+	coll := db.Collection("vecs", WithBitWidth(2), WithQuantizerSeed(seed), WithScorer(spy))
+	if coll.scorer != spy {
+		t.Fatalf("collection scorer not set to spy")
+	}
+
+	vecs := map[string][]float32{
+		"a": {1, 0, 0, 0},
+		"b": {0, 1, 0, 0},
+		"c": {0.9, 0.1, 0, 0},
+	}
+	for id, v := range vecs {
+		if err := coll.PutVector(id, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Give the spy the collection's quantizer (available once the flat index exists).
+	coll.mu.RLock()
+	spy.quantizer = coll.index.(*index).quantizer
+	coll.mu.RUnlock()
+
+	// The spy's inner scorer is built lazily per-search by scorerForSearch; the spy
+	// itself is the injected wrapper, so its counter must increment.
+	res, err := coll.SearchVector([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spy.topKCalls == 0 {
+		t.Fatalf("injected scorer ScoreTopK never called (count=%d)", spy.topKCalls)
+	}
+	if len(res) != 2 {
+		t.Fatalf("expected 2 results via scorer path, got %+v", res)
+	}
+
+	// Equivalence with a plain (no-scorer) collection at the SAME seed.
+	plain := db.Collection("plain", WithBitWidth(2), WithQuantizerSeed(seed))
+	for id, v := range vecs {
+		if err := plain.PutVector(id, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plainRes, err := plain.SearchVector([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plainRes) != len(res) {
+		t.Fatalf("scorer-path result count %d != plain %d", len(res), len(plainRes))
+	}
+	for i := range res {
+		if res[i].ID != plainRes[i].ID || res[i].Score != plainRes[i].Score {
+			t.Fatalf("scorer path differs from plain at %d: %+v vs %+v", i, res[i], plainRes[i])
+		}
+	}
+}
+
+func TestScorerPathMatchesInline(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rng := rand.New(rand.NewSource(2026))
+	dim := 4
+	coll := db.Collection("vecs", WithBitWidth(2))
+	type rec struct {
+		id  string
+		vec []float32
+		src string
+	}
+	var recs []rec
+	for i := 0; i < 30; i++ {
+		v := make([]float32, dim)
+		for j := range v {
+			v[j] = rng.Float32()*2 - 1
+		}
+		id := "v" + strconv.Itoa(i)
+		src := "code"
+		if i%2 == 0 {
+			src = "review"
+		}
+		recs = append(recs, rec{id: id, vec: v, src: src})
+		if err := coll.PutVector(id, v, WithMetadata(map[string]string{"source": src})); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Golden: direct InnerProductPrepared over the live corpus (certified reference).
+	c := coll
+	c.mu.RLock()
+	flat := c.index.(*index)
+	c.mu.RUnlock()
+
+	golden := func(query []float32, k int, src string) []string {
+		flat.mu.RLock()
+		pq := flat.quantizer.PrepareQuery(query)
+		type sh struct {
+			id    string
+			score float32
+		}
+		var hits []sh
+		for i := range flat.entries {
+			e := flat.entries[i]
+			if e.child || e.dead {
+				continue
+			}
+			if src != "" && e.metadata["source"] != src {
+				continue
+			}
+			hits = append(hits, sh{e.id, flat.quantizer.InnerProductPrepared(e.qv, pq)})
+		}
+		flat.mu.RUnlock()
+		sort.Slice(hits, func(a, b int) bool {
+			if hits[a].score != hits[b].score {
+				return hits[a].score > hits[b].score
+			}
+			return hits[a].id < hits[b].id
+		})
+		if len(hits) > k {
+			hits = hits[:k]
+		}
+		ids := make([]string, len(hits))
+		for i := range hits {
+			ids[i] = hits[i].id
+		}
+		return ids
+	}
+
+	for q := 0; q < 15; q++ {
+		query := make([]float32, dim)
+		for j := range query {
+			query[j] = rng.Float32()*2 - 1
+		}
+		for _, k := range []int{1, 3, 5} {
+			for _, src := range []string{"", "code", "review"} {
+				var filters []FilterOption
+				if src != "" {
+					filters = append(filters, Filter("source", src))
+				}
+				res, err := coll.SearchVector(query, k, filters...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := golden(query, k, src)
+				if len(res) != len(want) {
+					t.Fatalf("q=%d k=%d src=%q result count %d != golden %d", q, k, src, len(res), len(want))
+				}
+				for i := range res {
+					if res[i].ID != want[i] {
+						t.Fatalf("q=%d k=%d src=%q pos %d: scorer %s != golden %s", q, k, src, i, res[i].ID, want[i])
+					}
+				}
+			}
+		}
+	}
 }

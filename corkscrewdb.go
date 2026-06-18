@@ -276,6 +276,7 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if err != nil {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: err}
 	}
+	coll.scorer = cfg.scorer // runtime-only injection (§10); not persisted in meta
 	meta.Seed = coll.seed
 	db.collections[name] = coll
 	db.manifest.Collections[name] = meta

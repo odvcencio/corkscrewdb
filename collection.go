@@ -32,6 +32,8 @@ type Collection struct {
 	indexType       IndexType
 	hnsw            HNSWParams
 
+	scorer Scorer // optional injected scorer (runtime-only, not persisted in meta)
+
 	mu        sync.RWMutex
 	index     indexer
 	history   map[string][]Version
@@ -305,7 +307,73 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	if len(query) != dim {
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), dim)
 	}
-	return idx.Search(query, k, filters), nil
+	// HNSW owns its own traversal (§10); only the flat path routes through Scorer.
+	flat, isFlat := idx.(*index)
+	if !isFlat {
+		return idx.Search(query, k, filters), nil
+	}
+	return c.flatSearchViaScorer(flat, query, k, filters), nil
+}
+
+// flatSearchViaScorer routes the flat search path through the active Scorer seam
+// (§10). It reproduces the certified inline path: the same InnerProductPrepared
+// per row, with matchesFilters pushed down (evaluated before scoring) and child/
+// tombstoned rows excluded.
+func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+	if k <= 0 {
+		return nil
+	}
+	corpus, rowToEntry := flat.corpusSnapshot()
+	if len(corpus) == 0 {
+		return nil
+	}
+	scorer := c.scorerForSearch(flat, corpus)
+
+	flat.mu.RLock()
+	pq := flat.quantizer.PrepareQuery(query)
+	// accept(row) runs the §7.4 filter pushdown on the row's entry metadata.
+	accept := func(row int) bool {
+		entry := flat.entries[rowToEntry[row]]
+		return matchesFilters(entry.metadata, filters)
+	}
+	hits := scorer.ScoreTopK(pq, k, accept)
+	results := make([]SearchResult, 0, len(hits))
+	for _, h := range hits {
+		entry := flat.entries[rowToEntry[h.Index]]
+		results = append(results, SearchResult{
+			ID:       entry.id,
+			Score:    h.Score,
+			Text:     entry.text,
+			Metadata: cloneMetadata(entry.metadata),
+			Version:  entry.version,
+		})
+	}
+	flat.mu.RUnlock()
+	sortSearchResults(results)
+	return results
+}
+
+// corpusSetter is the optional seam by which a CPU-side injected scorer adopts the
+// collection's live corpus each search. Device-resident scorers (GPU) do not
+// implement it and keep their own static corpus snapshot.
+type corpusSetter interface {
+	SetCorpus(corpus []turboquant.IPQuantized)
+}
+
+// scorerForSearch returns the active scorer for the flat path, lazily building a
+// defaultScorer over the supplied live corpus when none was injected. An injected
+// scorer that implements corpusSetter is refreshed with the live corpus so its
+// row indices align with corpusSnapshot.
+func (c *Collection) scorerForSearch(flat *index, corpus []turboquant.IPQuantized) Scorer {
+	if c.scorer != nil {
+		if cs, ok := c.scorer.(corpusSetter); ok {
+			cs.SetCorpus(corpus)
+		}
+		return c.scorer
+	}
+	ds := newDefaultScorer(flat.quantizer)
+	ds.SetCorpus(corpus)
+	return ds
 }
 
 func (c *Collection) searchParentsVectorLocal(query []float32, k int, cfg parentSearchConfig) ([]ParentSearchResult, error) {

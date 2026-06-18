@@ -208,6 +208,25 @@ func (idx *index) snapshotEntries() []indexEntry {
 	return out
 }
 
+// corpusSnapshot returns the row-ordered quantized codes of the live, non-child
+// entries, plus a parallel slice mapping each corpus row back to its entry slot
+// (so a scorer's ScoredHit.Index can be translated to a SearchResult). Child and
+// tombstoned rows are excluded, matching the flat Search pushdown.
+func (idx *index) corpusSnapshot() (corpus []turboquant.IPQuantized, rowToEntry []int) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	corpus = make([]turboquant.IPQuantized, 0, len(idx.entries))
+	rowToEntry = make([]int, 0, len(idx.entries))
+	for i := range idx.entries {
+		if idx.entries[i].child || idx.entries[i].dead {
+			continue
+		}
+		corpus = append(corpus, idx.entries[i].qv)
+		rowToEntry = append(rowToEntry, i)
+	}
+	return corpus, rowToEntry
+}
+
 func cloneQuantized(qv turboquant.IPQuantized) turboquant.IPQuantized {
 	return turboquant.IPQuantized{
 		MSE:     append([]byte(nil), qv.MSE...),
