@@ -520,6 +520,32 @@ var (
 	cacheRebuildHook func()
 )
 
+// synthWALEntry rebuilds a walpkg.Entry from a snapshot version so the
+// replication streamer can be seeded from snapshot live history during Open.
+// It reads the version's codes (NOT a float embedding), mirroring what a live
+// Put would have appended to the WAL. Tombstones become EntryTombstone.
+func synthWALEntry(collection, id string, dim int, v snap.Version) walpkg.Entry {
+	kind := walpkg.EntryPut
+	if v.Tombstone {
+		kind = walpkg.EntryTombstone
+	}
+	return walpkg.Entry{
+		Kind:         kind,
+		CollectionID: collection,
+		VectorID:     id,
+		Quantized:    toWALQuantized(fromSnapshotQuantized(v.Quantized)),
+		Dim:          dim,
+		RawHash:      append([]byte(nil), v.RawHash...),
+		Sparse:       toWALSparse(fromSnapshotSparse(v.Sparse)),
+		Children:     toWALChildren(fromSnapshotChildren(v.Children)),
+		Text:         v.Text,
+		Metadata:     cloneMetadata(v.Metadata),
+		LamportClock: v.LamportClock,
+		ActorID:      v.ActorID,
+		WallClock:    v.WallClock,
+	}
+}
+
 func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, error) {
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
@@ -552,6 +578,7 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if data.Dim != 0 {
 				coll.dim = data.Dim
 			}
+			var seedEntries []walpkg.Entry
 			for _, record := range data.Records {
 				for _, version := range record.Versions {
 					if err := coll.loadVersion(record.ID, Version{
@@ -569,7 +596,24 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 					}); err != nil {
 						return nil, err
 					}
+					// Seed the replication streamer from snapshot live history
+					// (clock <= snapshotMax). PruneAndReset deletes pre-snapshot
+					// WAL segments, so the WAL tail alone cannot reconstruct this
+					// history; the snapshot seed is required (§4.2).
+					if db.streamer != nil {
+						seedEntries = append(seedEntries, synthWALEntry(name, record.ID, data.Dim, version))
+					}
 				}
+			}
+			// Streamer.Record assumes append order is clock order (pullLocked
+			// binary-searches ascending), but snapshot history is emitted in
+			// (id, clock) order. Sort the seed batch by LamportClock before
+			// recording.
+			sort.SliceStable(seedEntries, func(i, j int) bool {
+				return seedEntries[i].LamportClock < seedEntries[j].LamportClock
+			})
+			for _, e := range seedEntries {
+				db.streamer.Record(name, e)
 			}
 			snapshotMax = data.MaxLamport
 		}
@@ -606,6 +650,14 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			}); err != nil {
 				_ = reader.Close()
 				return nil, err
+			}
+			// Seed the streamer from the WAL tail (clock > snapshotMax). Entries
+			// are already clock-ordered (appends use a monotonic clock), and the
+			// strict > snapshotMax bound means no duplicate with the snapshot
+			// seed above. When there is no snapshot, snapshotMax == 0 so every
+			// replayed entry seeds the streamer.
+			if db.streamer != nil {
+				db.streamer.Record(name, entry)
 			}
 		}
 		if err := reader.Err(); err != nil {
