@@ -65,23 +65,26 @@ func marshalHNSWFile(h *hnswIndex) ([]byte, error) {
 		return nil, err
 	}
 
+	// Compact tombstoned slots out of the layers (D2). The remap is identical to
+	// snapshotEntries() ordering, so the persisted positional layers line up with
+	// the persisted node IDs. The runtime-only tombstone/free-list/inbound state is
+	// NOT serialized (no format change).
+	layers, entryNode, maxLevel, _ := h.compactedLayers()
+
 	// Graph metadata.
-	if err := write(int32(h.maxLevel)); err != nil {
+	if err := write(int32(maxLevel)); err != nil {
 		return nil, err
 	}
-	if err := write(int32(h.entryNode)); err != nil {
+	if err := write(int32(entryNode)); err != nil {
 		return nil, err
 	}
 
-	// Node IDs (reserve-only, Phase 1): persist per-node IDs so the Performance
-	// phase can switch traversal/delete onto stable IDs without a format bump.
-	// Phase 1 traversal still uses implicit slice positions; IDs are written and
-	// validated only.
-	nodeCount := uint32(h.flat.Len())
+	// Node IDs: persist per-node IDs in the compacted live order.
+	entries := h.flat.snapshotEntries()
+	nodeCount := uint32(len(entries))
 	if err := write(nodeCount); err != nil {
 		return nil, err
 	}
-	entries := h.flat.snapshotEntries()
 	for _, e := range entries {
 		idBytes := []byte(e.id)
 		if err := write(uint32(len(idBytes))); err != nil {
@@ -93,11 +96,11 @@ func marshalHNSWFile(h *hnswIndex) ([]byte, error) {
 	}
 
 	// Number of layers.
-	if err := write(int32(len(h.layers))); err != nil {
+	if err := write(int32(len(layers))); err != nil {
 		return nil, err
 	}
 
-	for _, layer := range h.layers {
+	for _, layer := range layers {
 		// Number of nodes in this layer.
 		if err := write(int32(len(layer))); err != nil {
 			return nil, err
@@ -170,8 +173,8 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 		return nil, err
 	}
 
-	// Node IDs (reserve-only): read and validate the count matches flat.Len(),
-	// but do NOT use the IDs for traversal — Phase 1 still uses slice positions.
+	// Node IDs: read into the graph-owned identity map (D2). The count must match
+	// the live flat index (which the cache loader rebuilds from live codes).
 	var nodeCount uint32
 	if err := read(&nodeCount); err != nil {
 		return nil, err
@@ -179,6 +182,7 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 	if int(nodeCount) != flat.Len() {
 		return nil, fmt.Errorf("corkscrewdb: hnsw node count mismatch: file has %d, flat index has %d", nodeCount, flat.Len())
 	}
+	nodeIDs := make([]string, nodeCount)
 	for i := uint32(0); i < nodeCount; i++ {
 		var idLen uint32
 		if err := read(&idLen); err != nil {
@@ -188,7 +192,7 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 		if _, err := io.ReadFull(mr, idBuf); err != nil {
 			return nil, err
 		}
-		// ID is read but not consumed for traversal in Phase 1.
+		nodeIDs[i] = string(idBuf)
 	}
 
 	var numLayers int32
@@ -236,12 +240,43 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 		EfSearch:       int(efSearch),
 	}
 
-	return &hnswIndex{
+	h := &hnswIndex{
 		flat:      flat,
 		layers:    layers,
 		maxLevel:  int(maxLevel),
 		entryNode: int(entryNode),
 		params:    loadedParams,
 		rng:       rand.New(rand.NewSource(flat.quantizer.Seed())),
-	}, nil
+		hubFactor: 1.5,
+		idToNode:  make(map[string]int32, nodeCount),
+	}
+
+	// Rebuild graph-owned identity + runtime adjacency state (D2). All persisted
+	// nodes are live (the save compacted tombstones out); free-list is empty.
+	n := int(nodeCount)
+	h.nodeToID = make([]string, n)
+	h.tombstone = make([]bool, n)
+	h.degree = make([]int32, n)
+	h.inbound = make([][]int32, n)
+	for i := 0; i < n; i++ {
+		h.nodeToID[i] = nodeIDs[i]
+		h.idToNode[nodeIDs[i]] = int32(i)
+	}
+	for level := range h.layers {
+		for node := range h.layers[level] {
+			for _, dst := range h.layers[level][node] {
+				if int(dst) < n {
+					h.inbound[dst] = append(h.inbound[dst], int32(node))
+				}
+			}
+		}
+	}
+	if len(h.layers) > 0 {
+		for node := range h.layers[0] {
+			if node < n {
+				h.degree[node] = int32(len(h.layers[0][node]))
+			}
+		}
+	}
+	return h, nil
 }

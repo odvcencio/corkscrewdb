@@ -34,6 +34,10 @@ type indexEntry struct {
 	childText      string
 	childMetadata  map[string]string
 	child          bool
+	// dead marks a slot tombstoned by the HNSW graph (Performance phase D2). The
+	// row stays in place (skipped by Len/Search/snapshotEntries) until the graph
+	// reuses the slot. Flat-only collections never set this (they swap-remove).
+	dead bool
 }
 
 type index struct {
@@ -174,12 +178,19 @@ func packedChildIndexID(parentID, childID string) string {
 	return parentID + "\x00" + childID
 }
 
+// snapshotEntries returns a compacted clone of the LIVE entries (tombstoned slots
+// skipped). The output is dense and row-ordered, so callers can rebuild a fresh
+// index whose slots line up positionally. compactedLayers() must use the SAME
+// skip-dead ordering so saved graph layers match these node IDs.
 func (idx *index) snapshotEntries() []indexEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	out := make([]indexEntry, len(idx.entries))
-	for i, entry := range idx.entries {
-		out[i] = indexEntry{
+	out := make([]indexEntry, 0, len(idx.entries))
+	for _, entry := range idx.entries {
+		if entry.dead {
+			continue
+		}
+		out = append(out, indexEntry{
 			id:             entry.id,
 			qv:             cloneQuantized(entry.qv),
 			text:           entry.text,
@@ -192,7 +203,7 @@ func (idx *index) snapshotEntries() []indexEntry {
 			childText:      entry.childText,
 			childMetadata:  cloneMetadata(entry.childMetadata),
 			child:          entry.child,
-		}
+		})
 	}
 	return out
 }
@@ -219,7 +230,7 @@ func (idx *index) Search(query []float32, k int, filters []FilterOption) []Searc
 	h := &searchHeap{}
 	for i := 0; i < n; i++ {
 		entry := idx.entries[i]
-		if entry.child {
+		if entry.child || entry.dead {
 			continue
 		}
 		// §7.4 filter pushdown: predicate evaluated BEFORE InnerProductPrepared so
@@ -269,7 +280,7 @@ func (idx *index) SearchParents(query []float32, k int, cfg parentSearchConfig) 
 	best := make(map[string]ParentSearchResult)
 	for i := 0; i < n; i++ {
 		entry := idx.entries[i]
-		if !entry.child {
+		if !entry.child || entry.dead {
 			continue
 		}
 		if !matchesFilters(entry.parentMetadata, cfg.parentFilters) || !matchesFilters(entry.childMetadata, cfg.childFilters) {
@@ -324,7 +335,53 @@ func parentResultLess(a, b ParentSearchResult) bool {
 func (idx *index) Len() int {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return len(idx.entries)
+	n := 0
+	for i := range idx.entries {
+		if !idx.entries[i].dead {
+			n++
+		}
+	}
+	return n
+}
+
+// putAt writes a quantized row at an explicit slot, growing the entries slice as
+// needed and reviving a previously tombstoned slot. Used by the HNSW graph (D2)
+// which owns slot assignment via the free-list. The slot's previous id (if any)
+// is dropped from idIndex.
+func (idx *index) putAt(pos int, id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for len(idx.entries) <= pos {
+		idx.entries = append(idx.entries, indexEntry{dead: true})
+	}
+	if old := idx.entries[pos].id; old != "" {
+		if p, ok := idx.idIndex[old]; ok && p == pos {
+			delete(idx.idIndex, old)
+		}
+	}
+	idx.entries[pos] = indexEntry{
+		id:       id,
+		qv:       cloneQuantized(qv),
+		text:     text,
+		metadata: cloneMetadata(metadata),
+		version:  version,
+	}
+	idx.idIndex[id] = pos
+}
+
+// tombstoneAt marks the slot at pos dead and removes its id from idIndex. The row
+// (codes/metadata) stays in place until putAt overwrites it on reuse.
+func (idx *index) tombstoneAt(pos int) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if pos < 0 || pos >= len(idx.entries) {
+		return
+	}
+	id := idx.entries[pos].id
+	if p, ok := idx.idIndex[id]; ok && p == pos {
+		delete(idx.idIndex, id)
+	}
+	idx.entries[pos].dead = true
 }
 
 type searchHeap []SearchResult

@@ -25,6 +25,13 @@ type hnswIndex struct {
 	rng       *rand.Rand
 	degree    []int32 // layer-0 degree per node (LEANN hub detection)
 	hubFactor float32 // a node is a hub when degree >= hubFactor*M
+
+	// D2: tombstone delete + free-list + inbound-adjacency keyed on stable slots.
+	freeList  []int32          // recycled (tombstoned) node slots, LIFO
+	tombstone []bool           // parallel to nodes: logically removed
+	idToNode  map[string]int32 // graph-owned identity (not borrowed from flat)
+	nodeToID  []string         // node slot -> string ID
+	inbound   [][]int32        // inbound[b] = nodes holding an out-edge to b (runtime only)
 }
 
 var _ indexer = (*hnswIndex)(nil)
@@ -47,7 +54,128 @@ func newHNSWIndex(dim, bitWidth int, seed int64, params HNSWParams) *hnswIndex {
 		params:    params,
 		rng:       rand.New(rand.NewSource(seed)),
 		hubFactor: 1.5,
+		idToNode:  make(map[string]int32),
 	}
+}
+
+// ensureTombstoneSlot grows tombstone/nodeToID/inbound so index i is addressable.
+func (h *hnswIndex) ensureTombstoneSlot(i int) {
+	for len(h.tombstone) <= i {
+		h.tombstone = append(h.tombstone, false)
+	}
+	for len(h.nodeToID) <= i {
+		h.nodeToID = append(h.nodeToID, "")
+	}
+	for len(h.inbound) <= i {
+		h.inbound = append(h.inbound, nil)
+	}
+}
+
+func (h *hnswIndex) addInbound(b, src int32) {
+	h.ensureTombstoneSlot(int(b))
+	h.inbound[b] = append(h.inbound[b], src)
+}
+
+func (h *hnswIndex) dropInbound(b, src int32) {
+	if int(b) >= len(h.inbound) {
+		return
+	}
+	// Remove exactly ONE occurrence: the same (src,b) edge can exist at multiple
+	// layers, so inbound[b] holds src once per layer-edge. Dropping all would wipe
+	// a sibling-layer edge's back-ref and corrupt the inverse-of-out-edges invariant.
+	h.inbound[b] = removeOneFromSlice(h.inbound[b], src)
+}
+
+// setNeighbors replaces node a's neighbor list at level, updating inbound back-refs
+// for every added/removed edge so inbound stays the exact inverse of out-edges.
+func (h *hnswIndex) setNeighbors(level int, a int32, list []int32) {
+	h.ensureLayerSlots(level, int(a))
+	old := h.layers[level][a]
+	for _, dst := range old {
+		h.dropInbound(dst, a)
+	}
+	h.layers[level][a] = list
+	for _, dst := range list {
+		h.addInbound(dst, a)
+	}
+	if level == 0 {
+		h.recomputeDegree(int(a))
+	}
+}
+
+// addEdge appends a single out-edge a->b at level and records the inbound back-ref.
+func (h *hnswIndex) addEdge(level int, a, b int32) {
+	h.ensureLayerSlots(level, int(a))
+	h.layers[level][a] = append(h.layers[level][a], b)
+	h.addInbound(b, a)
+	if level == 0 {
+		h.recomputeDegree(int(a))
+	}
+}
+
+// pickLiveEntry scans from the top layer down for any non-tombstoned node present
+// at that layer; returns -1 (and the caller resets maxLevel) if none.
+func (h *hnswIndex) pickLiveEntry() int {
+	for level := len(h.layers) - 1; level >= 0; level-- {
+		for node := range h.layers[level] {
+			if int(node) < len(h.tombstone) && h.tombstone[node] {
+				continue
+			}
+			if _, live := h.idToNode[h.nodeID(int32(node))]; live {
+				return node
+			}
+		}
+	}
+	return -1
+}
+
+func (h *hnswIndex) nodeID(node int32) string {
+	if int(node) < len(h.nodeToID) {
+		return h.nodeToID[node]
+	}
+	return ""
+}
+
+func (h *hnswIndex) isTombstoned(node int) bool {
+	return node < len(h.tombstone) && h.tombstone[node]
+}
+
+// scrubInbound removes all stale inbound edges into node (O(in-degree)) before the
+// slot becomes live again — prevents phantom edges the heuristic never built.
+func (h *hnswIndex) scrubInbound(node int32) {
+	if int(node) >= len(h.inbound) {
+		h.ensureTombstoneSlot(int(node))
+		return
+	}
+	for _, src := range h.inbound[node] {
+		for level := range h.layers {
+			if int(src) < len(h.layers[level]) {
+				h.layers[level][src] = removeFromSlice(h.layers[level][src], node)
+			}
+		}
+		if int(src) < len(h.degree) && len(h.layers) > 0 && int(src) < len(h.layers[0]) {
+			h.degree[src] = int32(len(h.layers[0][src]))
+		}
+	}
+	h.inbound[node] = h.inbound[node][:0]
+	h.tombstone[node] = false
+	h.nodeToID[node] = "" // reassigned by caller
+}
+
+// allocSlot returns a slot for a new node: a scrubbed recycled slot from the
+// free-list (O(in-degree) scrub) or a brand-new appended slot.
+func (h *hnswIndex) allocSlot() int32 {
+	if len(h.freeList) > 0 {
+		node := h.freeList[len(h.freeList)-1]
+		h.freeList = h.freeList[:len(h.freeList)-1]
+		h.scrubInbound(node)
+		return node
+	}
+	h.flat.mu.RLock()
+	node := int32(len(h.flat.entries))
+	h.flat.mu.RUnlock()
+	h.ensureTombstoneSlot(int(node))
+	return node
 }
 
 // ensureDegreeSlot grows the degree slice so that degree[nodeIdx] is addressable.
@@ -110,23 +238,8 @@ func (h *hnswIndex) Add(id string, vec []float32, text string, metadata map[stri
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Check if this is an update to an existing entry.
-	h.flat.mu.Lock()
-	_, isUpdate := h.flat.idIndex[id]
-	h.flat.mu.Unlock()
-
-	if isUpdate {
-		h.removeLocked(id)
-	}
-
-	// Add to flat index (handles quantization).
-	h.flat.Add(id, vec, text, metadata, version)
-
-	h.flat.mu.RLock()
-	nodeIdx := h.flat.idIndex[id]
-	h.flat.mu.RUnlock()
-
-	h.insertNode(nodeIdx, vec)
+	qv := h.flat.quantizer.Quantize(vec)
+	h.addQuantizedLocked(id, qv, text, metadata, version, vec)
 }
 
 // AddQuantized inserts a node from stored codes only (no raw vector). The
@@ -136,22 +249,31 @@ func (h *hnswIndex) Add(id string, vec []float32, text string, metadata map[stri
 func (h *hnswIndex) AddQuantized(id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.addQuantizedLocked(id, qv, text, metadata, version, nil)
+}
 
-	h.flat.mu.Lock()
-	_, isUpdate := h.flat.idIndex[id]
-	h.flat.mu.Unlock()
-	if isUpdate {
+// addQuantizedLocked is the shared insert path. The GRAPH owns slot assignment:
+// updates tombstone the old slot (so the update also flows through the scrub
+// path), then a fresh/recycled slot is allocated, the flat row written at that
+// slot via putAt, and the node wired into the graph. queryVec, when non-nil, is
+// the raw positioning vector; otherwise it is reconstructed from the codes.
+func (h *hnswIndex) addQuantizedLocked(id string, qv turboquant.IPQuantized, text string, metadata map[string]string, version uint64, queryVec []float32) {
+	if _, isUpdate := h.idToNode[id]; isUpdate {
 		h.removeLocked(id)
 	}
 
-	h.flat.addQuantized(id, qv, text, metadata, version)
+	node := h.allocSlot()
+	h.flat.putAt(int(node), id, qv, text, metadata, version)
 
-	h.flat.mu.RLock()
-	nodeIdx := h.flat.idIndex[id]
-	approx := h.flat.quantizer.Dequantize(qv) // code-only positioning vector
-	h.flat.mu.RUnlock()
+	h.ensureTombstoneSlot(int(node))
+	h.idToNode[id] = node
+	h.nodeToID[node] = id
+	h.tombstone[node] = false
 
-	h.insertNode(nodeIdx, approx)
+	if queryVec == nil {
+		queryVec = h.flat.quantizer.Dequantize(qv) // code-only positioning vector
+	}
+	h.insertNode(int(node), queryVec)
 }
 
 // insertNode wires nodeIdx into the graph using queryVec to position it.
@@ -188,24 +310,18 @@ func (h *hnswIndex) insertNode(nodeIdx int, queryVec []float32) {
 		cands := h.searchLayerCandidates(current, pq, h.params.EfConstruction, level)
 		selected := h.selectNeighborsHeuristic(cands, h.maxNeighbors(level))
 
-		h.ensureLayerSlots(level, nodeIdx)
-		h.layers[level][nodeIdx] = selected
+		// Forward edges nodeIdx -> selected (setNeighbors maintains inbound+degree).
+		h.setNeighbors(level, int32(nodeIdx), selected)
 
-		// Add bidirectional edges and prune if over limit.
+		// Add back-edges selected -> nodeIdx and prune if over limit.
 		maxN := h.maxNeighbors(level)
 		for _, neighbor := range selected {
 			ni := int(neighbor)
-			h.ensureLayerSlots(level, ni)
-			h.layers[level][ni] = append(h.layers[level][ni], int32(nodeIdx))
+			h.addEdge(level, neighbor, int32(nodeIdx))
 			if len(h.layers[level][ni]) > maxN {
-				h.layers[level][ni] = h.pruneNeighborsHeuristic(ni, h.layers[level][ni], maxN)
+				pruned := h.pruneNeighborsHeuristic(ni, h.layers[level][ni], maxN)
+				h.setNeighbors(level, neighbor, pruned)
 			}
-			if level == 0 {
-				h.recomputeDegree(ni)
-			}
-		}
-		if level == 0 {
-			h.recomputeDegree(nodeIdx)
 		}
 
 		if len(cands) > 0 {
@@ -237,7 +353,7 @@ func (h *hnswIndex) greedyClosest(start int, pq turboquant.PreparedQuery, level 
 		improved := false
 		for _, ni := range h.layers[level][current] {
 			n := int(ni)
-			if n >= len(h.flat.entries) {
+			if n >= len(h.flat.entries) || h.isTombstoned(n) {
 				continue
 			}
 			score := h.flat.quantizer.InnerProductPrepared(h.flat.entries[n].qv, pq)
@@ -303,7 +419,7 @@ func (h *hnswIndex) searchLayer(entry int, pq turboquant.PreparedQuery, ef int, 
 			visited[neighbor] = true
 
 			n := int(neighbor)
-			if n >= len(h.flat.entries) {
+			if n >= len(h.flat.entries) || h.isTombstoned(n) {
 				continue
 			}
 			score := h.flat.quantizer.InnerProductPrepared(h.flat.entries[n].qv, pq)
@@ -367,7 +483,7 @@ func (h *hnswIndex) searchLayerCandidates(entry int, pq turboquant.PreparedQuery
 			visited[neighbor] = true
 
 			n := int(neighbor)
-			if n >= len(h.flat.entries) {
+			if n >= len(h.flat.entries) || h.isTombstoned(n) {
 				continue
 			}
 			score := h.flat.quantizer.InnerProductPrepared(h.flat.entries[n].qv, pq)
@@ -545,70 +661,138 @@ func (h *hnswIndex) Remove(id string) bool {
 	return h.removeLocked(id)
 }
 
-func (h *hnswIndex) removeLocked(id string) bool {
+// compactedLayers returns the graph layers with tombstoned slots dropped and all
+// node indices remapped to the dense live ordering. The remap is identical to the
+// one snapshotEntries() produces (iterate slots in order, skip dead), so the saved
+// positional layers line up with the saved node IDs. Caller holds h.mu (read is
+// fine for marshalling). hasTomb reports whether any compaction was needed.
+func (h *hnswIndex) compactedLayers() (layers [][][]int32, entryNode int, maxLevel int, hasTomb bool) {
+	// Build oldSlot -> newIndex over live slots in slot order.
+	liveCount := 0
+	maxSlot := 0
+	if len(h.layers) > 0 {
+		maxSlot = len(h.layers[0])
+	}
+	if len(h.tombstone) > maxSlot {
+		maxSlot = len(h.tombstone)
+	}
+	remap := make([]int32, maxSlot)
+	for i := range remap {
+		remap[i] = -1
+	}
+	// Authority: a slot is live iff its flat row exists and is not dead. This
+	// matches snapshotEntries() exactly so saved layers line up with saved IDs.
 	h.flat.mu.RLock()
-	pos, ok := h.flat.idIndex[id]
+	flatLen := len(h.flat.entries)
+	deadAt := func(slot int) bool {
+		if slot >= flatLen {
+			return true
+		}
+		return h.flat.entries[slot].dead
+	}
+	for slot := 0; slot < maxSlot; slot++ {
+		if deadAt(slot) {
+			hasTomb = true
+			continue
+		}
+		remap[slot] = int32(liveCount)
+		liveCount++
+	}
 	h.flat.mu.RUnlock()
+	if !hasTomb {
+		// No tombstones: return layers verbatim (no copy needed for marshalling).
+		return h.layers, h.entryNode, h.maxLevel, false
+	}
+
+	out := make([][][]int32, len(h.layers))
+	for level := range h.layers {
+		// Determine the highest remapped index present at this level so the level
+		// slice keeps its original (sparse, shorter-for-higher-levels) shape.
+		maxIdx := -1
+		for slot := range h.layers[level] {
+			if ni := remap[slot]; ni >= 0 && int(ni) > maxIdx {
+				maxIdx = int(ni)
+			}
+		}
+		dense := make([][]int32, maxIdx+1)
+		for slot := range h.layers[level] {
+			ni := remap[slot]
+			if ni < 0 {
+				continue // tombstoned source dropped
+			}
+			var nbrs []int32
+			for _, dst := range h.layers[level][slot] {
+				if int(dst) < len(remap) && remap[dst] >= 0 {
+					nbrs = append(nbrs, remap[dst])
+				}
+			}
+			dense[ni] = nbrs
+		}
+		out[level] = dense
+	}
+	en := -1
+	if h.entryNode >= 0 && h.entryNode < len(remap) {
+		en = int(remap[h.entryNode])
+	}
+	ml := h.maxLevel
+	if en < 0 || (ml >= 0 && (ml >= len(out) || en >= len(out[ml]))) {
+		// Entry node was tombstoned or no longer present at maxLevel: pick the
+		// topmost live node as the new entry, matching pickLiveEntry semantics in
+		// the remapped space.
+		en, ml = -1, -1
+		for level := len(out) - 1; level >= 0 && en < 0; level-- {
+			for ni := range out[level] {
+				en = ni
+				ml = level
+				break
+			}
+		}
+		if en < 0 {
+			en, ml = 0, 0
+		}
+	}
+	return out, en, ml, true
+}
+
+// removeLocked tombstones a node: O(out-degree) drop of its own out-edges and the
+// matching inbound back-refs, then frees the slot. The flat row stays in place
+// (skipped at traversal) and is overwritten when the slot is reused (scrubInbound
+// removes the surviving stale inbound edges at that point). Inbound back-refs from
+// other live sources to this slot are deliberately left until reuse-scrub.
+func (h *hnswIndex) removeLocked(id string) bool {
+	node, ok := h.idToNode[id]
 	if !ok {
 		return false
 	}
 
-	nodeIdx := int32(pos)
-
-	// Remove all edges involving this node from all layers.
+	// O(out-degree): drop node's own out-edges and the matching inbound back-refs.
 	for level := range h.layers {
-		if int(nodeIdx) < len(h.layers[level]) {
-			h.layers[level][nodeIdx] = nil
+		if int(node) >= len(h.layers[level]) {
+			continue
 		}
-		for i := range h.layers[level] {
-			h.layers[level][i] = removeFromSlice(h.layers[level][i], nodeIdx)
+		for _, dst := range h.layers[level][node] {
+			h.dropInbound(dst, node)
 		}
+		h.layers[level][node] = nil
+	}
+	if int(node) < len(h.degree) {
+		h.degree[node] = 0
 	}
 
-	// The flat index uses swap-remove: the last entry moves into the removed
-	// slot. We must remap graph references accordingly.
-	h.flat.mu.RLock()
-	lastIdx := len(h.flat.entries) - 1
-	h.flat.mu.RUnlock()
+	h.ensureTombstoneSlot(int(node))
+	h.tombstone[node] = true
+	delete(h.idToNode, id)
+	h.flat.tombstoneAt(int(node))
+	h.freeList = append(h.freeList, node)
 
-	swappedFrom := int32(lastIdx)
-	swappedTo := nodeIdx
-
-	result := h.flat.Remove(id)
-
-	if result && swappedFrom != swappedTo && lastIdx > 0 {
-		for level := range h.layers {
-			if int(swappedFrom) < len(h.layers[level]) {
-				h.ensureLayerSlots(level, int(swappedTo))
-				h.layers[level][swappedTo] = h.layers[level][swappedFrom]
-				h.layers[level][swappedFrom] = nil
-			}
-			for i := range h.layers[level] {
-				for j := range h.layers[level][i] {
-					if h.layers[level][i][j] == swappedFrom {
-						h.layers[level][i][j] = swappedTo
-					}
-				}
-			}
-		}
-		if h.entryNode == int(swappedFrom) {
-			h.entryNode = int(swappedTo)
-		}
-	}
-
-	if h.entryNode == int(nodeIdx) && (swappedFrom == swappedTo || lastIdx == 0) {
-		h.flat.mu.RLock()
-		n := len(h.flat.entries)
-		h.flat.mu.RUnlock()
-		if n == 0 {
-			h.entryNode = -1
+	// Re-pick a live entry if we tombstoned the entry node.
+	if h.entryNode == int(node) {
+		h.entryNode = h.pickLiveEntry()
+		if h.entryNode < 0 {
 			h.maxLevel = -1
-		} else {
-			h.entryNode = 0
 		}
 	}
-
-	return result
+	return true
 }
 
 func removeFromSlice(s []int32, val int32) []int32 {
@@ -621,6 +805,17 @@ func removeFromSlice(s []int32, val int32) []int32 {
 	return out
 }
 
+// removeOneFromSlice removes the first occurrence of val, preserving the rest
+// (including any duplicate occurrences). Used for inbound multiplicity.
+func removeOneFromSlice(s []int32, val int32) []int32 {
+	for i, v := range s {
+		if v == val {
+			return append(s[:i], s[i+1:]...)
+		}
+	}
+	return s
+}
+
 func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []SearchResult {
 	if k <= 0 {
 		return nil
@@ -628,23 +823,28 @@ func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []Sea
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	h.flat.mu.RLock()
-	n := len(h.flat.entries)
-	h.flat.mu.RUnlock()
+	n := h.flat.Len() // live count (tombstones excluded)
 
 	if n == 0 || h.entryNode < 0 {
 		return nil
 	}
 
-	// For very small datasets, fall back to flat scan.
+	// For very small datasets, fall back to flat scan (skips dead rows internally).
 	if n <= h.params.EfSearch {
 		return h.flat.Search(query, k, filters)
 	}
 
 	pq := h.flat.quantizer.PrepareQuery(query)
 
-	// Greedy descent from top level to level 1.
+	// Ensure the entry node is live (it may have been tombstoned).
 	current := h.entryNode
+	if h.isTombstoned(current) {
+		current = h.pickLiveEntry()
+		if current < 0 {
+			return nil
+		}
+	}
+	// Greedy descent from top level to level 1.
 	for level := h.maxLevel; level >= 1; level-- {
 		current = h.greedyClosest(current, pq, level)
 	}
@@ -667,10 +867,13 @@ func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []Sea
 	resultHeap := &searchHeap{}
 	for _, ci := range candidates {
 		idx := int(ci)
-		if idx >= len(h.flat.entries) {
+		if idx >= len(h.flat.entries) || h.isTombstoned(idx) {
 			continue
 		}
 		entry := h.flat.entries[idx]
+		if entry.child {
+			continue
+		}
 		if !matchesFilters(entry.metadata, filters) {
 			continue
 		}

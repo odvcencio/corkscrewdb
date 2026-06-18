@@ -456,3 +456,268 @@ func TestHNSWAddQuantizedBuildsFromCodes(t *testing.T) {
 		t.Fatalf("self-vector not reachable in top-20: %+v", res)
 	}
 }
+
+// nodeSlotLen reports the maximum addressable node slot count (layer-0 length),
+// used to assert the tombstone path does NOT shrink the node array.
+func nodeSlotLen(h *hnswIndex) int {
+	if len(h.layers) == 0 {
+		return 0
+	}
+	return len(h.layers[0])
+}
+
+func TestHNSWDeleteTombstone(t *testing.T) {
+	dim := 32
+	rng := rand.New(rand.NewSource(42))
+	hw := newHNSWIndex(dim, 2, 99, defaultHNSWParams())
+
+	vecs := make([][]float32, 50)
+	for i := range vecs {
+		vecs[i] = randVec(rng, dim)
+		hw.Add(fmt.Sprintf("v%d", i), vecs[i], "", nil, uint64(i+1))
+	}
+	slotsBefore := nodeSlotLen(hw)
+
+	if !hw.Remove("v25") {
+		t.Fatal("Remove(v25) returned false")
+	}
+	if hw.Len() != 49 {
+		t.Fatalf("Len = %d, want 49", hw.Len())
+	}
+	// Slot count must NOT shrink (tombstone, not swap-remove).
+	if got := nodeSlotLen(hw); got != slotsBefore {
+		t.Fatalf("node slot count shrank from %d to %d; expected tombstone (no shrink)", slotsBefore, got)
+	}
+
+	// Deleted ID must never be returned.
+	for q := 0; q < 50; q++ {
+		results := hw.Search(vecs[q], 10, nil)
+		for _, r := range results {
+			if r.ID == "v25" {
+				t.Fatalf("tombstoned v25 returned for query %d", q)
+			}
+		}
+	}
+
+	// A neighbor of the deleted node must still be reachable via its own vector.
+	res := hw.Search(vecs[24], 5, nil)
+	found := false
+	for _, r := range res {
+		if r.ID == "v24" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("neighbor v24 not reachable after deleting v25: %+v", res)
+	}
+}
+
+func TestHNSWReuseNoPhantomEdge(t *testing.T) {
+	dim := 16
+	hw := newHNSWIndex(dim, 4, 99, HNSWParams{M: 8, EfConstruction: 100, EfSearch: 50})
+
+	// Insert a base population so A acquires inbound edges.
+	rng := rand.New(rand.NewSource(7))
+	for i := 0; i < 40; i++ {
+		hw.Add(fmt.Sprintf("base%d", i), randVec(rng, dim), "", nil, uint64(i+1))
+	}
+
+	// Insert node A with a distinctive vector vA.
+	vA := make([]float32, dim)
+	for j := range vA {
+		vA[j] = 0.5
+	}
+	hw.Add("A", vA, "", nil, 1000)
+	slotA, ok := hw.idToNode["A"]
+	if !ok {
+		t.Fatal("A not in idToNode after insert")
+	}
+	// Record A's inbound set (sources holding an out-edge to A).
+	inboundA := append([]int32(nil), hw.inbound[slotA]...)
+
+	// Delete A: tombstone + free slot. Inbound back-refs from sources remain until reuse.
+	if !hw.Remove("A") {
+		t.Fatal("Remove(A) returned false")
+	}
+	// Force the next insert to reuse slotA: freeList must contain exactly slotA.
+	if len(hw.freeList) == 0 || hw.freeList[len(hw.freeList)-1] != slotA {
+		t.Fatalf("freeList does not have slotA on top: %v (slotA=%d)", hw.freeList, slotA)
+	}
+
+	// Insert node B with a DIFFERENT id and a DIFFERENT, far-from-vA vector.
+	vB := make([]float32, dim)
+	for j := range vB {
+		vB[j] = -0.5 // opposite direction from vA
+	}
+	hw.Add("B", vB, "", nil, 2000)
+	if got := hw.idToNode["B"]; got != slotA {
+		t.Fatalf("B did not reuse slotA: B=%d slotA=%d", got, slotA)
+	}
+
+	// (a) The scrub ran: for every old inbound src, slotA must not survive as a
+	//     stale edge UNLESS B's own insertion legitimately created src->slotA.
+	for _, src := range inboundA {
+		// Count how many of src's out-edges point to slotA.
+		points := false
+		for level := range hw.layers {
+			if int(src) < len(hw.layers[level]) {
+				for _, dst := range hw.layers[level][src] {
+					if dst == slotA {
+						points = true
+					}
+				}
+			}
+		}
+		// If src points to slotA, it must be in B's current inbound set (legitimate
+		// rebuild for vB), not a surviving phantom.
+		if points {
+			legit := false
+			for _, in := range hw.inbound[slotA] {
+				if in == src {
+					legit = true
+				}
+			}
+			if !legit {
+				t.Fatalf("phantom edge: src %d -> slotA survived without being in B's inbound", src)
+			}
+		}
+	}
+
+	// (b) Searching for vA must NOT return B via a surviving stale inbound edge.
+	resA := hw.Search(vA, 5, nil)
+	for _, r := range resA {
+		if r.ID == "B" {
+			t.Fatalf("searching for vA returned B (phantom resurrection): %+v", resA)
+		}
+	}
+
+	// (c) Searching for vB returns B.
+	resB := hw.Search(vB, 5, nil)
+	foundB := false
+	for _, r := range resB {
+		if r.ID == "B" {
+			foundB = true
+		}
+	}
+	if !foundB {
+		t.Fatalf("searching for vB did not return B: %+v", resB)
+	}
+}
+
+func TestHNSWSaveLoadAfterDeletes(t *testing.T) {
+	dim := 16
+	hw := newHNSWIndex(dim, 4, 55, HNSWParams{M: 8, EfConstruction: 100, EfSearch: 50})
+	rng := rand.New(rand.NewSource(321))
+	vecs := map[string][]float32{}
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("v%d", i)
+		v := randVec(rng, dim)
+		vecs[id] = v
+		hw.Add(id, v, "", nil, uint64(i+1))
+	}
+	// Delete 10.
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("v%d", i*3)
+		hw.Remove(id)
+		delete(vecs, id)
+	}
+
+	tmp := t.TempDir()
+	path := tmp + "/graph.hnsw"
+	if err := saveHNSWFile(path, hw); err != nil {
+		t.Fatalf("saveHNSWFile: %v", err)
+	}
+
+	// Build a fresh flat index from the live codes, in the SAME order the save
+	// compacted them (snapshotEntries order), to mirror the cache loader.
+	live := hw.flat.snapshotEntries()
+	flat := newIndex(dim, 4, 55)
+	for _, e := range live {
+		flat.addQuantized(e.id, e.qv, e.text, e.metadata, e.version)
+	}
+	loaded, err := loadHNSWFile(path, flat, hw.params)
+	if err != nil {
+		t.Fatalf("loadHNSWFile: %v", err)
+	}
+
+	// Search results from loaded graph must match the in-memory graph.
+	queryRng := rand.New(rand.NewSource(9))
+	for q := 0; q < 20; q++ {
+		query := randVec(queryRng, dim)
+		want := hw.Search(query, 5, nil)
+		got := loaded.Search(query, 5, nil)
+		if len(want) != len(got) {
+			t.Fatalf("query %d: result count mismatch want %d got %d", q, len(want), len(got))
+		}
+		for i := range want {
+			if want[i].ID != got[i].ID {
+				t.Fatalf("query %d pos %d: want %s got %s", q, i, want[i].ID, got[i].ID)
+			}
+		}
+	}
+}
+
+func TestHNSWDeleteReuseStress(t *testing.T) {
+	dim := 16
+	hw := newHNSWIndex(dim, 4, 1234, HNSWParams{M: 8, EfConstruction: 80, EfSearch: 50})
+	rng := rand.New(rand.NewSource(2027))
+	live := map[string]bool{}
+	next := 0
+	for op := 0; op < 3000; op++ {
+		if op%3 == 2 && len(live) > 0 {
+			// delete a random live id
+			var pick string
+			for id := range live {
+				pick = id
+				break
+			}
+			hw.Remove(pick)
+			delete(live, pick)
+		} else {
+			id := fmt.Sprintf("k%d", next)
+			next++
+			hw.Add(id, randVec(rng, dim), "", nil, uint64(op+1))
+			live[id] = true
+		}
+	}
+
+	if hw.Len() != len(live) {
+		t.Fatalf("Len = %d, want live count %d", hw.Len(), len(live))
+	}
+
+	// Invariant: inbound[b] is the exact inverse of out-edges over all slots.
+	wantInbound := make([][]int32, len(hw.inbound))
+	for level := range hw.layers {
+		for node := range hw.layers[level] {
+			for _, dst := range hw.layers[level][node] {
+				for len(wantInbound) <= int(dst) {
+					wantInbound = append(wantInbound, nil)
+				}
+				wantInbound[dst] = append(wantInbound[dst], int32(node))
+			}
+		}
+	}
+	asSet := func(s []int32) map[int32]int {
+		m := map[int32]int{}
+		for _, v := range s {
+			m[v]++
+		}
+		return m
+	}
+	for b := range wantInbound {
+		var got []int32
+		if b < len(hw.inbound) {
+			got = hw.inbound[b]
+		}
+		wm := asSet(wantInbound[b])
+		gm := asSet(got)
+		if len(wm) != len(gm) {
+			t.Fatalf("inbound[%d] set size mismatch: got %v want %v", b, gm, wm)
+		}
+		for k, v := range wm {
+			if gm[k] != v {
+				t.Fatalf("inbound[%d] mismatch for src %d: got %d want %d", b, k, gm[k], v)
+			}
+		}
+	}
+}
