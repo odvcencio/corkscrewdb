@@ -5,3 +5,15 @@
 .DS_Store
 /tmp/
 *_danmuji_test.go
+
+# ANN benchmark datasets (downloaded/converted; never committed) and the bench binary
+/testdata/ann/
+*.hdf5
+*.csb
+/bench
+
+# Private working notes
+.claude/
+docs/blog-outlines/
+docs/plans/
+docs/superpowers/
