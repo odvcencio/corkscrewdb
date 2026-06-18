@@ -39,6 +39,8 @@ type Collection struct {
 	// (cache adoption) or run once after the cache-freshness check (D6).
 	deferHNSWBuild bool
 
+	viewCache *viewLRU // memoizes recent At()/AtTime() view indices (D7)
+
 	mu        sync.RWMutex
 	index     indexer
 	history   map[string][]Version
@@ -521,50 +523,61 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		return view
 	}
 	view.dim = c.dim
-	if c.dim > 0 {
-		view.index = newIndex(c.dim, c.bitWidth, c.seed)
-	}
-	for id, versions := range c.history {
-		var visible []Version
-		var latest Version
-		var ok bool
-		for _, version := range versions {
-			if version.LamportClock > maxLamport {
-				continue
-			}
-			visible = append(visible, cloneVersion(version))
-			if !ok || latest.LamportClock < version.LamportClock || (latest.LamportClock == version.LamportClock && latest.ActorID < version.ActorID) {
-				latest = version
-				ok = true
-			}
+
+	// Try the view-index cache. Historical view indices are immutable; the live
+	// head is invalidated on write (D7). On hit we reuse the shared *index and only
+	// rebuild the lightweight history/sparse scaffolding the wrapper needs.
+	var flat *index
+	cached := false
+	if c.viewCache != nil {
+		if ve, ok := c.viewCache.get(maxLamport); ok {
+			flat = ve.index
+			view.dim = ve.dim
+			cached = true
 		}
-		if len(visible) == 0 {
-			continue
+	}
+	if !cached && c.dim > 0 {
+		flat = newIndex(c.dim, c.bitWidth, c.seed)
+	}
+
+	for id, versions := range c.history {
+		// versions is sorted ascending by (LamportClock, ActorID); binary-search the
+		// last version with LamportClock <= maxLamport (the cutoff has the max logical
+		// counter so same-ms later writes ARE included — preserves AtTime semantics).
+		hi := sort.Search(len(versions), func(i int) bool {
+			return versions[i].LamportClock > maxLamport
+		})
+		if hi == 0 {
+			continue // no version visible at this clock
+		}
+		latest := versions[hi-1] // greatest (LamportClock,ActorID) <= maxLamport
+
+		visible := make([]Version, hi)
+		for i := 0; i < hi; i++ {
+			visible[i] = cloneVersion(versions[i])
 		}
 		view.history[id] = visible
+
 		// §3.2 (view): populate the sparse active set OUTSIDE the index guard.
-		// latest is the in-history stored version whose Sparse is already
-		// deep-cloned at store time, so aliasing its pointer is safe (read-only).
-		if ok && !latest.Tombstone && latest.Sparse != nil {
+		if !latest.Tombstone && latest.Sparse != nil {
 			view.sparseSet[id] = latest.Sparse
 		}
-		if ok && !latest.Tombstone && view.index != nil {
-			if flat, ok := view.index.(*index); ok {
-				flat.removePackedChildren(id)
-				view.index.Remove(id)
-			}
+		// Index population only on a cache miss (a cache hit reuses the built index).
+		if !cached && !latest.Tombstone && flat != nil {
 			if latest.Quantized != nil {
-				if flat, ok := view.index.(*index); ok {
-					flat.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
-				}
+				flat.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
 			} else if len(latest.Children) > 0 {
-				if flat, ok := view.index.(*index); ok {
-					for _, child := range latest.Children {
-						flat.addPackedChild(id, latest, child)
-					}
+				for _, child := range latest.Children {
+					flat.addPackedChild(id, latest, child)
 				}
 			}
 		}
+	}
+	if flat != nil {
+		view.index = flat
+	}
+	if !cached && flat != nil && c.viewCache != nil {
+		c.viewCache.put(maxLamport, flat, view.dim)
 	}
 	return view
 }
@@ -918,6 +931,11 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	c.clock.Witness(version.LamportClock)
 	if markDirty {
 		c.dirty = true
+		// Live write: drop any cached view at/above this clock (the live head and
+		// any future-clock view). Historical views (clock < this) stay valid (D7).
+		if c.viewCache != nil {
+			c.viewCache.invalidateHead(version.LamportClock)
+		}
 	}
 	return createdDim, nil
 }

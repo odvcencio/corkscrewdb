@@ -1050,3 +1050,148 @@ func TestScorerPathMatchesInline(t *testing.T) {
 		}
 	}
 }
+
+func TestAtBinarySearchAndCache(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	dim := 4
+	coll := db.Collection("vt", WithBitWidth(2), WithQuantizerSeed(77))
+	rng := rand.New(rand.NewSource(2026))
+	var clocks []uint64
+	// Multiple versions per id, including repeated rewrites (advancing clocks).
+	for round := 0; round < 4; round++ {
+		for i := 0; i < 8; i++ {
+			v := make([]float32, dim)
+			for j := range v {
+				v[j] = rng.Float32()*2 - 1
+			}
+			if err := coll.PutVector("v"+strconv.Itoa(i), v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		coll.mu.RLock()
+		clocks = append(clocks, coll.clock.Current())
+		coll.mu.RUnlock()
+	}
+
+	// Reference: build the view via a clean (cache-bypassed) collection state by
+	// clearing the cache before each call, compared to the cached path.
+	query := []float32{1, 0, 0, 0}
+	for _, target := range clocks {
+		// Cache-bypassed reference.
+		coll.mu.Lock()
+		coll.viewCache = newViewLRU(viewCacheSize)
+		coll.mu.Unlock()
+		refView := coll.At(target)
+		refRes, err := refView.SearchVector(query, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refHist, _ := refView.History("v0")
+
+		// Cached path (fresh cache, then a repeat to force a hit).
+		coll.mu.Lock()
+		coll.viewCache = newViewLRU(viewCacheSize)
+		coll.mu.Unlock()
+		_ = coll.At(target) // populate cache
+		cachedView := coll.At(target)
+		cachedRes, err := cachedView.SearchVector(query, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cachedHist, _ := cachedView.History("v0")
+
+		if len(refRes) != len(cachedRes) {
+			t.Fatalf("clock %d: result count ref=%d cached=%d", target, len(refRes), len(cachedRes))
+		}
+		for i := range refRes {
+			if refRes[i].ID != cachedRes[i].ID || refRes[i].Score != cachedRes[i].Score {
+				t.Fatalf("clock %d pos %d: ref=%+v cached=%+v", target, i, refRes[i], cachedRes[i])
+			}
+		}
+		if len(refHist) != len(cachedHist) {
+			t.Fatalf("clock %d: history len ref=%d cached=%d", target, len(refHist), len(cachedHist))
+		}
+
+		// The second At(target) must be a cache hit.
+		coll.mu.RLock()
+		hits := coll.viewCache.hits
+		coll.mu.RUnlock()
+		if hits == 0 {
+			t.Fatalf("clock %d: repeated At was not served from cache (hits=0)", target)
+		}
+	}
+}
+
+func TestAtCacheInvalidation(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	coll := db.Collection("vt", WithBitWidth(2), WithQuantizerSeed(88))
+	// Distinct orthogonal directions (one nonzero axis each) so quantized scores
+	// do not tie — a query along an axis uniquely identifies its vector.
+	dim := 5
+	for i := 0; i < dim; i++ {
+		v := make([]float32, dim)
+		v[i] = 1
+		if err := coll.PutVector("v"+strconv.Itoa(i), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coll.mu.RLock()
+	oldClock := coll.clock.Current()
+	coll.mu.RUnlock()
+
+	// Cache the live head and a strictly-historical view.
+	_ = coll.At(oldClock)
+	histClock := oldClock - 1
+	_ = coll.At(histClock)
+
+	// Rewrite v0 to a NEW distinct direction (axis 4, previously v4's).
+	newV0 := make([]float32, dim)
+	newV0[dim-1] = 5
+	if err := coll.PutVector("v0", newV0); err != nil {
+		t.Fatal(err)
+	}
+	coll.mu.RLock()
+	newClock := coll.clock.Current()
+	coll.mu.RUnlock()
+
+	// The new live-head At reflects the write: a query along v0's OLD axis (0) must
+	// no longer return v0 as top, while v0's history grew.
+	oldAxisQuery := make([]float32, dim)
+	oldAxisQuery[0] = 1
+	res, err := coll.At(newClock).SearchVector(oldAxisQuery, dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) == 0 || res[0].ID == "v0" {
+		t.Fatalf("live-head At after rewrite: v0 still tops its OLD axis: %+v", res)
+	}
+	hist, err := coll.At(newClock).History("v0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 2 {
+		t.Fatalf("v0 history at new head = %d versions, want 2 (original + rewrite)", len(hist))
+	}
+
+	// The strictly-historical view (clock < write) is unchanged and STILL cached.
+	coll.mu.RLock()
+	hitsBefore := coll.viewCache.hits
+	coll.mu.RUnlock()
+	_ = coll.At(histClock)
+	coll.mu.RLock()
+	hitsAfter := coll.viewCache.hits
+	coll.mu.RUnlock()
+	if hitsAfter == hitsBefore {
+		t.Fatalf("historical view At(%d) should have been a cache hit after the write", histClock)
+	}
+}
