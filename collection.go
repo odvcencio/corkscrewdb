@@ -32,14 +32,15 @@ type Collection struct {
 	indexType       IndexType
 	hnsw            HNSWParams
 
-	mu      sync.RWMutex
-	index   indexer
-	history map[string][]Version
-	clock   *HLC
-	wal     *walpkg.Manager
-	dirty   bool
-	err     error
-	dim     int
+	mu        sync.RWMutex
+	index     indexer
+	history   map[string][]Version
+	sparseSet map[string]*SparseVector
+	clock     *HLC
+	wal       *walpkg.Manager
+	dirty     bool
+	err       error
+	dim       int
 }
 
 // CollectionView is a point-in-time read-only collection snapshot.
@@ -776,6 +777,11 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	c.history[id] = versions
 	latest := versions[len(versions)-1]
 
+	// §3.2: clear any prior sparse entry UNCONDITIONALLY, outside the
+	// `c.index != nil` guard, so a tombstone or sparse-less replacement always
+	// drops the stale sparse channel even when the dense index is absent.
+	delete(c.sparseSet, id)
+
 	if c.index != nil {
 		c.index.Remove(id)
 		if flat, ok := c.index.(*index); ok {
@@ -814,6 +820,15 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 			c.dim = c.index.Dim()
 			createdDim = true
 		}
+	}
+	// Maintain the sparse active set in lockstep with the dense index. The
+	// stored version's Sparse pointer is deep-cloned at store time
+	// (cloneVersion), so aliasing it here is safe.
+	if !latest.Tombstone && latest.Sparse != nil {
+		if c.sparseSet == nil {
+			c.sparseSet = make(map[string]*SparseVector)
+		}
+		c.sparseSet[id] = latest.Sparse
 	}
 	c.clock.Witness(version.LamportClock)
 	if markDirty {

@@ -644,6 +644,7 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		indexType:       indexType,
 		hnsw:            hnsw,
 		history:         make(map[string][]Version),
+		sparseSet:       make(map[string]*SparseVector),
 		clock:           newHLC(db.manifest.ActorID),
 		wal:             manager,
 		dim:             meta.Dim,
