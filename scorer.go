@@ -36,6 +36,17 @@ func (s *defaultScorer) SetCorpus(corpus []turboquant.IPQuantized) {
 	s.corpus = corpus
 }
 
+// pushHit inserts (idx, score) into a bounded top-k min-heap (worst on root).
+func pushHit(h *scoredHitHeap, k int, idx int, score float32) {
+	hit := ScoredHit{Index: idx, Score: score}
+	if h.Len() < k {
+		heap.Push(h, hit)
+	} else if score > (*h)[0].Score {
+		(*h)[0] = hit
+		heap.Fix(h, 0)
+	}
+}
+
 func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept func(i int) bool) []ScoredHit {
 	if k <= 0 {
 		return nil
@@ -46,13 +57,7 @@ func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept fun
 			continue
 		}
 		score := s.quantizer.InnerProductPrepared(s.corpus[i], pq)
-		hit := ScoredHit{Index: i, Score: score}
-		if h.Len() < k {
-			heap.Push(h, hit)
-		} else if score > (*h)[0].Score {
-			(*h)[0] = hit
-			heap.Fix(h, 0)
-		}
+		pushHit(h, k, i, score)
 	}
 	out := make([]ScoredHit, h.Len())
 	copy(out, *h)
@@ -60,11 +65,35 @@ func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept fun
 	return out
 }
 
+// ScoreTopKMulti scores all queries in a single corpus pass: one batched
+// InnerProductPreparedBatchTo per row produces every query's score, and per-query
+// heaps are updated from that. accept is evaluated once per row (§7.4). The safe
+// (non-Trusted) batch variant byte-matches InnerProductPrepared, so each per-query
+// result is identical to an independent ScoreTopK (the equivalence lock).
 func (s *defaultScorer) ScoreTopKMulti(pqs []turboquant.PreparedQuery, k int, accept func(i int) bool) [][]ScoredHit {
-	// Phase 1: simple per-query loop (batched 1-4 kernel wiring deferred to Perf).
+	if k <= 0 || len(pqs) == 0 {
+		return make([][]ScoredHit, len(pqs))
+	}
+	heaps := make([]*scoredHitHeap, len(pqs))
+	for qi := range heaps {
+		heaps[qi] = &scoredHitHeap{}
+	}
+	dst := make([]float32, len(pqs)) // reused per row
+	for i := range s.corpus {
+		if accept != nil && !accept(i) { // §7.4 pushdown, once per row
+			continue
+		}
+		s.quantizer.InnerProductPreparedBatchTo(dst, s.corpus[i], pqs)
+		for qi := range pqs {
+			pushHit(heaps[qi], k, i, dst[qi])
+		}
+	}
 	out := make([][]ScoredHit, len(pqs))
 	for qi := range pqs {
-		out[qi] = s.ScoreTopK(pqs[qi], k, accept)
+		res := make([]ScoredHit, heaps[qi].Len())
+		copy(res, *heaps[qi])
+		sortScoredHits(res)
+		out[qi] = res
 	}
 	return out
 }
