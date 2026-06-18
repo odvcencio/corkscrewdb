@@ -97,6 +97,25 @@ type DB struct {
 	peerClients map[string]remoteClient
 	streamer    *replica.Streamer
 	closed      bool
+
+	// rebalance holds the in-memory 2PC rebalance state (epoch / phase /
+	// coordinator / pending layout), guarded by db.mu and mirrored to the
+	// manifest on FROZEN/PREPARED transitions for crash recovery.
+	rebalance rebalanceState
+
+	// rebalanceHooks is a test-only injectable set of function seams used to
+	// deterministically interleave the 2PC phases (freeze barrier, gainer pull,
+	// durable decide) without time.Sleep. Nil in production.
+	rebalanceHooks *rebalanceHooks
+}
+
+// rebalanceHooks are test-only seams fired during OrchestrateRebalance so the
+// freeze-barrier proof, PREPARE-race, and coordinator-crash tests are
+// deterministic under -race. All fields are nil in production.
+type rebalanceHooks struct {
+	afterFreezeBarrier func(epoch uint64)
+	beforePull         func(target string)
+	afterDurableDecide func(epoch uint64)
 }
 
 type manifest struct {
@@ -111,6 +130,16 @@ type manifest struct {
 	Collections     map[string]collectionMeta `json:"collections"`
 	CreatedAt       time.Time                 `json:"created_at"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
+
+	// Rebalance 2PC durable state (§5.2, §5.3). RebalancePhase is "" / "IDLE"
+	// when no rebalance is pending. RebalanceCoordinator is the coordinator's
+	// serve address, persisted so a recovering PREPARED participant can dial it
+	// directly even when the coordinator gave away all of its shards.
+	RebalanceEpoch         uint64            `json:"rebalance_epoch,omitempty"`           // committed floor (linearization point)
+	RebalanceInFlightEpoch uint64            `json:"rebalance_in_flight_epoch,omitempty"` // in-flight epoch while non-IDLE
+	RebalanceCoordinator   string            `json:"rebalance_coordinator,omitempty"`
+	PendingShards          []ShardAssignment `json:"pending_shards,omitempty"`
+	RebalancePhase         string            `json:"rebalance_phase,omitempty"`
 }
 
 type embeddingConfig struct {
@@ -173,6 +202,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		peerClients:    make(map[string]remoteClient),
 		streamer:       replica.NewStreamer(),
 	}
+	db.rebalance = rebalanceStateFromManifest(manifestData)
 	if err := db.saveManifest(); err != nil {
 		return nil, err
 	}

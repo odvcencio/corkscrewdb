@@ -85,6 +85,9 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		}
 		return client.Put(c.name, id, entry, true)
 	}
+	if c.db != nil && c.db.isFrozenKey(c.name, id) {
+		return ErrRebalanceInProgress
+	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
 	}
@@ -210,6 +213,9 @@ func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVector
 			return err
 		}
 		return client.PutVector(c.name, id, vector, cfg.text, cfg.metadata, true)
+	}
+	if c.db != nil && c.db.isFrozenKey(c.name, id) {
+		return ErrRebalanceInProgress
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -473,6 +479,9 @@ func (c *Collection) delete(id string, federated bool) error {
 			return err
 		}
 		return client.Delete(c.name, id, true)
+	}
+	if c.db != nil && c.db.isFrozenKey(c.name, id) {
+		return ErrRebalanceInProgress
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
