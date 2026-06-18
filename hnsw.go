@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"math"
 	"math/rand"
+	"sort"
 	"sync"
 
 	"m31labs.dev/turboquant"
@@ -22,6 +23,8 @@ type hnswIndex struct {
 	entryNode int
 	params    HNSWParams
 	rng       *rand.Rand
+	degree    []int32 // layer-0 degree per node (LEANN hub detection)
+	hubFactor float32 // a node is a hub when degree >= hubFactor*M
 }
 
 var _ indexer = (*hnswIndex)(nil)
@@ -43,6 +46,24 @@ func newHNSWIndex(dim, bitWidth int, seed int64, params HNSWParams) *hnswIndex {
 		entryNode: -1,
 		params:    params,
 		rng:       rand.New(rand.NewSource(seed)),
+		hubFactor: 1.5,
+	}
+}
+
+// ensureDegreeSlot grows the degree slice so that degree[nodeIdx] is addressable.
+func (h *hnswIndex) ensureDegreeSlot(nodeIdx int) {
+	for len(h.degree) <= nodeIdx {
+		h.degree = append(h.degree, 0)
+	}
+}
+
+// recomputeDegree resets a node's layer-0 degree from its current neighbor list.
+func (h *hnswIndex) recomputeDegree(nodeIdx int) {
+	h.ensureDegreeSlot(nodeIdx)
+	if len(h.layers) > 0 && nodeIdx < len(h.layers[0]) {
+		h.degree[nodeIdx] = int32(len(h.layers[0][nodeIdx]))
+	} else {
+		h.degree[nodeIdx] = 0
 	}
 }
 
@@ -164,8 +185,8 @@ func (h *hnswIndex) insertNode(nodeIdx int, queryVec []float32) {
 		topInsert = h.maxLevel
 	}
 	for level := topInsert; level >= 0; level-- {
-		neighbors := h.searchLayer(current, pq, h.params.EfConstruction, level)
-		selected := h.selectNeighbors(neighbors, h.maxNeighbors(level))
+		cands := h.searchLayerCandidates(current, pq, h.params.EfConstruction, level)
+		selected := h.selectNeighborsHeuristic(cands, h.maxNeighbors(level))
 
 		h.ensureLayerSlots(level, nodeIdx)
 		h.layers[level][nodeIdx] = selected
@@ -177,12 +198,18 @@ func (h *hnswIndex) insertNode(nodeIdx int, queryVec []float32) {
 			h.ensureLayerSlots(level, ni)
 			h.layers[level][ni] = append(h.layers[level][ni], int32(nodeIdx))
 			if len(h.layers[level][ni]) > maxN {
-				h.layers[level][ni] = h.pruneNeighborsByNode(ni, h.layers[level][ni], maxN)
+				h.layers[level][ni] = h.pruneNeighborsHeuristic(ni, h.layers[level][ni], maxN)
+			}
+			if level == 0 {
+				h.recomputeDegree(ni)
 			}
 		}
+		if level == 0 {
+			h.recomputeDegree(nodeIdx)
+		}
 
-		if len(neighbors) > 0 {
-			current = int(neighbors[0])
+		if len(cands) > 0 {
+			current = int(cands[0].idx)
 		}
 	}
 
@@ -299,31 +326,217 @@ func (h *hnswIndex) searchLayer(entry int, pq turboquant.PreparedQuery, ef int, 
 	return out
 }
 
-// selectNeighbors picks the top-maxN candidates (already sorted by descending score).
-func (h *hnswIndex) selectNeighbors(candidates []int32, maxN int) []int32 {
-	if len(candidates) <= maxN {
-		result := make([]int32, len(candidates))
-		copy(result, candidates)
-		return result
+// searchLayerCandidates is searchLayer that returns (idx, score) candidates sorted
+// by descending similarity, for use by the RNG selection heuristic.
+func (h *hnswIndex) searchLayerCandidates(entry int, pq turboquant.PreparedQuery, ef int, level int) []hnswCandidate {
+	if level >= len(h.layers) {
+		return nil
 	}
-	result := make([]int32, maxN)
-	copy(result, candidates[:maxN])
-	return result
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+
+	if entry >= len(h.flat.entries) {
+		return nil
+	}
+
+	visited := make(map[int32]bool)
+	visited[int32(entry)] = true
+
+	entryScore := h.flat.quantizer.InnerProductPrepared(h.flat.entries[entry].qv, pq)
+
+	candidates := &hnswMaxHeap{}
+	heap.Push(candidates, hnswCandidate{int32(entry), entryScore})
+
+	results := &hnswMinHeap{}
+	heap.Push(results, hnswCandidate{int32(entry), entryScore})
+
+	for candidates.Len() > 0 {
+		c := heap.Pop(candidates).(hnswCandidate)
+		if results.Len() >= ef && c.score < (*results)[0].score {
+			break
+		}
+
+		ni := int(c.idx)
+		if ni >= len(h.layers[level]) {
+			continue
+		}
+		for _, neighbor := range h.layers[level][ni] {
+			if visited[neighbor] {
+				continue
+			}
+			visited[neighbor] = true
+
+			n := int(neighbor)
+			if n >= len(h.flat.entries) {
+				continue
+			}
+			score := h.flat.quantizer.InnerProductPrepared(h.flat.entries[n].qv, pq)
+
+			if results.Len() < ef || score > (*results)[0].score {
+				heap.Push(candidates, hnswCandidate{neighbor, score})
+				heap.Push(results, hnswCandidate{neighbor, score})
+				if results.Len() > ef {
+					heap.Pop(results)
+				}
+			}
+		}
+	}
+
+	out := make([]hnswCandidate, results.Len())
+	for i := len(out) - 1; i >= 0; i-- {
+		out[i] = heap.Pop(results).(hnswCandidate)
+	}
+	return out
 }
 
-// pruneNeighborsByNode trims a neighbor list that has exceeded maxN back
-// to maxN entries. We keep the most recent maxN connections because newer
-// connections tend to link to newer parts of the graph, preserving global
-// connectivity as the graph grows.
-func (h *hnswIndex) pruneNeighborsByNode(nodeIdx int, neighbors []int32, maxN int) []int32 {
+// selectNeighborsHeuristic implements Malkov–Yashunin Algorithm 4: relative-
+// neighborhood-graph pruning over candidates already sorted by descending sim
+// to the inserted node q. A candidate c is dropped when some already-kept r is
+// closer to c than q is to c (r "covers" c), keeping diverse/long-range edges.
+// extendCandidates backfills from the discarded set to reach m so a node is never
+// less connected than the old top-M for the same candidate set. Distances are
+// code-only via InnerProductPrepared (no raw store).
+//
+// The selector reads h.flat.entries; callers do NOT hold h.flat.mu, so it takes
+// the read lock internally.
+func (h *hnswIndex) selectNeighborsHeuristic(candidates []hnswCandidate, m int) []int32 {
+	if len(candidates) <= m {
+		out := make([]int32, len(candidates))
+		for i, c := range candidates {
+			out[i] = c.idx
+		}
+		return out
+	}
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+
+	type kept struct {
+		idx int32
+		pq  turboquant.PreparedQuery
+	}
+	keptList := make([]kept, 0, m)
+	discarded := make([]int32, 0, len(candidates))
+	queryCache := make(map[int32]turboquant.PreparedQuery, m)
+	prepFor := func(idx int32) turboquant.PreparedQuery {
+		if pq, ok := queryCache[idx]; ok {
+			return pq
+		}
+		approx := h.flat.quantizer.Dequantize(h.flat.entries[int(idx)].qv)
+		pq := h.flat.quantizer.PrepareQuery(approx)
+		queryCache[idx] = pq
+		return pq
+	}
+	for _, c := range candidates {
+		if len(keptList) >= m {
+			discarded = append(discarded, c.idx)
+			continue
+		}
+		if int(c.idx) >= len(h.flat.entries) {
+			continue
+		}
+		keep := true
+		for _, r := range keptList {
+			// sim(c, r): score c's codes against r's prepared query.
+			simCR := h.flat.quantizer.InnerProductPrepared(h.flat.entries[int(c.idx)].qv, r.pq)
+			if simCR > c.score { // r is closer to c than q is to c → c is redundant
+				keep = false
+				break
+			}
+		}
+		if keep {
+			keptList = append(keptList, kept{idx: c.idx, pq: prepFor(c.idx)})
+		} else {
+			discarded = append(discarded, c.idx)
+		}
+	}
+	// extendCandidates: backfill from discarded (closest-first order preserved) to m.
+	for _, idx := range discarded {
+		if len(keptList) >= m {
+			break
+		}
+		keptList = append(keptList, kept{idx: idx})
+	}
+	out := make([]int32, len(keptList))
+	for i, k := range keptList {
+		out[i] = k.idx
+	}
+	return out
+}
+
+// pruneNeighborsHeuristic re-prunes an overflowing layer-0 (or any-layer) neighbor
+// list of nodeIdx back to maxN using the RNG heuristic against nodeIdx as the query,
+// with LEANN hub protection: an edge to a hub neighbor is exempt from the RNG
+// domination test and only dropped if the list still exceeds maxN after all non-hub
+// edges are considered. Callers do NOT hold h.flat.mu.
+func (h *hnswIndex) pruneNeighborsHeuristic(nodeIdx int, neighbors []int32, maxN int) []int32 {
 	if len(neighbors) <= maxN {
 		return neighbors
 	}
-	// Keep the last maxN entries (the most recent connections).
-	start := len(neighbors) - maxN
-	result := make([]int32, maxN)
-	copy(result, neighbors[start:])
-	return result
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+	if nodeIdx >= len(h.flat.entries) {
+		return neighbors
+	}
+	approx := h.flat.quantizer.Dequantize(h.flat.entries[nodeIdx].qv)
+	pqNode := h.flat.quantizer.PrepareQuery(approx)
+	// Score each neighbor vs nodeIdx, sort descending (closest first).
+	cands := make([]hnswCandidate, 0, len(neighbors))
+	for _, ni := range neighbors {
+		if int(ni) >= len(h.flat.entries) {
+			continue
+		}
+		s := h.flat.quantizer.InnerProductPrepared(h.flat.entries[int(ni)].qv, pqNode)
+		cands = append(cands, hnswCandidate{idx: ni, score: s})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score > cands[j].score
+		}
+		return cands[i].idx < cands[j].idx // deterministic tie-break
+	})
+	isHub := func(idx int32) bool {
+		return int(idx) < len(h.degree) && float32(h.degree[idx]) >= h.hubFactor*float32(h.params.M)
+	}
+	type kept struct {
+		idx int32
+		pq  turboquant.PreparedQuery
+	}
+	keptList := make([]kept, 0, maxN)
+	queryCache := make(map[int32]turboquant.PreparedQuery, maxN)
+	prepFor := func(idx int32) turboquant.PreparedQuery {
+		if pq, ok := queryCache[idx]; ok {
+			return pq
+		}
+		a := h.flat.quantizer.Dequantize(h.flat.entries[int(idx)].qv)
+		pq := h.flat.quantizer.PrepareQuery(a)
+		queryCache[idx] = pq
+		return pq
+	}
+	for _, c := range cands {
+		if len(keptList) >= maxN {
+			break
+		}
+		if isHub(c.idx) { // hub edges exempt from RNG domination
+			keptList = append(keptList, kept{idx: c.idx, pq: prepFor(c.idx)})
+			continue
+		}
+		keep := true
+		for _, r := range keptList {
+			simCR := h.flat.quantizer.InnerProductPrepared(h.flat.entries[int(c.idx)].qv, r.pq)
+			if simCR > c.score {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			keptList = append(keptList, kept{idx: c.idx, pq: prepFor(c.idx)})
+		}
+	}
+	out := make([]int32, len(keptList))
+	for i, k := range keptList {
+		out[i] = k.idx
+	}
+	return out
 }
 
 func (h *hnswIndex) Remove(id string) bool {
