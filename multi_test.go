@@ -220,8 +220,8 @@ func TestSearchMultiRemoteUnsupported(t *testing.T) {
 	}
 	defer db.Close()
 	coll := db.Collection("docs", WithBitWidth(2), WithSparse())
-	if _, err := coll.SearchMulti(MultiQuery{Dense: []float32{1, 0}}, 1); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("federated SearchMulti err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if _, err := coll.SearchMulti(MultiQuery{Dense: []float32{1, 0}}, 1); !errors.Is(err, errMultiVectorRemoteUnsupported) {
+		t.Fatalf("federated SearchMulti err = %v, want errMultiVectorRemoteUnsupported", err)
 	}
 }
 

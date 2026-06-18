@@ -3,7 +3,6 @@ package corkscrewdb
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"math"
 	"math/rand"
 	"os"
@@ -516,7 +515,7 @@ func TestPackedParentMultiVectorRejectsUnsupportedSurfacesAndInvalidInput(t *tes
 	}
 }
 
-func TestWithoutRawStoreHNSWNowWorksAndReplicationExportDisabled(t *testing.T) {
+func TestWithoutRawStoreHNSWWorksAndReplicationExportCarriesCodes(t *testing.T) {
 	db, err := Open(t.TempDir(), WithProvider(&mockProvider{dim: 4}))
 	if err != nil {
 		t.Fatal(err)
@@ -534,17 +533,35 @@ func TestWithoutRawStoreHNSWNowWorksAndReplicationExportDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &transportServer{db: db}
-	// Replication export of a WithoutRawStore collection is disabled pending Distribution.
-	if _, err := server.pullEntries(RPCPullEntriesRequest{Collection: "vecs"}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("pullEntries err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	// Replication export of a WithoutRawStore collection streams codes with no
+	// raw hash (the codes alone are authoritative for quantized-only).
+	pulled, err := server.pullEntries(RPCPullEntriesRequest{Collection: "vecs", MaxEntries: 100})
+	if err != nil {
+		t.Fatalf("pullEntries err = %v", err)
+	}
+	if len(pulled.Entries) != 1 || pulled.Entries[0].Quantized == nil {
+		t.Fatalf("pulled entries = %+v, want one entry carrying codes", pulled.Entries)
+	}
+	if len(pulled.Entries[0].RawHash) != 0 {
+		t.Fatalf("WithoutRawStore pulled entry carried a raw hash: %x", pulled.Entries[0].RawHash)
 	}
 	var snapResp RPCPullSnapshotResponse
-	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "vecs"}, &snapResp); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("PullSnapshot err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "vecs"}, &snapResp); err != nil {
+		t.Fatalf("PullSnapshot err = %v", err)
+	}
+	if snapResp.RawStore {
+		t.Fatal("WithoutRawStore snapshot RawStore flag = true, want false")
+	}
+	if len(snapResp.Records) != 1 || snapResp.Records[0].Versions[0].Quantized == nil {
+		t.Fatalf("snapshot records = %+v, want codes", snapResp.Records)
 	}
 }
 
-func TestRemotePathsDisabledPendingDistribution(t *testing.T) {
+// TestFederatedWriteFansOutToUnreachableOwnerErrors verifies the un-gated
+// federated write path: a write to a remote-owned key is fanned out to the
+// owner, and when the owner is unreachable the fan-out surfaces a transport
+// error (it does NOT silently apply locally or return a stale gate sentinel).
+func TestFederatedWriteFansOutToUnreachableOwnerErrors(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "gated.csdb"), WithProvider(nil),
 		WithShards(twoNodeShardLayout(LocalShardOwner, "127.0.0.1:1")...))
 	if err != nil {
@@ -554,18 +571,25 @@ func TestRemotePathsDisabledPendingDistribution(t *testing.T) {
 
 	_, remoteID := pickPeerOwnedIDs(t, db, "vecs", db.localMemberID(), "127.0.0.1:1")
 	coll := db.Collection("vecs")
-	if err := coll.PutVector(remoteID, []float32{1, 0, 0, 0}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("federated PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := coll.PutVector(remoteID, []float32{1, 0, 0, 0}); err == nil {
+		t.Fatal("federated PutVector to unreachable owner returned nil, want transport error")
+	}
+
+	// The write must NOT have landed locally on the non-owner.
+	history, err := coll.historyFor(remoteID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("federated write to remote owner landed locally: %+v", history)
 	}
 }
 
-// TestDefaultCollectionReplicationDisabledPendingDistribution asserts that the
-// multi-node server paths return errRemoteUnsupportedPendingDistribution for a
-// DEFAULT (raw-store-enabled) collection, not just for WithoutRawStore()
-// collections. This guards against the silent data-loss bug where the
-// collectionUsesQuantizedOnly gate only fired for quantized-only collections
-// and let default collections fall through to lossy (Embedding: nil) streams.
-func TestDefaultCollectionReplicationDisabledPendingDistribution(t *testing.T) {
+// TestDefaultCollectionServerPathsCarryCodes asserts the un-gated multi-node
+// server paths serve real code-carrying data for a DEFAULT (raw-store-enabled)
+// collection: pull/snapshot stream codes (never inline raw), and the write
+// paths apply locally on this single (non-federating) node.
+func TestDefaultCollectionServerPathsCarryCodes(t *testing.T) {
 	db, err := Open(t.TempDir(), WithProvider(&mockProvider{dim: 4}))
 	if err != nil {
 		t.Fatal(err)
@@ -580,30 +604,46 @@ func TestDefaultCollectionReplicationDisabledPendingDistribution(t *testing.T) {
 
 	server := &transportServer{db: db}
 
-	// pullEntries must return the sentinel, not a lossy (Embedding: nil) stream.
-	if _, err := server.pullEntries(RPCPullEntriesRequest{Collection: "docs"}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("default-coll pullEntries err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	// pullEntries streams the WAL entry carrying codes (never inline raw).
+	pulled, err := server.pullEntries(RPCPullEntriesRequest{Collection: "docs", MaxEntries: 100})
+	if err != nil {
+		t.Fatalf("default-coll pullEntries err = %v", err)
+	}
+	if len(pulled.Entries) != 1 || pulled.Entries[0].Quantized == nil {
+		t.Fatalf("pulled entries = %+v, want one entry carrying codes", pulled.Entries)
+	}
+	if len(pulled.Entries[0].RawHash) != 32 {
+		t.Fatalf("pulled entry RawHash len = %d, want 32 (raw-store collection)", len(pulled.Entries[0].RawHash))
 	}
 
-	// PullSnapshot must return the sentinel, not a vectorless snapshot.
+	// PullSnapshot emits versions carrying codes + raw hash, RawStore flag set.
 	var snapResp RPCPullSnapshotResponse
-	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "docs"}, &snapResp); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("default-coll PullSnapshot err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "docs"}, &snapResp); err != nil {
+		t.Fatalf("default-coll PullSnapshot err = %v", err)
+	}
+	if !snapResp.RawStore {
+		t.Fatal("snapshot RawStore flag = false, want true")
+	}
+	if len(snapResp.Records) != 1 || len(snapResp.Records[0].Versions) != 1 || snapResp.Records[0].Versions[0].Quantized == nil {
+		t.Fatalf("snapshot records = %+v, want one version carrying codes", snapResp.Records)
 	}
 
-	// PutVector (write path) must return the sentinel.
-	if err := server.PutVector(RPCPutVectorRequest{Collection: "docs", ID: "v2", Vector: []float32{0, 1, 0, 0}}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("default-coll PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	// Write paths apply locally (single node, not federating).
+	if err := server.PutVector(RPCPutVectorRequest{Collection: "docs", ID: "v2", Vector: []float32{0, 1, 0, 0}}, &RPCEmpty{}); err != nil {
+		t.Fatalf("default-coll PutVector err = %v", err)
 	}
-
-	// Put (text-entry write path) must return the sentinel.
-	if err := server.Put(RPCPutRequest{Collection: "docs", ID: "v3", Entry: Entry{Text: "hello"}}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("default-coll Put err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := server.Put(RPCPutRequest{Collection: "docs", ID: "v3", Entry: Entry{Text: "hello"}}, &RPCEmpty{}); err != nil {
+		t.Fatalf("default-coll Put err = %v", err)
 	}
-
-	// Delete must return the sentinel.
-	if err := server.Delete(RPCDeleteRequest{Collection: "docs", ID: "v1"}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("default-coll Delete err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := server.Delete(RPCDeleteRequest{Collection: "docs", ID: "v1"}, &RPCEmpty{}); err != nil {
+		t.Fatalf("default-coll Delete err = %v", err)
+	}
+	hist, err := coll.historyFor("v1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) == 0 || !hist[len(hist)-1].Tombstone {
+		t.Fatalf("v1 not tombstoned after Delete: %+v", hist)
 	}
 }
 
@@ -674,11 +714,15 @@ func TestQuantizedOnlyDropCollectionDirtyDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-func TestFederatedRemoteWriteDisabledPendingDistribution(t *testing.T) {
+// TestFederatedRemoteWriteFansOutToPeer verifies that a federated write to a
+// peer-owned key is fanned out to the reachable owner and lands there (the
+// un-gated §6.1 path; previously gated by the removed sentinel).
+func TestFederatedRemoteWriteFansOutToPeer(t *testing.T) {
 	serverDB, addr := startRemoteTestServer(t, WithProvider(nil))
 	_ = serverDB
 
-	db, err := Open(filepath.Join(t.TempDir(), "local.csdb"), WithProvider(nil), WithShards(twoNodeShardLayout(LocalShardOwner, addr)...))
+	db, err := Open(filepath.Join(t.TempDir(), "local.csdb"), WithProvider(nil),
+		WithShards(twoNodeShardLayout(LocalShardOwner, addr)...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,21 +730,18 @@ func TestFederatedRemoteWriteDisabledPendingDistribution(t *testing.T) {
 
 	_, remoteID := pickPeerOwnedIDs(t, db, "vecs", db.localMemberID(), addr)
 	coll := db.Collection("vecs")
-	err = coll.PutVector(remoteID, []float32{1, 0, 0, 0})
-	if !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
-		t.Fatalf("federated PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	if err := coll.PutVector(remoteID, []float32{1, 0, 0, 0}); err != nil {
+		t.Fatalf("federated PutVector err = %v, want nil", err)
 	}
 
-	serverDB.mu.RLock()
-	_, created := serverDB.manifest.Collections["vecs"]
-	serverDB.mu.RUnlock()
-	if created {
-		t.Fatal("federated write created a peer collection")
+	// The write landed on the peer owner.
+	ownerHist, err := serverDB.Collection("vecs").historyFor(remoteID, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestRemoteExistingWriteDisabledPendingDistribution(t *testing.T) {
-	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
+	if len(ownerHist) != 1 {
+		t.Fatalf("federated write did not land on owner: %+v", ownerHist)
+	}
 }
 
 func TestQuantizedOnlyRejectsMalformedSnapshotPayload(t *testing.T) {

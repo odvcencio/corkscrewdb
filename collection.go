@@ -79,7 +79,11 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		return c.remote.Put(c.name, id, entry, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		return errRemoteUnsupportedPendingDistribution
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		return client.Put(c.name, id, entry, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -201,7 +205,11 @@ func (c *Collection) putVectorRequest(id string, vector []float32, cfg putVector
 		return c.remote.PutVector(c.name, id, vector, cfg.text, cfg.metadata, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		return errRemoteUnsupportedPendingDistribution
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		return client.PutVector(c.name, id, vector, cfg.text, cfg.metadata, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -460,7 +468,11 @@ func (c *Collection) delete(id string, federated bool) error {
 		return c.remote.Delete(c.name, id, false)
 	}
 	if federated && c.db.shouldFederate() && !c.db.isLocalOwner(c.name, id) {
-		return errRemoteUnsupportedPendingDistribution
+		client, err := c.db.peerClient(c.db.ownerFor(c.name, id))
+		if err != nil {
+			return err
+		}
+		return client.Delete(c.name, id, true)
 	}
 	if strings.TrimSpace(id) == "" {
 		return errors.New("corkscrewdb: id is required")
@@ -960,6 +972,53 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 // store, returning rawstore.ErrNotFound / rawstore.ErrIntegrity verbatim so
 // callers can classify the failure. Returns ErrRawStoreRequired if the
 // collection has no raw store.
+// snapshotForPull serializes the collection's live history into the wire
+// snapshot response, carrying each version's WAL v5 codes (quantized + raw hash
+// + sparse + children) — the same data persistSnapshot writes to disk. No raw
+// vectors are inlined: the gainer fetches raw by hash via GetRaw.
+func (c *Collection) snapshotForPull() RPCPullSnapshotResponse {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	resp := RPCPullSnapshotResponse{
+		Collection:    c.name,
+		BitWidth:      c.bitWidth,
+		Seed:          c.seed,
+		Dim:           c.dim,
+		MaxLamport:    c.clock.Current(),
+		RawStore:      c.rawStoreEnabled,
+		SparseEnabled: c.sparseEnabled,
+	}
+	ids := make([]string, 0, len(c.history))
+	for id := range c.history {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		versions := c.history[id]
+		record := RPCSnapshotRecord{ID: id, Versions: make([]RPCSnapshotVersion, 0, len(versions))}
+		for _, v := range versions {
+			sv := RPCSnapshotVersion{
+				Quantized:    toWALQuantized(v.Quantized),
+				Dim:          v.dim,
+				Sparse:       toWALSparse(v.Sparse),
+				Children:     toWALChildren(v.Children),
+				Text:         v.Text,
+				Metadata:     cloneMetadata(v.Metadata),
+				LamportClock: v.LamportClock,
+				ActorID:      v.ActorID,
+				WallClock:    v.WallClock,
+				Tombstone:    v.Tombstone,
+			}
+			if len(v.RawHash) == 32 {
+				sv.RawHash = append([]byte(nil), v.RawHash...)
+			}
+			record.Versions = append(record.Versions, sv)
+		}
+		resp.Records = append(resp.Records, record)
+	}
+	return resp
+}
+
 func (c *Collection) getRaw(hash []byte) ([]byte, error) {
 	if c.err != nil {
 		return nil, c.err

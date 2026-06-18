@@ -7,8 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"m31labs.dev/corkscrewdb/replica"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 )
+
+// replicaPullResponse aliases replica.PullResponse so the pull handlers do not
+// have to qualify it everywhere.
+type replicaPullResponse = replica.PullResponse
 
 var ErrUnauthorized = errors.New("corkscrewdb: unauthorized")
 
@@ -251,14 +256,44 @@ func (s *transportServer) Put(req RPCPutRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	if req.Internal {
+		// Trust the client's routing: apply locally with no owner re-check and no
+		// re-fan-out (the federating client already resolved the owner). This
+		// breaks the fan-out loop (§6.1, risk 6).
+		return s.db.Collection(req.Collection).put(req.ID, req.Entry, false)
+	}
+	if err := s.requireLocalOwner(req.Collection, req.ID); err != nil {
+		return err
+	}
+	return s.db.Collection(req.Collection).put(req.ID, req.Entry, false)
 }
 
 func (s *transportServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	cfg := putVectorConfig{text: req.Text, metadata: req.Metadata}
+	if req.Internal {
+		return s.db.Collection(req.Collection).putVectorRequest(req.ID, req.Vector, cfg, false)
+	}
+	if err := s.requireLocalOwner(req.Collection, req.ID); err != nil {
+		return err
+	}
+	return s.db.Collection(req.Collection).putVectorRequest(req.ID, req.Vector, cfg, false)
+}
+
+// requireLocalOwner rejects a non-internal direct-client write to a key the
+// local node does not own (the server does NOT fan out; only a federating
+// client fans out, §6.1). When the node is not federating (single node /
+// no shards) every key is locally owned.
+func (s *transportServer) requireLocalOwner(collection, id string) error {
+	if !s.db.shouldFederate() {
+		return nil
+	}
+	if s.db.isLocalOwner(collection, id) {
+		return nil
+	}
+	return ErrWrongOwner
 }
 
 func (s *transportServer) Search(req RPCSearchRequest, resp *RPCSearchResponse) error {
@@ -310,7 +345,13 @@ func (s *transportServer) Delete(req RPCDeleteRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	if req.Internal {
+		return s.db.Collection(req.Collection).delete(req.ID, false)
+	}
+	if err := s.requireLocalOwner(req.Collection, req.ID); err != nil {
+		return err
+	}
+	return s.db.Collection(req.Collection).delete(req.ID, false)
 }
 
 func (s *transportServer) authorize(token string) error {
@@ -472,21 +513,66 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
 	}
-	return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
+	if s.db.streamer == nil {
+		return RPCPullEntriesResponse{}, errStreamerUnavailable
+	}
+	pr := s.db.streamer.Pull(req.Collection, req.SinceClock, req.MaxEntries)
+	return toRPCPullEntriesResponse(pr), nil
 }
 
-func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, _ time.Duration) (RPCPullEntriesResponse, error) {
+func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait time.Duration) (RPCPullEntriesResponse, error) {
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
 	}
-	return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
+	if s.db.streamer == nil {
+		return RPCPullEntriesResponse{}, errStreamerUnavailable
+	}
+	pr := s.db.streamer.PullBlocking(req.Collection, req.SinceClock, req.MaxEntries, wait)
+	return toRPCPullEntriesResponse(pr), nil
 }
 
-func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, _ *RPCPullSnapshotResponse) error {
+func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPullSnapshotResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	coll := s.db.Collection(req.Collection)
+	if coll.err != nil {
+		return coll.err
+	}
+	*resp = coll.snapshotForPull()
+	return nil
+}
+
+// errStreamerUnavailable is returned when a pull is requested but the server has
+// no replication streamer (e.g. a Connect client acting as server).
+var errStreamerUnavailable = errors.New("corkscrewdb: replication streamer unavailable")
+
+// toRPCPullEntriesResponse maps a streamer PullResponse into the wire response,
+// carrying each entry's WAL v5 codes verbatim (no re-quantization).
+func toRPCPullEntriesResponse(pr replicaPullResponse) RPCPullEntriesResponse {
+	entries := make([]RPCReplicaEntry, len(pr.Entries))
+	for i, e := range pr.Entries {
+		entries[i] = RPCReplicaEntry{
+			Kind:         e.Kind,
+			CollectionID: e.CollectionID,
+			VectorID:     e.VectorID,
+			Quantized:    cloneWALQuantized(e.Quantized),
+			Dim:          e.Dim,
+			RawHash:      append([]byte(nil), e.RawHash...),
+			Sparse:       cloneWALSparse(e.Sparse),
+			Children:     cloneWALChildren(e.Children),
+			Text:         e.Text,
+			Metadata:     cloneMetadata(e.Metadata),
+			LamportClock: e.LamportClock,
+			ActorID:      e.ActorID,
+			WallClock:    e.WallClock,
+		}
+	}
+	return RPCPullEntriesResponse{
+		Entries:     entries,
+		LatestClock: pr.LatestClock,
+		HasMore:     pr.HasMore,
+	}
 }
 
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
@@ -534,29 +620,31 @@ func (s *transportServer) GetRaw(req RPCGetRawRequest, resp *RPCGetRawResponse) 
 	return nil
 }
 
-// FreezeRebalance is wired in Task 14 (2PC freeze sub-phase). Until then it
-// returns the pending-distribution sentinel.
+// errRebalanceRPCNotWired is a transitional placeholder for the 2PC RPC handlers
+// that are fully wired in Tasks 14/15. It exists only between Task 10 (sentinel
+// removed) and Task 14 (handlers implemented).
+var errRebalanceRPCNotWired = errors.New("corkscrewdb: rebalance RPC not yet wired")
+
+// FreezeRebalance is wired in Task 14 (2PC freeze sub-phase).
 func (s *transportServer) FreezeRebalance(req RPCFreezeRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	return errRebalanceRPCNotWired
 }
 
-// AbortRebalance is wired in Task 14. Until then it returns the
-// pending-distribution sentinel.
+// AbortRebalance is wired in Task 14.
 func (s *transportServer) AbortRebalance(req RPCAbortRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	return errRebalanceRPCNotWired
 }
 
 // ResolveRebalance is wired in Task 15 (recovered-participant decision query).
-// Until then it returns the pending-distribution sentinel.
 func (s *transportServer) ResolveRebalance(req RPCResolveRebalanceRequest, _ *RPCResolveRebalanceResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	return errRebalanceRPCNotWired
 }

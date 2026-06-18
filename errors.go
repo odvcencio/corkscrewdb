@@ -17,3 +17,14 @@ var ErrInvalidSparseVector = errors.New("corkscrewdb: invalid sparse vector")
 // distinct from a retriable transient/integrity failure, which callers should
 // retry against the same or another source.
 var ErrRawUnavailable = errors.New("corkscrewdb: raw vector unavailable")
+
+// ErrWrongOwner is returned when a non-internal direct client write reaches a
+// server that does not own the target key under the current shard layout. The
+// server rejects rather than fanning out (only a federating client fans out).
+var ErrWrongOwner = errors.New("corkscrewdb: key is owned by a different shard")
+
+// errMultiVectorRemoteUnsupported is returned for SearchMulti against a remote
+// or federated collection. Hybrid (dense+sparse) fan-out is out of scope for
+// v0.3.0; the call remains unsupported across the network boundary.
+var errMultiVectorRemoteUnsupported = errors.New(
+	"corkscrewdb: SearchMulti is unsupported over remote/federated collections in v0.3.0")

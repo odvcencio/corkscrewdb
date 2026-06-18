@@ -11,14 +11,6 @@ import (
 	"m31labs.dev/turboquant"
 )
 
-// errRemoteUnsupportedPendingDistribution gates every multi-node path that
-// would serialize stored versions / inline embeddings over the wire. WAL v5
-// dropped inline Embedding; the Distribution phase rebuilds replication to
-// stream codes over a new wire and pull raw by hash, at which point this error
-// and these gates are removed. Returning it IS the Phase 1 behavior.
-var errRemoteUnsupportedPendingDistribution = errors.New(
-	"corkscrewdb: multi-node replication/federation/rebalance is disabled in v0.3.0 Phase 1; restored in the Distribution phase (code-carrying replication over codes + raw pull-by-hash)")
-
 func indexTypeString(t IndexType) string {
 	if t == IndexHNSW {
 		return "hnsw"

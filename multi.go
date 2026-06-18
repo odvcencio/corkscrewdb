@@ -37,7 +37,7 @@ func (c *Collection) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 		return nil, err
 	}
 	if c.remote != nil || c.db.shouldFederate() {
-		return nil, errRemoteUnsupportedPendingDistribution
+		return nil, errMultiVectorRemoteUnsupported
 	}
 
 	// Resolve Text -> Dense via the provider when Dense is absent.
@@ -94,7 +94,7 @@ func (v *CollectionView) SearchMulti(q MultiQuery, k int) ([]SearchResult, error
 		return nil, v.err
 	}
 	if v.remote != nil {
-		return nil, errRemoteUnsupportedPendingDistribution
+		return nil, errMultiVectorRemoteUnsupported
 	}
 
 	dense := q.Dense

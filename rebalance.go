@@ -4,6 +4,9 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
+
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 // RebalanceShards applies a new explicit shard layout to the local node.
@@ -260,14 +263,122 @@ func (db *DB) pullMigratedDataFromPeer(peer string, oldShards []ShardAssignment,
 }
 
 func (db *DB) importOwnedSnapshot(peer string, info RPCCollectionInfo, snapshot RPCPullSnapshotResponse, oldShards []ShardAssignment, oldMembers []string, newShards []ShardAssignment) error {
-	// Rebalance data migration requires streaming stored raw vectors, which WAL v5
-	// no longer carries inline. Disabled pending Distribution.
-	return errRemoteUnsupportedPendingDistribution
+	opts := []CollectionOption{WithBitWidth(snapshot.BitWidth)}
+	if !snapshot.RawStore {
+		opts = append(opts, WithoutRawStore())
+	}
+	if snapshot.SparseEnabled {
+		opts = append(opts, WithSparse())
+	}
+	coll := db.Collection(info.Name, opts...)
+	if coll.err != nil {
+		return coll.err
+	}
+	if snapshot.Seed != 0 {
+		coll.pinQuantizerSeed(snapshot.Seed)
+	}
+	for _, record := range snapshot.Records {
+		if db.ownerForLayout(info.Name, record.ID, oldShards, oldMembers) != peer {
+			continue
+		}
+		if db.ownerForLayout(info.Name, record.ID, newShards, nil) != db.localMemberID() {
+			continue
+		}
+		for _, version := range record.Versions {
+			if err := db.importVersion(coll, record.ID, snapshot.RawStore, importedVersion{
+				Quantized:    version.Quantized,
+				Dim:          version.Dim,
+				RawHash:      version.RawHash,
+				Sparse:       version.Sparse,
+				Children:     version.Children,
+				Text:         version.Text,
+				Metadata:     version.Metadata,
+				LamportClock: version.LamportClock,
+				ActorID:      version.ActorID,
+				WallClock:    version.WallClock,
+				Tombstone:    version.Tombstone,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (db *DB) importOwnedEntries(peer string, info RPCCollectionInfo, entries []RPCReplicaEntry, oldShards []ShardAssignment, oldMembers []string, newShards []ShardAssignment) error {
-	// Disabled pending Distribution (no usable raw vector over the wire).
-	return errRemoteUnsupportedPendingDistribution
+	if len(entries) == 0 {
+		return nil
+	}
+	coll := db.Collection(info.Name, WithBitWidth(info.BitWidth))
+	if coll.err != nil {
+		return coll.err
+	}
+	rawStore := coll.rawStoreEnabled
+	for _, entry := range entries {
+		if db.ownerForLayout(info.Name, entry.VectorID, oldShards, oldMembers) != peer {
+			continue
+		}
+		if db.ownerForLayout(info.Name, entry.VectorID, newShards, nil) != db.localMemberID() {
+			continue
+		}
+		if err := db.importVersion(coll, entry.VectorID, rawStore, importedVersion{
+			Quantized:    entry.Quantized,
+			Dim:          entry.Dim,
+			RawHash:      entry.RawHash,
+			Sparse:       entry.Sparse,
+			Children:     entry.Children,
+			Text:         entry.Text,
+			Metadata:     entry.Metadata,
+			LamportClock: entry.LamportClock,
+			ActorID:      entry.ActorID,
+			WallClock:    entry.WallClock,
+			Tombstone:    entry.Kind == walpkg.EntryTombstone,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// importedVersion is the WAL v5 code payload pulled from a peer during a
+// rebalance handoff. Raw vectors are NOT carried inline; for raw_store
+// collections the gainer fetches them by hash via GetRaw before indexing.
+type importedVersion struct {
+	Quantized    *walpkg.QuantizedVector
+	Dim          int
+	RawHash      []byte
+	Sparse       *walpkg.SparseBlock
+	Children     []walpkg.ChildVector
+	Text         string
+	Metadata     map[string]string
+	LamportClock uint64
+	ActorID      string
+	WallClock    time.Time
+	Tombstone    bool
+}
+
+// importVersion reconstructs a Version from transmitted codes and loads it. For
+// raw_store collections it fetches the raw blob by hash and persists it before
+// indexing (the gainer must hold raw before WAL/index, §7.3).
+func (db *DB) importVersion(coll *Collection, id string, rawStore bool, v importedVersion) error {
+	if rawStore && !v.Tombstone && len(v.RawHash) == 32 {
+		if _, err := db.fetchRawByHash(coll.name, v.RawHash); err != nil {
+			return err
+		}
+	}
+	return coll.loadVersion(id, Version{
+		Quantized:    fromWALQuantized(v.Quantized),
+		dim:          v.Dim,
+		RawHash:      append([]byte(nil), v.RawHash...),
+		Sparse:       fromWALSparse(v.Sparse),
+		Children:     fromWALChildren(v.Children),
+		Text:         v.Text,
+		Metadata:     cloneMetadata(v.Metadata),
+		LamportClock: v.LamportClock,
+		ActorID:      v.ActorID,
+		WallClock:    v.WallClock,
+		Tombstone:    v.Tombstone,
+	})
 }
 
 func (db *DB) ownerForLayout(collection, id string, shards []ShardAssignment, legacyMembers []string) string {
