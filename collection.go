@@ -956,6 +956,17 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	return createdDim, nil
 }
 
+// pinQuantizerSeed assigns the collection's quantizer seed from a replicated
+// snapshot. Seeds produced by generateSeed() span the full int64 range
+// (frequently negative), which the public WithQuantizerSeed option rejects, so
+// replication pins the seed directly here. Safe only before any version is
+// loaded into history (the seed governs code interpretation + index build).
+func (c *Collection) pinQuantizerSeed(seed int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seed = seed
+}
+
 func (c *Collection) loadVersion(id string, version Version) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

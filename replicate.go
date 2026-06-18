@@ -162,7 +162,17 @@ func (a *DBApplier) ApplyReplicatedEntry(collection string, entry replica.Entry)
 
 func (a *DBApplier) ApplySnapshot(data replica.SnapshotData) error {
 	// Pin bitWidth + seed so the codes are meaningful on the follower (§2.1).
-	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth), WithQuantizerSeed(data.Seed))
+	// The quantizer seed is set directly rather than via WithQuantizerSeed
+	// because generateSeed() yields full-range int64 values (often negative),
+	// which the WithQuantizerSeed option rejects; the snapshot-load path
+	// (corkscrewdb.go) assigns coll.seed the same way.
+	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth))
+	if coll.err != nil {
+		return coll.err
+	}
+	if data.Seed != 0 {
+		coll.pinQuantizerSeed(data.Seed)
+	}
 	for _, record := range data.Entries {
 		for _, v := range record.Versions {
 			if err := coll.loadVersion(record.ID, Version{

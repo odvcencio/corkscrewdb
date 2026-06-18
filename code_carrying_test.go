@@ -203,3 +203,82 @@ func TestDBApplierApplySnapshotReconstructsCodes(t *testing.T) {
 		t.Fatalf("snapshot codes re-quantized")
 	}
 }
+
+// TestTransportProtoBridge proves the transport<->proto converters preserve the
+// code-carrying payload (quantized + sparse + children + raw hash + dim) for
+// both the replica-entry and snapshot paths, with no Embedding hop surviving.
+func TestTransportProtoBridge(t *testing.T) {
+	rawHash := make([]byte, 32)
+	for i := range rawHash {
+		rawHash[i] = byte(i * 3)
+	}
+
+	entry := RPCReplicaEntry{
+		Kind:         walpkg.EntryPut,
+		CollectionID: "docs",
+		VectorID:     "vec-1",
+		Quantized:    &walpkg.QuantizedVector{MSE: []byte{1, 2, 3}, Signs: []byte{0xAA}, ResNorm: 1.5},
+		Dim:          8,
+		RawHash:      rawHash,
+		Sparse:       &walpkg.SparseBlock{Indices: []uint32{0, 3}, Values: []float32{0.5, 0.25}},
+		Children:     []walpkg.ChildVector{{ID: "c0", Quantized: &walpkg.QuantizedVector{MSE: []byte{9}, Signs: []byte{1}, ResNorm: 0.5}, Dim: 8, Text: "c0"}},
+		Text:         "bridge",
+		Metadata:     map[string]string{"a": "b"},
+		LamportClock: 42,
+		ActorID:      "actor-1",
+	}
+	in := RPCPullEntriesResponse{Entries: []RPCReplicaEntry{entry}, LatestClock: 42}
+	roundEntries := fromProtoPullEntriesResponse(toProtoPullEntriesResponse(in))
+	if len(roundEntries.Entries) != 1 {
+		t.Fatalf("entries len = %d", len(roundEntries.Entries))
+	}
+	re := roundEntries.Entries[0]
+	if re.Quantized == nil || !bytes.Equal(re.Quantized.MSE, entry.Quantized.MSE) || re.Quantized.ResNorm != 1.5 {
+		t.Fatalf("entry quantized not preserved: %+v", re.Quantized)
+	}
+	if re.Dim != 8 || !bytes.Equal(re.RawHash, rawHash) {
+		t.Fatalf("entry dim/rawhash not preserved: dim=%d rawhash=%x", re.Dim, re.RawHash)
+	}
+	if re.Sparse == nil || len(re.Sparse.Indices) != 2 || re.Sparse.Indices[1] != 3 {
+		t.Fatalf("entry sparse not preserved: %+v", re.Sparse)
+	}
+	if len(re.Children) != 1 || re.Children[0].ID != "c0" || re.Children[0].Quantized == nil {
+		t.Fatalf("entry children not preserved: %+v", re.Children)
+	}
+
+	sv := RPCSnapshotVersion{
+		Quantized:    &walpkg.QuantizedVector{MSE: []byte{4, 5}, Signs: []byte{0x0F}, ResNorm: 2.5},
+		Dim:          8,
+		RawHash:      rawHash,
+		Sparse:       &walpkg.SparseBlock{Indices: []uint32{1}, Values: []float32{1.0}},
+		Children:     []walpkg.ChildVector{{ID: "c1", Dim: 8}},
+		Text:         "snap",
+		LamportClock: 11,
+		ActorID:      "actor-2",
+		Tombstone:    true,
+	}
+	snapIn := RPCPullSnapshotResponse{
+		Collection:    "docs",
+		BitWidth:      2,
+		Seed:          7,
+		Dim:           8,
+		MaxLamport:    11,
+		RawStore:      true,
+		SparseEnabled: true,
+		Records:       []RPCSnapshotRecord{{ID: "vec-1", Versions: []RPCSnapshotVersion{sv}}},
+	}
+	snapOut := fromProtoPullSnapshotResponse(toProtoPullSnapshotResponse(snapIn))
+	if !snapOut.RawStore || !snapOut.SparseEnabled || snapOut.Seed != 7 {
+		t.Fatalf("snapshot config not preserved: %+v", snapOut)
+	}
+	if len(snapOut.Records) != 1 || len(snapOut.Records[0].Versions) != 1 {
+		t.Fatalf("snapshot records not preserved: %+v", snapOut.Records)
+	}
+	gv := snapOut.Records[0].Versions[0]
+	if gv.Quantized == nil || !bytes.Equal(gv.Quantized.MSE, sv.Quantized.MSE) || gv.Quantized.ResNorm != 2.5 {
+		t.Fatalf("snapshot quantized not preserved: %+v", gv.Quantized)
+	}
+	if gv.Dim != 8 || !bytes.Equal(gv.RawHash, rawHash) || gv.Sparse == nil || len(gv.Children) != 1 || !gv.Tombstone {
+		t.Fatalf("snapshot codes not preserved: %+v", gv)
+	}
+}

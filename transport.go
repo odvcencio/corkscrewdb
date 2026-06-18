@@ -234,12 +234,16 @@ func (s *transportServer) EnsureCollection(req RPCEnsureCollectionRequest, _ *RP
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	var coll *Collection
+	opts := make([]CollectionOption, 0, 2)
 	if req.BitWidth != 0 {
-		coll = s.db.Collection(req.Name, WithBitWidth(req.BitWidth))
-	} else {
-		coll = s.db.Collection(req.Name)
+		opts = append(opts, WithBitWidth(req.BitWidth))
 	}
+	if req.Seed != 0 {
+		// Pin the producer's quantizer seed so a replication-bootstrapped
+		// collection agrees on codes (§2.3).
+		opts = append(opts, WithQuantizerSeed(req.Seed))
+	}
+	coll := s.db.Collection(req.Name, opts...)
 	return coll.err
 }
 
@@ -512,4 +516,40 @@ func (s *transportServer) PruneRebalance(req RPCRebalanceRequest, _ *RPCEmpty) e
 		return err
 	}
 	return s.db.pruneUnownedData(normalized)
+}
+
+// GetRaw is wired in Task 8 (raw pull-by-hash). Until then it returns the
+// pending-distribution sentinel.
+func (s *transportServer) GetRaw(req RPCGetRawRequest, _ *RPCGetRawResponse) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return errRemoteUnsupportedPendingDistribution
+}
+
+// FreezeRebalance is wired in Task 14 (2PC freeze sub-phase). Until then it
+// returns the pending-distribution sentinel.
+func (s *transportServer) FreezeRebalance(req RPCFreezeRebalanceRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return errRemoteUnsupportedPendingDistribution
+}
+
+// AbortRebalance is wired in Task 14. Until then it returns the
+// pending-distribution sentinel.
+func (s *transportServer) AbortRebalance(req RPCAbortRebalanceRequest, _ *RPCEmpty) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return errRemoteUnsupportedPendingDistribution
+}
+
+// ResolveRebalance is wired in Task 15 (recovered-participant decision query).
+// Until then it returns the pending-distribution sentinel.
+func (s *transportServer) ResolveRebalance(req RPCResolveRebalanceRequest, _ *RPCResolveRebalanceResponse) error {
+	if err := s.authorize(req.Token); err != nil {
+		return err
+	}
+	return errRemoteUnsupportedPendingDistribution
 }

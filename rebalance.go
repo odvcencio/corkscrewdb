@@ -56,7 +56,8 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 		if err != nil {
 			return err
 		}
-		if err := client.PrepareRebalance(normalized); err != nil {
+		// Epoch fencing is wired in Task 14 (2PC rewrite); 0 = unfenced.
+		if err := client.PrepareRebalance(normalized, 0); err != nil {
 			return err
 		}
 	}
@@ -71,7 +72,7 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 		if err != nil {
 			return err
 		}
-		if err := client.CommitRebalance(normalized); err != nil {
+		if err := client.CommitRebalance(normalized, 0); err != nil {
 			return err
 		}
 	}
@@ -86,7 +87,7 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 		if err != nil {
 			return err
 		}
-		if err := client.PruneRebalance(normalized); err != nil {
+		if err := client.PruneRebalance(normalized, 0); err != nil {
 			return err
 		}
 	}
