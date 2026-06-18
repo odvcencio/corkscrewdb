@@ -20,14 +20,27 @@ func (db *DB) RebalanceShards(shards ...ShardAssignment) error {
 	if err := db.prepareRebalanceShards(normalized); err != nil {
 		return err
 	}
-	if err := db.applyShardLayout(normalized); err != nil {
+	if err := db.applyShardLayout(normalized, 0); err != nil {
 		return err
 	}
 	return db.pruneUnownedData(normalized)
 }
 
-// OrchestrateRebalance coordinates a cluster-wide rebalance with a prepare,
-// commit, and prune phase over the remote control plane.
+// OrchestrateRebalance coordinates a cluster-wide rebalance with the 2PC
+// protocol (§5.2-§5.4):
+//
+//	Freeze (all losers install a range freeze + ACK)
+//	  -> coordinator BARRIERS on all freeze ACKs
+//	  -> Pull (gainers pull moving data from losers via the rebuilt RPCs)
+//	  -> durable-decide (coordinator writes its commit record BEFORE applying L1
+//	     to itself — it is in its own Commit set)
+//	  -> Commit (all apply L1 + unfreeze, idempotent)
+//	  -> Prune (all drop unowned data, idempotent)
+//
+// A failure in Freeze or Pull aborts: every FROZEN/PREPARED participant
+// (including the frozen loser) receives Abort and reverts to L0. After the
+// durable-decide the rebalance is committed; Commit/Prune are retried, never
+// rolled back.
 func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 	if db == nil {
 		return errors.New("corkscrewdb: nil database")
@@ -39,11 +52,11 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 		return errors.New("corkscrewdb: database is closed")
 	}
 
-	normalized, err := db.normalizeClusterRebalanceShards(shards)
+	l1, err := db.normalizeClusterRebalanceShards(shards)
 	if err != nil {
 		return err
 	}
-	if len(normalized) == 0 {
+	if len(l1) == 0 {
 		return errors.New("corkscrewdb: shard assignments are required")
 	}
 	// A fenced cluster rebalance's symmetric-diff range freeze is only
@@ -51,14 +64,162 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 	// every moving key via explicit shard ranges. If the current layout is
 	// legacy peer-hash-mod (no explicit shards), reject — require WithShards
 	// (§5.5).
-	if !db.fencedRebalanceSafe(normalized) {
+	if !db.fencedRebalanceSafe(l1) {
 		return ErrLegacyRebalanceUnsafe
 	}
 
-	targets := db.rebalanceTargets(normalized)
+	l0 := db.shardAssignments()
+	coord := db.localMemberID()
+	epoch := db.beginRebalanceEpoch()
+
+	losers, gainers := db.rebalanceRoles(l0, l1)
+
+	// --- Freeze sub-phase: every loser installs the range freeze and ACKs. ---
+	frozen := make([]string, 0, len(losers))
+	for _, target := range losers {
+		if err := db.freezeTarget(target, epoch, l1, coord); err != nil {
+			// Roll back every loser that already froze (including the coordinator
+			// if it froze locally), then surface the error.
+			db.abortAll(frozen, epoch)
+			return err
+		}
+		frozen = append(frozen, target)
+	}
+
+	// --- Barrier: every freeze ACK is in before any gainer pulls (§5.2.1). ---
+	if db.rebalanceHooks != nil && db.rebalanceHooks.afterFreezeBarrier != nil {
+		db.rebalanceHooks.afterFreezeBarrier(epoch)
+	}
+
+	// --- Pull sub-phase: every gainer pulls moving data from the frozen losers. ---
+	prepared := make([]string, 0, len(gainers))
+	for _, target := range gainers {
+		if db.rebalanceHooks != nil && db.rebalanceHooks.beforePull != nil {
+			db.rebalanceHooks.beforePull(target)
+		}
+		if err := db.pullTarget(target, epoch, l1, coord); err != nil {
+			// Abort every FROZEN loser AND every PREPARED gainer (the frozen loser
+			// MUST be unfrozen, §5.4 row 2).
+			db.abortAll(unionTargets(frozen, prepared), epoch)
+			return err
+		}
+		prepared = append(prepared, target)
+	}
+
+	// --- Durable decide: write the commit record BEFORE applying L1 to self. ---
+	// The coordinator is in its own Commit set, so it MUST persist the decision
+	// (RebalanceEpoch=epoch, PendingShards=L1, fsync) first — this is the
+	// linearization point (§5.3).
+	if err := db.commitEpoch(epoch); err != nil {
+		// A concurrent force-abort bumped the committed floor past this epoch;
+		// treat the whole rebalance as aborted.
+		db.abortAll(unionTargets(frozen, prepared), epoch)
+		return err
+	}
+	if db.rebalanceHooks != nil && db.rebalanceHooks.afterDurableDecide != nil {
+		db.rebalanceHooks.afterDurableDecide(epoch)
+	}
+
+	// --- Commit: every participant applies L1 + unfreezes (idempotent, retry). ---
+	targets := db.rebalanceTargets(l1)
+	if err := db.commitAll(targets, epoch, l1); err != nil {
+		return err
+	}
+
+	// --- Prune: every participant drops unowned data (idempotent). ---
+	db.pruneAll(targets, epoch, l1)
+	db.clearRebalance()
+	return nil
+}
+
+// rebalanceRoles computes, from L0 and L1, the set of losing participants (own
+// a key range under L0 that a DIFFERENT owner takes under L1) and gaining
+// participants (take a key range under L1 a DIFFERENT owner held under L0). A
+// participant may be both. Owners are resolved (LocalShardOwner -> local id).
+func (db *DB) rebalanceRoles(l0, l1 []ShardAssignment) (losers, gainers []string) {
+	loserSet := make(map[string]struct{})
+	gainerSet := make(map[string]struct{})
+	for _, oldShard := range l0 {
+		oldOwner := db.resolveShardOwner(oldShard.Owner)
+		for _, newShard := range l1 {
+			if !shardRangesIntersect(oldShard, newShard) {
+				continue
+			}
+			newOwner := db.resolveShardOwner(newShard.Owner)
+			if oldOwner == newOwner {
+				continue
+			}
+			if oldOwner != "" {
+				loserSet[oldOwner] = struct{}{}
+			}
+			if newOwner != "" {
+				gainerSet[newOwner] = struct{}{}
+			}
+		}
+	}
+	losers = sortedKeys(loserSet)
+	gainers = sortedKeys(gainerSet)
+	return losers, gainers
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func unionTargets(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, t := range list {
+			if _, ok := seen[t]; ok {
+				continue
+			}
+			seen[t] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// freezeTarget installs the range freeze for epoch over L1 on target (local or
+// remote). The frozen participant persists RebalanceCoordinator=coord.
+func (db *DB) freezeTarget(target string, epoch uint64, l1 []ShardAssignment, coord string) error {
+	if target == db.localMemberID() {
+		return db.freezeRebalanceShards(epoch, coord, l1)
+	}
+	client, err := db.peerClient(target)
+	if err != nil {
+		return err
+	}
+	return client.FreezeRebalance(l1, epoch, coord)
+}
+
+// pullTarget runs the gainer's pull sub-phase for epoch on target (local or
+// remote). The gainer persists RebalanceCoordinator=coord when it goes PREPARED.
+func (db *DB) pullTarget(target string, epoch uint64, l1 []ShardAssignment, coord string) error {
+	if target == db.localMemberID() {
+		return db.pullRebalanceShards(epoch, coord, l1)
+	}
+	client, err := db.peerClient(target)
+	if err != nil {
+		return err
+	}
+	return client.PrepareRebalance(l1, epoch)
+}
+
+// commitAll sends Commit to every target, applying L1 + unfreezing. Commit is
+// idempotent and retried; a committed participant is never rolled back. A
+// stale-epoch rejection means a force-abort superseded this rebalance — the
+// coordinator treats the whole rebalance as aborted (§5.6).
+func (db *DB) commitAll(targets []string, epoch uint64, l1 []ShardAssignment) error {
 	for _, target := range targets {
 		if target == db.localMemberID() {
-			if err := db.prepareRebalanceShards(normalized); err != nil {
+			if err := db.applyShardLayout(l1, epoch); err != nil {
 				return err
 			}
 			continue
@@ -67,40 +228,90 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 		if err != nil {
 			return err
 		}
-		// Epoch fencing is wired in Task 14 (2PC rewrite); 0 = unfenced.
-		if err := client.PrepareRebalance(normalized, 0); err != nil {
+		if err := client.CommitRebalance(l1, epoch); err != nil {
+			if errors.Is(err, ErrStaleEpoch) {
+				// A higher epoch (force-abort) won. Defer to the durable floor:
+				// revert local pending and abort the whole rebalance.
+				db.abortRebalanceLocal(epoch)
+				return err
+			}
 			return err
 		}
 	}
+	return nil
+}
+
+// pruneAll sends Prune to every target (idempotent; failures are logged via the
+// returned best-effort and do not fail the committed rebalance).
+func (db *DB) pruneAll(targets []string, epoch uint64, l1 []ShardAssignment) {
 	for _, target := range targets {
 		if target == db.localMemberID() {
-			if err := db.applyShardLayout(normalized); err != nil {
-				return err
-			}
+			_ = db.pruneUnownedData(l1)
 			continue
 		}
 		client, err := db.peerClient(target)
 		if err != nil {
-			return err
+			continue
 		}
-		if err := client.CommitRebalance(normalized, 0); err != nil {
-			return err
-		}
+		_ = client.PruneRebalance(l1, epoch)
 	}
+}
+
+// abortAll broadcasts Abort to the given targets (FROZEN/PREPARED participants),
+// reverting them to L0. A frozen loser MUST be reached so it unfreezes (§5.4).
+func (db *DB) abortAll(targets []string, epoch uint64) {
 	for _, target := range targets {
 		if target == db.localMemberID() {
-			if err := db.pruneUnownedData(normalized); err != nil {
-				return err
-			}
+			db.abortRebalanceLocal(epoch)
 			continue
 		}
 		client, err := db.peerClient(target)
 		if err != nil {
-			return err
+			continue
 		}
-		if err := client.PruneRebalance(normalized, 0); err != nil {
-			return err
+		_ = client.AbortRebalance(epoch)
+	}
+}
+
+// ForceAbortRebalance is the operator escape hatch (§5.6): it allocates a
+// strictly-higher epoch than the stuck one, persists it as the committed floor
+// (fencing the stuck coordinator out), and broadcasts Abort to every known
+// participant so frozen losers unfreeze.
+func (db *DB) ForceAbortRebalance(epoch uint64) error {
+	if db == nil {
+		return errors.New("corkscrewdb: nil database")
+	}
+	if db.remote != nil {
+		return errors.New("corkscrewdb: remote clients cannot force-abort rebalances")
+	}
+	committed := db.committedEpoch()
+	bump := committed
+	if epoch > bump {
+		bump = epoch
+	}
+	next := bump + 1
+	// Persist the higher floor first (fsync) so the stuck coordinator's in-flight
+	// Commit is rejected with ErrStaleEpoch on its next attempt.
+	db.mu.Lock()
+	if next > db.manifest.RebalanceEpoch {
+		db.manifest.RebalanceEpoch = next
+	}
+	db.mu.Unlock()
+	if err := db.saveManifest(); err != nil {
+		return err
+	}
+	// Locally revert any in-flight pending rebalance.
+	db.abortRebalanceLocal(epoch)
+	// Broadcast Abort to all known participants for the stuck epoch.
+	for _, target := range db.rebalanceTargets(db.shardAssignments()) {
+		if target == db.localMemberID() {
+			continue
 		}
+		client, err := db.peerClient(target)
+		if err != nil {
+			continue
+		}
+		_ = client.AbortRebalance(epoch)
 	}
 	return nil
 }
@@ -139,6 +350,9 @@ func (db *DB) normalizeClusterRebalanceShards(shards []ShardAssignment) ([]Shard
 	return normalizeShardAssignments(out)
 }
 
+// prepareRebalanceShards is the single-node legacy best-effort prepare used by
+// RebalanceShards (un-fenced): it pulls migrated data from the old owners. The
+// 2PC cluster path uses freezeRebalanceShards + pullRebalanceShards instead.
 func (db *DB) prepareRebalanceShards(shards []ShardAssignment) error {
 	normalized, err := db.normalizeLocalRebalanceShards(shards)
 	if err != nil {
@@ -151,6 +365,77 @@ func (db *DB) prepareRebalanceShards(shards []ShardAssignment) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// freezeRebalanceShards installs the local range freeze for the 2PC freeze
+// sub-phase: it records the coordinator address and pending L1 layout durably
+// (phase=FROZEN) so writes to moving keys are rejected and recovery can resolve
+// the coordinator. Idempotent for a re-sent Freeze at the same epoch.
+func (db *DB) freezeRebalanceShards(epoch uint64, coordinator string, next []ShardAssignment) error {
+	if err := db.checkEpoch(epoch); err != nil {
+		return err
+	}
+	normalized, err := db.normalizeLocalRebalanceShards(next)
+	if err != nil {
+		return err
+	}
+	db.installFreeze(epoch, coordinator, normalized)
+	return nil
+}
+
+// pullRebalanceShards runs the local gainer pull sub-phase: it pulls every
+// moving key it gains under L1 from the old owners (via the rebuilt
+// PullSnapshot/PullEntries + GetRaw), then records phase=PREPARED durably,
+// persisting the coordinator address so recovery can query its decision.
+func (db *DB) pullRebalanceShards(epoch uint64, coordinator string, next []ShardAssignment) error {
+	if err := db.checkEpoch(epoch); err != nil {
+		return err
+	}
+	normalized, err := db.normalizeLocalRebalanceShards(next)
+	if err != nil {
+		return err
+	}
+	// A gainer that did not also freeze still needs the coordinator recorded and
+	// the pending layout installed so isFrozenKey is well-defined during pull.
+	st := db.rebalanceSnapshot()
+	if st.phase == phaseIdle || st.epoch != epoch {
+		db.installFreeze(epoch, coordinator, normalized)
+	}
+	oldShards := db.shardAssignments()
+	oldMembers := db.legacyShardMembers()
+	for _, peer := range db.rebalanceSources(oldShards, normalized) {
+		if err := db.pullMigratedDataFromPeer(peer, oldShards, oldMembers, normalized); err != nil {
+			return err
+		}
+	}
+	db.markPrepared()
+	return nil
+}
+
+// resolveRebalanceDecision is the coordinator's answer to a recovered
+// participant's ResolveRebalance(epoch) query (§5.3). The coordinator returns
+// DECISION_COMMIT iff its durable manifest shows the epoch committed
+// (RebalanceEpoch >= epoch); otherwise DECISION_ABORT. The committed floor is
+// returned so the caller can detect supersession by a higher epoch.
+func (db *DB) resolveRebalanceDecision(epoch uint64) (rebalanceDecision, uint64) {
+	committed := db.committedEpoch()
+	if committed >= epoch {
+		return decisionCommit, committed
+	}
+	return decisionAbort, committed
+}
+
+// abortRebalanceLocal reverts an in-flight (FROZEN/PREPARED) rebalance to L0 by
+// clearing the freeze. It is a no-op if already committed past the epoch (a
+// committed participant must never roll back, §5.4). Returns ErrAlreadyCommitted
+// when the epoch is at/below the committed floor and a layout was applied.
+func (db *DB) abortRebalanceLocal(epoch uint64) error {
+	st := db.rebalanceSnapshot()
+	if st.phase == phaseCommitting && epoch <= db.committedEpoch() {
+		return ErrAlreadyCommitted
+	}
+	db.clearRebalance()
 	return nil
 }
 
@@ -415,10 +700,27 @@ func (db *DB) ownerForLayout(collection, id string, shards []ShardAssignment, le
 	return legacyMembers[key%uint64(len(legacyMembers))]
 }
 
-func (db *DB) applyShardLayout(shards []ShardAssignment) error {
+// applyShardLayout commits a new shard layout (L1) locally. When epoch > 0 it is
+// the 2PC commit: it is epoch-fenced (a stale epoch is rejected), bumps the
+// durable RebalanceEpoch floor, clears the pending layout, and unfreezes. epoch
+// 0 is the legacy single-node RebalanceShards path (no fence). Idempotent: a
+// re-applied commit for an already-committed epoch is a no-op success.
+func (db *DB) applyShardLayout(shards []ShardAssignment, epoch uint64) error {
 	local := db.localMemberID()
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	if epoch > 0 {
+		if epoch < db.manifest.RebalanceEpoch {
+			// A higher epoch already committed; this stale commit is rejected.
+			return ErrStaleEpoch
+		}
+		if epoch == db.manifest.RebalanceEpoch && db.rebalance.phase == phaseIdle {
+			// Already committed this epoch and unfrozen — idempotent no-op.
+			return nil
+		}
+		db.manifest.RebalanceEpoch = epoch
+	}
 
 	db.manifest.Shards = cloneShardAssignments(shards)
 	peers := sanitizePeers(append(append([]string(nil), db.peers...), peersFromShardAssignments(shards)...))
@@ -431,6 +733,17 @@ func (db *DB) applyShardLayout(shards []ShardAssignment) error {
 	}
 	db.manifest.Peers = append([]string(nil), filtered...)
 	db.peers = append([]string(nil), db.manifest.Peers...)
+
+	if epoch > 0 {
+		// Unfreeze: the layout is now L1, the moving keys are settled.
+		db.rebalance.phase = phaseIdle
+		db.rebalance.coordinator = ""
+		db.rebalance.pending = nil
+		db.manifest.RebalancePhase = phaseIdle.String()
+		db.manifest.RebalanceCoordinator = ""
+		db.manifest.PendingShards = nil
+		db.manifest.RebalanceInFlightEpoch = 0
+	}
 	return db.saveManifestLocked()
 }
 

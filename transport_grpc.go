@@ -664,6 +664,24 @@ func grpcStatusError(err error) error {
 	if errors.Is(err, ErrRawStoreRequired) {
 		return status.Error(codes.NotFound, err.Error())
 	}
+	// Rebalance 2PC control-plane errors carry distinct codes so the coordinator
+	// can errors.Is them across the wire (a stale-epoch Commit rejection means a
+	// force-abort superseded this rebalance).
+	if errors.Is(err, ErrStaleEpoch) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if errors.Is(err, ErrAlreadyCommitted) {
+		return status.Error(codes.AlreadyExists, err.Error())
+	}
+	if errors.Is(err, ErrRebalanceInProgress) {
+		return status.Error(codes.Aborted, err.Error())
+	}
+	if errors.Is(err, ErrLegacyRebalanceUnsafe) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if errors.Is(err, ErrWrongOwner) {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
 	return status.Error(codes.Unknown, err.Error())
 }
 
@@ -680,6 +698,16 @@ func normalizeTransportError(err error) error {
 		return nil
 	case codes.Unauthenticated:
 		return ErrUnauthorized
+	case codes.FailedPrecondition:
+		return fmt.Errorf("%w: %s", ErrStaleEpoch, st.Message())
+	case codes.AlreadyExists:
+		return fmt.Errorf("%w: %s", ErrAlreadyCommitted, st.Message())
+	case codes.Aborted:
+		return fmt.Errorf("%w: %s", ErrRebalanceInProgress, st.Message())
+	case codes.InvalidArgument:
+		return fmt.Errorf("%w: %s", ErrLegacyRebalanceUnsafe, st.Message())
+	case codes.PermissionDenied:
+		return fmt.Errorf("%w: %s", ErrWrongOwner, st.Message())
 	default:
 		return errors.New(st.Message())
 	}

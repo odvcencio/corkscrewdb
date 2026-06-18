@@ -575,13 +575,23 @@ func toRPCPullEntriesResponse(pr replicaPullResponse) RPCPullEntriesResponse {
 	}
 }
 
+// PrepareRebalance is the gainer's PULL sub-phase: the participant pulls every
+// moving key it gains under L1 from the old owners. The epoch (when set) fences
+// out a stale coordinator. The coordinator address recorded at Freeze is kept.
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return s.db.prepareRebalanceShards(req.Shards)
+	if req.Epoch == 0 {
+		// Legacy unfenced prepare (single-node RebalanceShards over the wire).
+		return s.db.prepareRebalanceShards(req.Shards)
+	}
+	coord := s.db.rebalanceSnapshot().coordinator
+	return s.db.pullRebalanceShards(req.Epoch, coord, req.Shards)
 }
 
+// CommitRebalance applies L1 locally, bumping the durable RebalanceEpoch floor
+// and unfreezing. Epoch-fenced: a stale epoch is rejected with ErrStaleEpoch.
 func (s *transportServer) CommitRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
@@ -590,7 +600,7 @@ func (s *transportServer) CommitRebalance(req RPCRebalanceRequest, _ *RPCEmpty) 
 	if err != nil {
 		return err
 	}
-	return s.db.applyShardLayout(normalized)
+	return s.db.applyShardLayout(normalized, req.Epoch)
 }
 
 func (s *transportServer) PruneRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
@@ -620,31 +630,33 @@ func (s *transportServer) GetRaw(req RPCGetRawRequest, resp *RPCGetRawResponse) 
 	return nil
 }
 
-// errRebalanceRPCNotWired is a transitional placeholder for the 2PC RPC handlers
-// that are fully wired in Tasks 14/15. It exists only between Task 10 (sentinel
-// removed) and Task 14 (handlers implemented).
-var errRebalanceRPCNotWired = errors.New("corkscrewdb: rebalance RPC not yet wired")
-
-// FreezeRebalance is wired in Task 14 (2PC freeze sub-phase).
+// FreezeRebalance is the 2PC freeze sub-phase: the loser installs a range
+// freeze for epoch over L1, persisting the coordinator address durably so a
+// recovering participant can reach it, and ACKs. Epoch-fenced.
 func (s *transportServer) FreezeRebalance(req RPCFreezeRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRebalanceRPCNotWired
+	return s.db.freezeRebalanceShards(req.Epoch, req.Coordinator, req.Shards)
 }
 
-// AbortRebalance is wired in Task 14.
+// AbortRebalance reverts an in-flight (FROZEN/PREPARED) rebalance to L0,
+// unfreezing the moving keys. A committed participant is never rolled back.
 func (s *transportServer) AbortRebalance(req RPCAbortRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRebalanceRPCNotWired
+	return s.db.abortRebalanceLocal(req.Epoch)
 }
 
-// ResolveRebalance is wired in Task 15 (recovered-participant decision query).
-func (s *transportServer) ResolveRebalance(req RPCResolveRebalanceRequest, _ *RPCResolveRebalanceResponse) error {
+// ResolveRebalance returns the coordinator's durable decision for an epoch so a
+// recovered PREPARED participant can finish (commit-forward or abort). Wired in
+// Task 15.
+func (s *transportServer) ResolveRebalance(req RPCResolveRebalanceRequest, resp *RPCResolveRebalanceResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRebalanceRPCNotWired
+	decision, committed := s.db.resolveRebalanceDecision(req.Epoch)
+	*resp = RPCResolveRebalanceResponse{Decision: decision, CommittedEpoch: committed}
+	return nil
 }
