@@ -46,6 +46,48 @@ func toWALQuantized(qv *turboquant.IPQuantized) *walpkg.QuantizedVector {
 	}
 }
 
+// cloneWALQuantized deep-clones a wal.QuantizedVector so a replicated/streamed
+// WAL payload is carried verbatim with no aliasing of the wire buffers.
+func cloneWALQuantized(qv *walpkg.QuantizedVector) *walpkg.QuantizedVector {
+	if qv == nil {
+		return nil
+	}
+	return &walpkg.QuantizedVector{
+		MSE:     append([]byte(nil), qv.MSE...),
+		Signs:   append([]byte(nil), qv.Signs...),
+		ResNorm: qv.ResNorm,
+	}
+}
+
+// cloneWALSparse deep-clones a wal.SparseBlock.
+func cloneWALSparse(sb *walpkg.SparseBlock) *walpkg.SparseBlock {
+	if sb == nil {
+		return nil
+	}
+	return &walpkg.SparseBlock{
+		Indices: append([]uint32(nil), sb.Indices...),
+		Values:  append([]float32(nil), sb.Values...),
+	}
+}
+
+// cloneWALChildren deep-clones a slice of wal.ChildVector.
+func cloneWALChildren(children []walpkg.ChildVector) []walpkg.ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]walpkg.ChildVector, len(children))
+	for i, child := range children {
+		out[i] = walpkg.ChildVector{
+			ID:        child.ID,
+			Quantized: cloneWALQuantized(child.Quantized),
+			Dim:       child.Dim,
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+		}
+	}
+	return out
+}
+
 func fromWALQuantized(qv *walpkg.QuantizedVector) *turboquant.IPQuantized {
 	if qv == nil {
 		return nil

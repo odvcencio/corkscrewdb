@@ -25,6 +25,26 @@ func NewRPCPuller(db *DB) (*RPCPuller, error) {
 	return &RPCPuller{remote: db.remote}, nil
 }
 
+// replicaEntryFromRPC maps a wire RPCReplicaEntry into a verbatim, deep-cloned
+// replica.Entry (the WAL v5 payload, codes intact — never re-quantized).
+func replicaEntryFromRPC(e RPCReplicaEntry) replica.Entry {
+	return replica.Entry{Entry: walpkg.Entry{
+		Kind:         e.Kind,
+		CollectionID: e.CollectionID,
+		VectorID:     e.VectorID,
+		Quantized:    cloneWALQuantized(e.Quantized),
+		Dim:          e.Dim,
+		RawHash:      append([]byte(nil), e.RawHash...),
+		Sparse:       cloneWALSparse(e.Sparse),
+		Children:     cloneWALChildren(e.Children),
+		Text:         e.Text,
+		Metadata:     cloneMetadata(e.Metadata),
+		LamportClock: e.LamportClock,
+		ActorID:      e.ActorID,
+		WallClock:    e.WallClock,
+	}}
+}
+
 func (p *RPCPuller) PullEntries(req replica.PullRequest) (replica.PullResponse, error) {
 	resp, err := p.remote.PullEntries(RPCPullEntriesRequest{
 		Token:      req.Token,
@@ -37,16 +57,7 @@ func (p *RPCPuller) PullEntries(req replica.PullRequest) (replica.PullResponse, 
 	}
 	entries := make([]replica.Entry, len(resp.Entries))
 	for i, e := range resp.Entries {
-		entries[i] = replica.Entry{Entry: walpkg.Entry{
-			Kind:         e.Kind,
-			CollectionID: e.CollectionID,
-			VectorID:     e.VectorID,
-			Text:         e.Text,
-			Metadata:     cloneMetadata(e.Metadata),
-			LamportClock: e.LamportClock,
-			ActorID:      e.ActorID,
-			WallClock:    e.WallClock,
-		}}
+		entries[i] = replicaEntryFromRPC(e)
 	}
 	return replica.PullResponse{
 		Entries:     entries,
@@ -68,7 +79,11 @@ func (p *RPCPuller) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotR
 		versions := make([]replica.VersionEntry, len(r.Versions))
 		for j, v := range r.Versions {
 			versions[j] = replica.VersionEntry{
-				Embedding:    cloneVector(v.Embedding),
+				Quantized:    cloneWALQuantized(v.Quantized),
+				Dim:          v.Dim,
+				RawHash:      append([]byte(nil), v.RawHash...),
+				Sparse:       cloneWALSparse(v.Sparse),
+				Children:     cloneWALChildren(v.Children),
 				Text:         v.Text,
 				Metadata:     cloneMetadata(v.Metadata),
 				LamportClock: v.LamportClock,
@@ -100,16 +115,7 @@ func (p *RPCPuller) StreamEntries(ctx context.Context, req replica.PullRequest, 
 	}, func(resp RPCPullEntriesResponse) error {
 		entries := make([]replica.Entry, len(resp.Entries))
 		for i, e := range resp.Entries {
-			entries[i] = replica.Entry{Entry: walpkg.Entry{
-				Kind:         e.Kind,
-				CollectionID: e.CollectionID,
-				VectorID:     e.VectorID,
-				Text:         e.Text,
-				Metadata:     cloneMetadata(e.Metadata),
-				LamportClock: e.LamportClock,
-				ActorID:      e.ActorID,
-				WallClock:    e.WallClock,
-			}}
+			entries[i] = replicaEntryFromRPC(e)
 		}
 		return handle(replica.PullResponse{
 			Entries:     entries,
@@ -134,12 +140,47 @@ func NewDBApplier(db *DB) (*DBApplier, error) {
 }
 
 func (a *DBApplier) ApplyReplicatedEntry(collection string, entry replica.Entry) error {
-	// WAL v5 dropped inline embeddings, so the follower-apply path can no longer
-	// reconstruct a stored version from the wire. Disabled pending Distribution.
-	return errRemoteUnsupportedPendingDistribution
+	// Reconstruct a Version directly from the transmitted codes and apply it via
+	// the same loadVersion -> applyVersionLocked path WAL replay uses. NO
+	// re-quantization: the codes are inserted verbatim. Idempotent: applyVersionLocked
+	// dedups on (LamportClock, ActorID).
+	coll := a.db.Collection(collection)
+	return coll.loadVersion(entry.VectorID, Version{
+		Quantized:    fromWALQuantized(entry.Quantized),
+		dim:          entry.Dim,
+		RawHash:      append([]byte(nil), entry.RawHash...),
+		Sparse:       fromWALSparse(entry.Sparse),
+		Children:     fromWALChildren(entry.Children),
+		Text:         entry.Text,
+		Metadata:     cloneMetadata(entry.Metadata),
+		LamportClock: entry.LamportClock,
+		ActorID:      entry.ActorID,
+		WallClock:    entry.WallClock,
+		Tombstone:    entry.Kind == walpkg.EntryTombstone,
+	})
 }
 
 func (a *DBApplier) ApplySnapshot(data replica.SnapshotData) error {
-	// Disabled pending Distribution (no usable raw vector over the wire).
-	return errRemoteUnsupportedPendingDistribution
+	// Pin bitWidth + seed so the codes are meaningful on the follower (§2.1).
+	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth), WithQuantizerSeed(data.Seed))
+	for _, record := range data.Entries {
+		for _, v := range record.Versions {
+			if err := coll.loadVersion(record.ID, Version{
+				Quantized:    fromWALQuantized(v.Quantized),
+				dim:          v.Dim,
+				RawHash:      append([]byte(nil), v.RawHash...),
+				Sparse:       fromWALSparse(v.Sparse),
+				Children:     fromWALChildren(v.Children),
+				Text:         v.Text,
+				Metadata:     cloneMetadata(v.Metadata),
+				LamportClock: v.LamportClock,
+				ActorID:      v.ActorID,
+				WallClock:    v.WallClock,
+				Tombstone:    v.Tombstone,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

@@ -1,8 +1,11 @@
 package corkscrewdb
 
 import (
+	"bytes"
+	"path/filepath"
 	"testing"
 
+	"m31labs.dev/corkscrewdb/replica"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
@@ -58,5 +61,145 @@ func TestRPCReplicaEntryCarriesCodes(t *testing.T) {
 	}
 	if sv.Dim != 8 || len(sv.RawHash) != 32 || sv.Sparse == nil || len(sv.Children) != 1 {
 		t.Fatalf("snapshot codes not carried: %+v", sv)
+	}
+}
+
+// TestDBApplierReconstructsCodes proves the follower-apply path reconstructs a
+// Version directly from the wire codes (NO re-quantization) and the applied
+// version's quantized codes are byte-identical to the source.
+func TestDBApplierReconstructsCodes(t *testing.T) {
+	primary, err := Open(filepath.Join(t.TempDir(), "primary.csdb"), WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primary.Close()
+
+	coll := primary.Collection("docs", WithBitWidth(2))
+	if err := coll.Put("doc-1", Entry{Text: "hello reconstruct"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pull the live entry (codes intact) from the primary's streamer.
+	pr := primary.streamer.Pull("docs", 0, 100)
+	if len(pr.Entries) != 1 {
+		t.Fatalf("streamer entries = %d, want 1", len(pr.Entries))
+	}
+	src := pr.Entries[0]
+	if src.Quantized == nil {
+		t.Fatal("source entry carries no quantized codes")
+	}
+
+	follower, err := Open(filepath.Join(t.TempDir(), "follower.csdb"), WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	applier, err := NewDBApplier(follower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applier.ApplyReplicatedEntry("docs", src); err != nil {
+		t.Fatalf("apply replicated entry: %v", err)
+	}
+
+	versions, err := follower.Collection("docs").historyFor("doc-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("follower history len = %d, want 1", len(versions))
+	}
+	got := versions[0]
+	if got.Quantized == nil {
+		t.Fatal("follower version carries no quantized codes (re-truncated)")
+	}
+	if !bytes.Equal(got.Quantized.MSE, src.Quantized.MSE) || !bytes.Equal(got.Quantized.Signs, src.Quantized.Signs) {
+		t.Fatalf("quantized codes re-quantized: got MSE=%x Signs=%x want MSE=%x Signs=%x",
+			got.Quantized.MSE, got.Quantized.Signs, src.Quantized.MSE, src.Quantized.Signs)
+	}
+	if got.Quantized.ResNorm != src.Quantized.ResNorm {
+		t.Fatalf("res norm mismatch: %v != %v", got.Quantized.ResNorm, src.Quantized.ResNorm)
+	}
+
+	results, err := follower.Collection("docs").Search("hello reconstruct", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(results, "doc-1") {
+		t.Fatalf("follower search results = %v, want doc-1", results)
+	}
+}
+
+// TestDBApplierApplySnapshotReconstructsCodes proves ApplySnapshot rebuilds each
+// Version from the VersionEntry code fields.
+func TestDBApplierApplySnapshotReconstructsCodes(t *testing.T) {
+	primary, err := Open(filepath.Join(t.TempDir(), "primary-snap.csdb"), WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primary.Close()
+
+	coll := primary.Collection("docs", WithBitWidth(2))
+	if err := coll.Put("doc-1", Entry{Text: "snapshot reconstruct"}); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := primary.streamer.Pull("docs", 0, 100)
+	if len(pr.Entries) != 1 {
+		t.Fatalf("streamer entries = %d, want 1", len(pr.Entries))
+	}
+	src := pr.Entries[0]
+
+	// Build a SnapshotData carrying the source codes verbatim.
+	data := replica.SnapshotData{
+		Collection: "docs",
+		BitWidth:   2,
+		Seed:       primary.Collection("docs").seed,
+		Dim:        src.Dim,
+		MaxLamport: src.LamportClock,
+		Entries: []replica.VersionRecord{
+			{
+				ID: "doc-1",
+				Versions: []replica.VersionEntry{
+					{
+						Quantized:    cloneWALQuantized(src.Quantized),
+						Dim:          src.Dim,
+						RawHash:      append([]byte(nil), src.RawHash...),
+						Sparse:       cloneWALSparse(src.Sparse),
+						Children:     cloneWALChildren(src.Children),
+						Text:         src.Text,
+						LamportClock: src.LamportClock,
+						ActorID:      src.ActorID,
+						WallClock:    src.WallClock,
+					},
+				},
+			},
+		},
+	}
+
+	follower, err := Open(filepath.Join(t.TempDir(), "follower-snap.csdb"), WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	applier, err := NewDBApplier(follower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applier.ApplySnapshot(data); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+
+	versions, err := follower.Collection("docs").historyFor("doc-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].Quantized == nil {
+		t.Fatalf("follower snapshot history = %+v", versions)
+	}
+	if !bytes.Equal(versions[0].Quantized.MSE, src.Quantized.MSE) {
+		t.Fatalf("snapshot codes re-quantized")
 	}
 }
