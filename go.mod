@@ -25,3 +25,9 @@ require (
 	m31labs.dev/mll v0.1.0 // indirect
 	m31labs.dev/prism v0.1.2 // indirect
 )
+
+// DEV-ONLY: consume the local turboquant tree carrying the in-flight
+// PreparedQuery.ScoreUpperBound accessor for the v0.3.0 Performance stream
+// (query-time two-tier prune). MUST be removed and replaced with a real
+// released turboquant version pin before v0.3.0 ship (Credibility phase).
+replace m31labs.dev/turboquant => /home/draco/work/turboquant
