@@ -5,17 +5,19 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Text-in and vector-in collection APIs
 - Version history per ID with hybrid logical clocks
 - TurboQuant-backed quantized flat and HNSW search
+- Sparse vectors and hybrid dense+sparse retrieval with RRF or weighted fusion
 - Append-only WAL persistence with snapshot recovery
-- Quantized index persistence (`.tqi`)
+- Quantized index persistence (`.tqi`) and HNSW graph persistence (`graph.hnsw`)
+- Content-addressed raw vector store (blake3-keyed `.rvs` segments)
 - Embedding-space config enforcement
-- Metadata filters and point-in-time collection views
+- Metadata filters and point-in-time collection views with LRU view cache
 - gRPC transport with `Connect(...)` and `Serve(...)`
 - Embedded federation with hash-based write routing and fan-out search
 - Explicit shard metadata with persisted ownership ranges
-- Manual shard rebalance and handoff via snapshot + WAL catch-up
-- Coordinated cluster rebalance orchestration over gRPC
+- 2PC cluster rebalance with freeze→barrier→pull + recovery + force-abort
 - Live gRPC WAL streaming replication with snapshot catch-up
 - Cold storage offload (sealed WAL segments + snapshots)
+- Pluggable Scorer seam with optional CUDA GPU scorer (build tag `cuda`)
 - Standalone server binary (`cmd/corkscrewdb`)
 
 ## Agent Skill
@@ -24,7 +26,7 @@ Agents working with CorkScrewDB should use the [using-corkscrewdb](https://githu
 
 ## Status
 
-`v0.2.0` — HLC clocks, v2 storage formats, HNSW persistence, gRPC transport, explicit shard metadata, manual shard handoff, coordinated rebalance orchestration, and live replication streaming have shipped.
+`v0.3.0` — sparse vectors, hybrid SearchMulti with RRF/weighted fusion, real HNSW (RNG/hub-protected pruning, O(degree) tombstone delete, build-from-codes), content-addressed raw vector store, 2PC cluster rebalance, pluggable Scorer seam (optional CUDA GPU scorer), and LRU point-in-time view cache have shipped.
 
 ## Install
 
@@ -79,24 +81,97 @@ db, err := corkscrewdb.Open("./prod.csdb", corkscrewdb.WithProvider(myProvider))
 
 Embedding config is persisted in `manifest.json`. Reopening a database with a different embedding space is rejected to keep search results coherent.
 
-## Vector Storage
+## Sparse Vectors and Hybrid Search
 
-Collections persist raw float embeddings by default. For local flat collections that only need quantized search and metadata/history text, use quantized-only persistence:
+Enable the sparse channel on a collection with `WithSparse()`. Each `Entry` or `PutVector` call can carry a `SparseVector` alongside the dense embedding. `SparseVector.Indices` must be sorted ascending and unique; `Values` is parallel to `Indices`.
 
 ```go
-coll := db.Collection(
-    "child_vectors",
+coll := db.Collection("docs",
     corkscrewdb.WithBitWidth(8),
-    corkscrewdb.WithQuantizerSeed(5581486560434873699),
-    corkscrewdb.WithQuantizedOnlyPersistence(),
+    corkscrewdb.WithSparse(),
+)
+
+// Write with a sparse channel alongside the dense text embedding.
+if err := coll.Put("doc-1", corkscrewdb.Entry{
+    Text: "WebAuthn passkeys replace passwords",
+    Sparse: &corkscrewdb.SparseVector{
+        Indices: []uint32{42, 137, 512},
+        Values:  []float32{0.8, 0.6, 0.4},
+    },
+}); err != nil {
+    log.Fatal(err)
+}
+
+// Hybrid search: dense text query fused with sparse query vector.
+results, err := coll.SearchMulti(corkscrewdb.MultiQuery{
+    Text: "passkeys",
+    Sparse: &corkscrewdb.SparseVector{
+        Indices: []uint32{42, 137},
+        Values:  []float32{0.9, 0.5},
+    },
+    Fusion: corkscrewdb.RRFFusion{K: 60}, // default when Fusion is nil
+}, 10)
+```
+
+`MultiQuery.Fusion` selects how the two ranked lists are combined:
+
+- `RRFFusion{K: 60}` — Reciprocal Rank Fusion (default; `K: 0` also means 60).
+- `WeightedFusion{Dense: 0.7, Sparse: 0.3}` — min-max-normalized linear combination.
+
+`CollectionView.SearchMulti` provides the same hybrid search against a point-in-time view.
+
+## HNSW
+
+Use `WithIndexType(IndexHNSW)` at collection creation to enable approximate nearest-neighbor search. Custom parameters are set at creation time with `WithHNSWParams`; these are persisted in the manifest.
+
+```go
+coll := db.Collection("vectors",
+    corkscrewdb.WithBitWidth(8),
+    corkscrewdb.WithIndexType(corkscrewdb.IndexHNSW),
+    corkscrewdb.WithHNSWParams(corkscrewdb.HNSWParams{
+        M:              32,
+        EfConstruction: 400,
+        EfSearch:       100,
+    }),
 )
 ```
 
-`WithQuantizedOnlyPersistence()` is shorthand for `WithVectorStorage(VectorStorageQuantizedOnly)`. In this mode, WAL and snapshots store TurboQuant payloads plus text, metadata, clocks, and tombstones. Raw embeddings are used only at write time to build the quantized payload; they are not retained in version history or durable snapshots, and CorkScrewDB does not write a separate flat `.tqi` index file because the snapshot is the durable full-state copy.
+To switch an existing flat collection to HNSW after the fact:
 
-Current limits are intentional: `quantized_only` is for embedded local flat search. HNSW creation/rebuild is rejected, remote collections reject the option, and replication snapshot/WAL export is unsupported until those paths can carry quantized-only state safely. Choose the default raw mode when you need raw vectors in history, HNSW, remote operation, or replication.
+```go
+if err := coll.RebuildIndex(corkscrewdb.IndexHNSW); err != nil {
+    log.Fatal(err)
+}
+```
 
-An Eos SciFact child-vector smoke using 12,468 128-d vectors with fixed quantizer seed `5581486560434873699` measured closed DB sizes of `4,251,167` bytes (`0.066749x`) for q8, `3,453,215` bytes (`0.054220x`) for q4, and `3,054,239` bytes (`0.047956x`) for q2. In that smoke, q8 exhaustive search matched the cache evaluator to rounding with nDCG@10 `0.413312` and recall@100 `0.743556`; serving-style overfetch100 recall was `0.729111`. These are local smoke numbers, not a general benchmark.
+Note: `WithHNSWParams` is honored when set at collection creation. `RebuildIndex` uses the default params (`M=16`, `EfConstruction=200`, `EfSearch=50`).
+
+## Raw Vector Store
+
+By default, collections persist raw float32 vectors in a blake3-keyed content-addressed store (`.rvs` segments alongside the WAL). This enables replication to pull raw vectors by hash and supports operations that need the original embedding.
+
+To opt out and store only quantized codes (smaller on-disk footprint, no raw retrieval):
+
+```go
+coll := db.Collection("compact",
+    corkscrewdb.WithBitWidth(4),
+    corkscrewdb.WithoutRawStore(),
+)
+```
+
+`WithoutRawStore()` replaces the old `WithQuantizedOnlyPersistence()` / `WithVectorStorage(VectorStorageQuantizedOnly)` options, which are no longer present.
+
+## Choosing Bit Width
+
+The default bit width is 2. 2-bit quantization minimizes on-disk and in-memory footprint but is lossy, especially at lower embedding dimensions. Use 4–8 bit for recall-critical workloads or for low-dimensional embeddings.
+
+| Bit width | glove-25 recall@10 | sift-128 recall@10 | Notes |
+|-----------|-------------------|--------------------|-------|
+| 2-bit     | 0.13              | 0.19               | Storage-optimized; best at higher dimensions |
+| 4-bit     | 0.47              | 0.47               | Good balance of size and recall |
+| 8-bit     | 0.91              | 0.85               | Near-exact recall at standard benchmark dims |
+
+Use 4–8 bit for recall-critical or low-dimensional embeddings. 2-bit is storage-optimized and works best at higher dimensions (recall climbs sharply with both bit width and embedding dimension).
 
 ## Remote Mode
 
@@ -149,7 +224,7 @@ When `WithShards(...)` is present, routed writes and point ownership come from t
 
 ## Rebalancing
 
-Shard layouts can be updated in place with data handoff:
+Shard layouts can be updated in place with data handoff. `RebalanceShards(...)` is the single-node form when you want to drive the phases yourself:
 
 ```go
 err := db.RebalanceShards(
@@ -158,14 +233,7 @@ err := db.RebalanceShards(
 )
 ```
 
-Current behavior:
-
-- a gaining node pulls snapshot data plus WAL tail from the old owner for the ranges it is taking over
-- the new shard layout is then persisted locally
-- IDs no longer owned by the node are pruned from local search/history after the cutover
-- `RebalanceShards(...)` is still the single-node/manual form when you want to drive the phases yourself
-
-For cluster-wide cutover, coordinate the same phases from one node:
+For a lost-write-safe cluster-wide cutover, use `OrchestrateRebalance` with an explicit `WithShards` layout. This runs a two-phase-commit protocol (freeze→barrier→pull, durable decide, prune) across the local node and all reachable peers:
 
 ```go
 err := db.OrchestrateRebalance(
@@ -174,21 +242,15 @@ err := db.OrchestrateRebalance(
 )
 ```
 
-Current behavior:
-
-- the coordinator runs prepare, commit, and prune across the local node plus reachable peers
-- gaining nodes import data before the layout flips cluster-wide
-- routing changes once the commit phase runs
-- old owners prune handed-off data in the final phase
-- orchestration is sequential and best-effort; there is no distributed transaction or rollback yet
+The 2PC protocol freezes writes to keys being moved, waits for a quorum barrier, pulls data from old owners, durably records the decision, flips routing, and prunes handed-off data. Crash recovery and force-abort are supported; the coordinator must have `WithShards` configured for the lost-write-safe path.
 
 ## Replication
 
-WAL entries stream from primary to followers over gRPC. Followers use live entry streams when the transport supports it and fall back to polling otherwise. New followers still catch up via snapshot transfer + WAL tail replay before switching to live updates.
+WAL entries stream from primary to followers over gRPC. Followers use live entry streams when the transport supports it and fall back to polling otherwise. New followers still catch up via snapshot transfer + WAL tail replay before switching to live updates. In v0.3.0, the streamer is rebuilt from WAL on restart, and replication can pull raw vectors by hash from the raw store.
 
 ## Cold Storage Offload
 
-Sealed WAL segments and snapshots push to a configurable backend on a schedule. A filesystem backend ships for testing; S3/GCS backends are planned behind build tags.
+Sealed WAL segments and snapshots push to a configurable backend on a schedule. A filesystem backend ships for testing; additional backends are selectable via build tags.
 
 ## Server Binary
 
@@ -198,6 +260,30 @@ go build ./cmd/corkscrewdb/
 ```
 
 ## Benchmarks
+
+Standard ANN-benchmarks dataset runs. Hardware: Intel Core Ultra 9 285, 20 threads, Go 1.26, WSL2. Recall@10 is measured against exact ground-truth neighbors. These are subset runs; reproduce with `cmd/bench` (see `cmd/bench/README.md`).
+
+### glove-25-angular (25-dim, 100K subset)
+
+| Bit width | Recall@10 | Serial QPS | Parallel QPS | Code bytes/vec |
+|-----------|-----------|-----------|--------------|----------------|
+| 2-bit     | 0.13      | 215       | 2692         | 12             |
+| 4-bit     | 0.47      | —         | —            | 18             |
+| 8-bit     | 0.91      | —         | —            | 30             |
+
+HNSW (2-bit): recall 0.12, 758 serial / 15228 parallel QPS. HNSW (4-bit): recall 0.47. HNSW (8-bit): recall 0.90.
+
+### sift-128-euclidean (128-dim, 50K subset, flat)
+
+| Bit width | Recall@10 | Serial QPS | Parallel QPS | Code bytes/vec |
+|-----------|-----------|-----------|--------------|----------------|
+| 2-bit     | 0.19      | 368       | 4391         | 36             |
+| 4-bit     | 0.47      | —         | —            | 68             |
+| 8-bit     | 0.85      | —         | —            | 132            |
+
+**Caveats:** low-dim + low-bit is the hard case; recall climbs sharply with both bit width and embedding dimension (glove-25 at 2-bit is expected to be low). HNSW trades a small amount of recall for large QPS gains. Subset sizes are noted above. Reproduce via `go run ./cmd/bench` (see `cmd/bench/README.md` for dataset prep).
+
+### Micro-benchmarks
 
 384-dimensional vectors, 2-bit TurboQuant IP quantization, Intel Core Ultra 9 285:
 
@@ -214,8 +300,6 @@ go build ./cmd/corkscrewdb/
 | **Open + Close (1K vectors)** | 31ms | 69607 | snapshot load + WAL replay + snapshot write |
 
 Memory per vector at 384-dim, 2-bit: ~144 bytes (96B MSE + 48B signs + metadata).
-
-Recall@10 at 64-dim, 4-bit: 0.80 (vs exact brute-force).
 
 ```bash
 go test -bench=. -benchmem -run=^$ .
