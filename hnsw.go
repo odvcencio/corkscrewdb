@@ -877,6 +877,12 @@ func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []Sea
 		if !matchesFilters(entry.metadata, filters) {
 			continue
 		}
+		if resultHeap.Len() == k { // heap full: proven upper-bound early-out (D3)
+			bound, prunable := pq.ScoreUpperBound(entry.qv.ResNorm)
+			if prunable && bound <= (*resultHeap)[0].Score {
+				continue // exact <= bound <= kthBest: cannot displace the k-th member
+			}
+		}
 		score := h.flat.quantizer.InnerProductPrepared(entry.qv, pq)
 		r := SearchResult{
 			ID:       entry.id,

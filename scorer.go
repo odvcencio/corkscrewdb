@@ -25,6 +25,9 @@ type Scorer interface {
 type defaultScorer struct {
 	quantizer *turboquant.IPQuantizer
 	corpus    []turboquant.IPQuantized
+	// pruneSkips counts candidates skipped by the query-time two-tier prune (D3).
+	// Test-only instrumentation; zero in normal use.
+	pruneSkips int
 }
 
 func newDefaultScorer(q *turboquant.IPQuantizer) *defaultScorer {
@@ -56,6 +59,16 @@ func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept fun
 		if accept != nil && !accept(i) { // filter pushdown BEFORE scoring
 			continue
 		}
+		if h.Len() == k { // heap full: try the proven upper-bound early-out (D3)
+			bound, prunable := pq.ScoreUpperBound(s.corpus[i].ResNorm)
+			if prunable && bound <= (*h)[0].Score {
+				// exact <= bound <= kthBest: cannot displace the k-th member, and
+				// kthBest only rises, so it can never qualify later. Safe to skip.
+				s.pruneSkips++
+				continue
+			}
+			// prunable==false (non-LUT widths): never skip; exact full scoring kept.
+		}
 		score := s.quantizer.InnerProductPrepared(s.corpus[i], pq)
 		pushHit(h, k, i, score)
 	}
@@ -81,6 +94,26 @@ func (s *defaultScorer) ScoreTopKMulti(pqs []turboquant.PreparedQuery, k int, ac
 	dst := make([]float32, len(pqs)) // reused per row
 	for i := range s.corpus {
 		if accept != nil && !accept(i) { // §7.4 pushdown, once per row
+			continue
+		}
+		// Row prune (D3): skip the whole row only when EVERY query's own bound says
+		// it cannot displace that query's k-th member. Any prunable==false query, or
+		// any not-yet-full heap, forces the row to be scored — preserving each
+		// query's exactness (a query is skipped on a row only when its OWN bound says so).
+		skipRow := true
+		for qi := range pqs {
+			if heaps[qi].Len() < k {
+				skipRow = false
+				break
+			}
+			b, prunable := pqs[qi].ScoreUpperBound(s.corpus[i].ResNorm)
+			if !prunable || b > (*heaps[qi])[0].Score {
+				skipRow = false
+				break
+			}
+		}
+		if skipRow {
+			s.pruneSkips++
 			continue
 		}
 		s.quantizer.InnerProductPreparedBatchTo(dst, s.corpus[i], pqs)
