@@ -45,15 +45,17 @@ type Collection struct {
 
 // CollectionView is a point-in-time read-only collection snapshot.
 type CollectionView struct {
-	name    string
-	encoder *encoder
-	index   indexer
-	history map[string][]Version
-	err     error
-	dim     int
-	remote  remoteClient
-	useAt   bool
-	atClock uint64
+	name          string
+	encoder       *encoder
+	index         indexer
+	history       map[string][]Version
+	sparseSet     map[string]*SparseVector
+	sparseEnabled bool
+	err           error
+	dim           int
+	remote        remoteClient
+	useAt         bool
+	atClock       uint64
 }
 
 func (c *Collection) Put(id string, entry Entry) error {
@@ -432,9 +434,11 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		}
 	}
 	view := &CollectionView{
-		name:    c.name,
-		encoder: c.encoder,
-		history: make(map[string][]Version),
+		name:          c.name,
+		encoder:       c.encoder,
+		history:       make(map[string][]Version),
+		sparseSet:     make(map[string]*SparseVector),
+		sparseEnabled: c.sparseEnabled,
 	}
 
 	c.mu.RLock()
@@ -465,6 +469,12 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 			continue
 		}
 		view.history[id] = visible
+		// §3.2 (view): populate the sparse active set OUTSIDE the index guard.
+		// latest is the in-history stored version whose Sparse is already
+		// deep-cloned at store time, so aliasing its pointer is safe (read-only).
+		if ok && !latest.Tombstone && latest.Sparse != nil {
+			view.sparseSet[id] = latest.Sparse
+		}
 		if ok && !latest.Tombstone && view.index != nil {
 			if flat, ok := view.index.(*index); ok {
 				flat.removePackedChildren(id)

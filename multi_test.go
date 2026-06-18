@@ -280,3 +280,63 @@ func TestSearchMultiWeightedScoreSemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestCollectionViewSearchMulti(t *testing.T) {
+	db, coll := hybridColl(t, 4)
+	defer db.Close()
+
+	// v1 of "a".
+	svA1 := &SparseVector{Indices: []uint32{0}, Values: []float32{1}}
+	if err := coll.Put("a", Entry{Vector: []float32{1, 0, 0, 0}, Sparse: svA1}); err != nil {
+		t.Fatal(err)
+	}
+	bound := coll.clock.Now() // capture Lamport bound after a v1
+	coll.clock.Witness(bound)
+
+	// v2 of "a" and a new id "b", both after the bound.
+	svA2 := &SparseVector{Indices: []uint32{1}, Values: []float32{1}}
+	if err := coll.Put("a", Entry{Vector: []float32{0, 1, 0, 0}, Sparse: svA2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.Put("b", Entry{Vector: []float32{0, 0, 1, 0}, Sparse: &SparseVector{Indices: []uint32{2}, Values: []float32{1}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	view := coll.At(bound)
+	if view.err != nil {
+		t.Fatal(view.err)
+	}
+	// As of the bound, "a" is at v1 and "b" is not yet written.
+	if !sparseEqual(view.sparseSet["a"], svA1) {
+		t.Fatalf("view.sparseSet[a] = %v, want v1 %v", view.sparseSet["a"], svA1)
+	}
+	if _, ok := view.sparseSet["b"]; ok {
+		t.Fatal("view.sparseSet[b] should be absent as of bound")
+	}
+
+	dq := []float32{1, 0, 0, 0}
+	sq := &SparseVector{Indices: []uint32{0}, Values: []float32{1}}
+	fused, err := view.SearchMulti(MultiQuery{Dense: dq, Sparse: sq}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range fused {
+		if r.ID == "b" {
+			t.Fatalf("b must not appear in view as of bound: %v", ids(fused))
+		}
+	}
+	if len(fused) == 0 || fused[0].ID != "a" {
+		t.Fatalf("view hybrid top = %v, want a", ids(fused))
+	}
+	// Score is the fused convention.
+	denseRanking, err := view.SearchVector(dq, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sparseRanking := sparseSearch(view.sparseSet, sq, 100, func(string) bool { return true },
+		func(id string) (string, map[string]string, uint64) { return "", nil, 0 })
+	want := RRFFusion{K: 60}.fuse(denseRanking, sparseRanking)
+	if fused[0].Score != want[0].Score {
+		t.Fatalf("view fused score = %v, want %v (fused convention)", fused[0].Score, want[0].Score)
+	}
+}

@@ -80,6 +80,49 @@ func (c *Collection) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 	return fuseChannels(idx, dim, sparseSet, hydrateByID, c.sparseEnabled, dense, q, k)
 }
 
+// SearchMulti runs a hybrid (dense + sparse) retrieval against the point-in-time
+// view and ALWAYS returns the fused ranking; SearchResult.Score is always the
+// fused score. This is an additive sibling of Collection.SearchMulti.
+func (v *CollectionView) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
+	if v.remote != nil {
+		return nil, errRemoteUnsupportedPendingDistribution
+	}
+
+	dense := q.Dense
+	if len(dense) == 0 && q.Text != "" {
+		encoded, err := v.encoder.Encode(q.Text)
+		if err != nil {
+			return nil, err
+		}
+		dense = encoded
+	}
+
+	var hydrateByID map[string]hydrateMeta
+	if q.Sparse != nil && len(q.Sparse.Indices) > 0 {
+		hydrateByID = make(map[string]hydrateMeta, len(v.sparseSet))
+		for id := range v.sparseSet {
+			versions := v.history[id]
+			if len(versions) == 0 {
+				continue
+			}
+			latest := versions[len(versions)-1]
+			if latest.Tombstone {
+				continue
+			}
+			hydrateByID[id] = hydrateMeta{
+				text:     latest.Text,
+				metadata: cloneMetadata(latest.Metadata),
+				version:  latest.LamportClock,
+			}
+		}
+	}
+
+	return fuseChannels(v.index, v.dim, v.sparseSet, hydrateByID, v.sparseEnabled, dense, q, k)
+}
+
 // fuseChannels is the shared resolve/score/fuse core used by both
 // Collection.SearchMulti and CollectionView.SearchMulti. dense is the
 // already-resolved dense query (Text already encoded by the caller).
