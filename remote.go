@@ -17,8 +17,12 @@ type remoteClient interface {
 	PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesResponse, error)
 	StreamEntries(ctx context.Context, req RPCPullEntriesRequest, onResponse func(RPCPullEntriesResponse) error) error
 	PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotResponse, error)
-	PrepareRebalance(shards []ShardAssignment) error
-	CommitRebalance(shards []ShardAssignment) error
-	PruneRebalance(shards []ShardAssignment) error
+	GetRaw(collection string, hash []byte) ([]byte, error)
+	PrepareRebalance(shards []ShardAssignment, epoch uint64) error
+	CommitRebalance(shards []ShardAssignment, epoch uint64) error
+	PruneRebalance(shards []ShardAssignment, epoch uint64) error
+	FreezeRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error
+	AbortRebalance(epoch uint64) error
+	ResolveRebalance(epoch uint64) (RPCResolveRebalanceResponse, error)
 	Close() error
 }

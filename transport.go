@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 var ErrUnauthorized = errors.New("corkscrewdb: unauthorized")
@@ -33,6 +35,7 @@ type RPCEnsureCollectionRequest struct {
 	Token    string
 	Name     string
 	BitWidth int
+	Seed     int64
 }
 
 type RPCPutRequest struct {
@@ -357,7 +360,11 @@ type RPCReplicaEntry struct {
 	Kind         uint8
 	CollectionID string
 	VectorID     string
-	Embedding    []float32
+	Quantized    *walpkg.QuantizedVector
+	Dim          int
+	RawHash      []byte
+	Sparse       *walpkg.SparseBlock
+	Children     []walpkg.ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -371,12 +378,14 @@ type RPCPullSnapshotRequest struct {
 }
 
 type RPCPullSnapshotResponse struct {
-	Collection string
-	BitWidth   int
-	Seed       int64
-	Dim        int
-	MaxLamport uint64
-	Records    []RPCSnapshotRecord
+	Collection    string
+	BitWidth      int
+	Seed          int64
+	Dim           int
+	MaxLamport    uint64
+	Records       []RPCSnapshotRecord
+	RawStore      bool
+	SparseEnabled bool
 }
 
 type RPCSnapshotRecord struct {
@@ -385,7 +394,11 @@ type RPCSnapshotRecord struct {
 }
 
 type RPCSnapshotVersion struct {
-	Embedding    []float32
+	Quantized    *walpkg.QuantizedVector
+	Dim          int
+	RawHash      []byte
+	Sparse       *walpkg.SparseBlock
+	Children     []walpkg.ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -397,6 +410,49 @@ type RPCSnapshotVersion struct {
 type RPCRebalanceRequest struct {
 	Token  string
 	Shards []ShardAssignment
+	Epoch  uint64
+}
+
+// rebalanceDecision is the durable outcome a coordinator reports for a
+// rebalance epoch when a recovered participant queries it via ResolveRebalance.
+type rebalanceDecision int
+
+const (
+	decisionUnknown rebalanceDecision = iota
+	decisionCommit
+	decisionAbort
+)
+
+type RPCGetRawRequest struct {
+	Token      string
+	Collection string
+	Hash       []byte
+}
+
+type RPCGetRawResponse struct {
+	Raw []byte
+}
+
+type RPCFreezeRebalanceRequest struct {
+	Token       string
+	Shards      []ShardAssignment
+	Epoch       uint64
+	Coordinator string
+}
+
+type RPCAbortRebalanceRequest struct {
+	Token string
+	Epoch uint64
+}
+
+type RPCResolveRebalanceRequest struct {
+	Token string
+	Epoch uint64
+}
+
+type RPCResolveRebalanceResponse struct {
+	Decision       rebalanceDecision
+	CommittedEpoch uint64
 }
 
 func (s *transportServer) PullEntries(req RPCPullEntriesRequest, resp *RPCPullEntriesResponse) error {
@@ -428,7 +484,6 @@ func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, _ *RPCPullSna
 	}
 	return errRemoteUnsupportedPendingDistribution
 }
-
 
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
