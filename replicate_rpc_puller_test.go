@@ -17,7 +17,6 @@ import (
 // be silently replaced by the connection's default and the call would
 // succeed — the test asserts the opposite.
 func TestRPCPullerForwardsToken(t *testing.T) {
-	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	const primaryToken = "puller-token"
 
 	primaryPath := filepath.Join(t.TempDir(), "primary.csdb")

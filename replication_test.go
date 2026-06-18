@@ -10,7 +10,6 @@ import (
 )
 
 func TestReplicationPrimaryToFollower(t *testing.T) {
-	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	// Start primary.
 	primaryPath := filepath.Join(t.TempDir(), "primary.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
@@ -106,7 +105,6 @@ func TestReplicationPrimaryToFollower(t *testing.T) {
 }
 
 func TestReplicationCatchUp(t *testing.T) {
-	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	// Start primary with existing data.
 	primaryPath := filepath.Join(t.TempDir(), "primary.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 8}), WithToken("secret"))
@@ -187,10 +185,27 @@ func TestReplicationCatchUp(t *testing.T) {
 	if len(h2) != 1 {
 		t.Fatalf("follower new-1 history len = %d, want 1", len(h2))
 	}
+
+	// Directly cover the Task 9 streamer-from-WAL seed: pullEntries(sinceClock=0)
+	// MUST return the pre-Serve entry (existing-1), proving the streamer was
+	// rebuilt from the WAL on Open and the snapshot path does not mask it (§8.1).
+	server := &transportServer{db: primaryDB}
+	pulled, err := server.pullEntries(RPCPullEntriesRequest{Token: "secret", Collection: "docs", SinceClock: 0, MaxEntries: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawExisting bool
+	for _, e := range pulled.Entries {
+		if e.VectorID == "existing-1" {
+			sawExisting = true
+		}
+	}
+	if !sawExisting {
+		t.Fatalf("pullEntries(sinceClock=0) did not return the pre-Serve entry existing-1; got %d entries", len(pulled.Entries))
+	}
 }
 
 func TestReplicationStreamingFollowerReceivesLiveWrites(t *testing.T) {
-	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	primaryPath := filepath.Join(t.TempDir(), "primary-stream.csdb")
 	primaryDB, err := Open(primaryPath, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
 	if err != nil {
