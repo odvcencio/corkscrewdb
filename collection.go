@@ -340,10 +340,69 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 // (§10). It reproduces the certified inline path: the same InnerProductPrepared
 // per row, with matchesFilters pushed down (evaluated before scoring) and child/
 // tombstoned rows excluded.
+//
+// The DEFAULT in-process path (no injected scorer) scores directly over the live
+// entries under RLock via a zero-copy liveEntryCorpus, so it allocates NOTHING
+// proportional to the corpus per query — restoring the old inline flat scan's QPS
+// while keeping the Scorer seam and byte-equivalence. Only an injected scorer
+// (e.g. GPU) pays for a corpusSnapshot, and a device scorer packs it once via
+// SetCorpus (lazy by cardinality), never per query.
 func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
 	if k <= 0 {
 		return nil
 	}
+	// No injected scorer: zero-copy live-entry scan (the hot, default path).
+	if c.scorer == nil {
+		return c.flatSearchLive(flat, query, k, filters)
+	}
+	return c.flatSearchInjected(flat, query, k, filters)
+}
+
+// flatSearchLive scores the default scorer directly over the index's LIVE entries
+// with no per-query corpus copy. Row index IS the entry slot; child/dead rows and
+// filtered rows are excluded by liveAccept before scoring (§7.4 pushdown), exactly
+// reproducing the dense corpusSnapshot exclusion. Byte-identical to the inline
+// index.Search and to the snapshot-backed default scorer.
+func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+	flat.mu.RLock()
+	defer flat.mu.RUnlock()
+	if len(flat.entries) == 0 {
+		return nil
+	}
+	pq := flat.quantizer.PrepareQuery(query)
+	corpus := liveEntryCorpus{entries: flat.entries}
+	// accept(row): exclude child/dead rows (corpusSnapshot exclusion) then apply the
+	// §7.4 metadata filter pushdown, all BEFORE scoring.
+	accept := func(row int) bool {
+		entry := &flat.entries[row]
+		if entry.child || entry.dead {
+			return false
+		}
+		return matchesFilters(entry.metadata, filters)
+	}
+	ds := newDefaultScorer(flat.quantizer)
+	hits := ds.scoreTopKOver(corpus, pq, k, accept)
+	results := make([]SearchResult, 0, len(hits))
+	for _, h := range hits {
+		entry := &flat.entries[h.Index] // identity mapping: Index == entry slot
+		results = append(results, SearchResult{
+			ID:       entry.id,
+			Score:    h.Score,
+			Text:     entry.text,
+			Metadata: cloneMetadata(entry.metadata),
+			Version:  entry.version,
+		})
+	}
+	sortSearchResults(results)
+	return results
+}
+
+// flatSearchInjected serves the injected-scorer path (e.g. GPU). It builds the
+// row-ordered corpus snapshot the scorer requires (a device scorer adopts it once
+// via SetCorpus, lazily by cardinality), maps ScoredHit.Index back through
+// rowToEntry, and falls back to the certified default scorer if the injected
+// scorer declines the query (§6.2).
+func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
 	corpus, rowToEntry := flat.corpusSnapshot()
 	if len(corpus) == 0 {
 		return nil
@@ -362,7 +421,7 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 	// An injected scorer (e.g. GPU) may decline a query (k-bounds, re-pack failure)
 	// by returning empty when results were expected — fall back to the default
 	// certified scorer so the query is never silently truncated (§6.2).
-	if len(hits) == 0 && c.scorer != nil && k > 0 && len(corpus) > 0 {
+	if len(hits) == 0 && k > 0 && len(corpus) > 0 {
 		ds := newDefaultScorer(flat.quantizer)
 		ds.SetCorpus(corpus)
 		flat.mu.RLock()

@@ -227,6 +227,20 @@ func (idx *index) corpusSnapshot() (corpus []turboquant.IPQuantized, rowToEntry 
 	return corpus, rowToEntry
 }
 
+// liveEntryCorpus is a zero-copy rowCorpus over the index's LIVE entries. Each
+// row index IS the entry slot (identity mapping), so no per-query []IPQuantized
+// or []int snapshot is allocated. Child/dead rows remain present as rows but are
+// excluded by the caller's accept predicate (liveAccept), exactly reproducing the
+// dense corpusSnapshot's exclusion without materializing a copy. The caller MUST
+// hold idx.mu (R) for the lifetime of any scan over this view.
+type liveEntryCorpus struct {
+	entries []indexEntry
+}
+
+func (c liveEntryCorpus) len() int { return len(c.entries) }
+
+func (c liveEntryCorpus) codeAt(i int) *turboquant.IPQuantized { return &c.entries[i].qv }
+
 func cloneQuantized(qv turboquant.IPQuantized) turboquant.IPQuantized {
 	return turboquant.IPQuantized{
 		MSE:     append([]byte(nil), qv.MSE...),

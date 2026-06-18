@@ -1092,6 +1092,59 @@ func TestScorerPathMatchesInline(t *testing.T) {
 	}
 }
 
+// TestFlatSearchAllocsIndependentOfCorpusSize is the Phase 3 (Credibility) guard
+// against the per-query O(N) corpus snapshot regression: the DEFAULT (no injected
+// scorer) flat search path must allocate a bounded amount per query, independent
+// of corpus size. We measure allocs/query at a small and a 16x-larger corpus; if
+// the path snapshotted the corpus per query (the regression), allocs would scale
+// ~linearly with N. We assert the larger corpus does not allocate materially more.
+func TestFlatSearchAllocsIndependentOfCorpusSize(t *testing.T) {
+	dim := 16
+	allocsAt := func(n int) float64 {
+		db, err := Open(t.TempDir(), WithProvider(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		coll := db.Collection("vecs", WithBitWidth(2), WithQuantizerSeed(1))
+		rng := rand.New(rand.NewSource(int64(n)))
+		for i := 0; i < n; i++ {
+			v := make([]float32, dim)
+			for j := range v {
+				v[j] = rng.Float32()*2 - 1
+			}
+			if err := coll.PutVector("v"+strconv.Itoa(i), v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		query := make([]float32, dim)
+		for j := range query {
+			query[j] = rng.Float32()*2 - 1
+		}
+		// Warm once so any one-time lazy state is not counted.
+		if _, err := coll.SearchVector(query, 10); err != nil {
+			t.Fatal(err)
+		}
+		return testing.AllocsPerRun(50, func() {
+			if _, err := coll.SearchVector(query, 10); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	small := allocsAt(500)
+	large := allocsAt(8000) // 16x the corpus
+
+	t.Logf("flat default-path allocs/query: N=500 -> %.0f, N=8000 -> %.0f", small, large)
+	// If the path allocated an O(N) snapshot per query, large would be ~16x small
+	// (16x more IPQuantized headers + the []int rowToEntry). The zero-copy live
+	// scan keeps allocs flat in N, so the larger corpus must stay within a small
+	// constant slack of the small one (not scale with the 16x cardinality).
+	if large > small+8 {
+		t.Fatalf("flat search allocs scale with corpus size: N=500 -> %.0f allocs, N=8000 -> %.0f allocs (want ~constant); per-query O(N) snapshot likely regressed", small, large)
+	}
+}
+
 func TestAtBinarySearchAndCache(t *testing.T) {
 	db, err := Open(t.TempDir(), WithProvider(nil))
 	if err != nil {

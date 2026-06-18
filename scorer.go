@@ -50,17 +50,47 @@ func pushHit(h *scoredHitHeap, k int, idx int, score float32) {
 	}
 }
 
+// rowCorpus abstracts the row-ordered quantized codes a scorer scans. Both the
+// copied snapshot (injected-scorer path) and a zero-copy view over the index's
+// LIVE entries (the default in-process path) satisfy it, so the certified scoring
+// loop is shared and byte-identical regardless of the source. len() is the row
+// count; codeAt(i) returns row i's turboquant.IPQuantized BY REFERENCE — the live
+// view returns the entry's stored code without copying it, so the default path
+// allocates nothing proportional to the corpus per query (§ Phase 3 Credibility).
+type rowCorpus interface {
+	len() int
+	codeAt(i int) *turboquant.IPQuantized
+}
+
+// sliceCorpus is a rowCorpus over a materialized []turboquant.IPQuantized (the
+// copied snapshot adopted by an injected scorer).
+type sliceCorpus []turboquant.IPQuantized
+
+func (c sliceCorpus) len() int                             { return len(c) }
+func (c sliceCorpus) codeAt(i int) *turboquant.IPQuantized { return &c[i] }
+
 func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept func(i int) bool) []ScoredHit {
+	return s.scoreTopKOver(sliceCorpus(s.corpus), pq, k, accept)
+}
+
+// scoreTopKOver is the certified single-query top-k scan, shared by the
+// copied-snapshot and zero-copy live-entry paths. It is byte-identical to the
+// original inline scan: §7.4 filter pushdown before scoring, the D3 upper-bound
+// early-out (LUT widths only), and the same bounded min-heap. codeAt is read by
+// reference so the live-entry view never copies the corpus.
+func (s *defaultScorer) scoreTopKOver(corpus rowCorpus, pq turboquant.PreparedQuery, k int, accept func(i int) bool) []ScoredHit {
 	if k <= 0 {
 		return nil
 	}
+	n := corpus.len()
 	h := &scoredHitHeap{}
-	for i := range s.corpus {
+	for i := 0; i < n; i++ {
 		if accept != nil && !accept(i) { // filter pushdown BEFORE scoring
 			continue
 		}
+		code := corpus.codeAt(i)
 		if h.Len() == k { // heap full: try the proven upper-bound early-out (D3)
-			bound, prunable := pq.ScoreUpperBound(s.corpus[i].ResNorm)
+			bound, prunable := pq.ScoreUpperBound(code.ResNorm)
 			if prunable && bound <= (*h)[0].Score {
 				// exact <= bound <= kthBest: cannot displace the k-th member, and
 				// kthBest only rises, so it can never qualify later. Safe to skip.
@@ -69,7 +99,7 @@ func (s *defaultScorer) ScoreTopK(pq turboquant.PreparedQuery, k int, accept fun
 			}
 			// prunable==false (non-LUT widths): never skip; exact full scoring kept.
 		}
-		score := s.quantizer.InnerProductPrepared(s.corpus[i], pq)
+		score := s.quantizer.InnerProductPrepared(*code, pq)
 		pushHit(h, k, i, score)
 	}
 	out := make([]ScoredHit, h.Len())
@@ -140,10 +170,10 @@ func (s *defaultScorer) Close() error { return nil }
 
 type scoredHitHeap []ScoredHit
 
-func (h scoredHitHeap) Len() int            { return len(h) }
-func (h scoredHitHeap) Less(i, j int) bool  { return h[i].Score < h[j].Score }
-func (h scoredHitHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *scoredHitHeap) Push(x any)         { *h = append(*h, x.(ScoredHit)) }
+func (h scoredHitHeap) Len() int           { return len(h) }
+func (h scoredHitHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h scoredHitHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *scoredHitHeap) Push(x any)        { *h = append(*h, x.(ScoredHit)) }
 func (h *scoredHitHeap) Pop() any {
 	old := *h
 	n := len(old)
