@@ -1,9 +1,12 @@
 package corkscrewdb
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 
+	"lukechampine.com/blake3"
 	"m31labs.dev/corkscrewdb/replica"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 )
@@ -193,4 +196,90 @@ func (a *DBApplier) ApplySnapshot(data replica.SnapshotData) error {
 		}
 	}
 	return nil
+}
+
+// rawSources returns the remote clients fetchRawByHash will try, in order: the
+// connected remote (if this DB is a Connect client), then each known peer.
+func (db *DB) rawSources() []remoteClient {
+	if db.remote != nil {
+		return []remoteClient{db.remote}
+	}
+	var out []remoteClient
+	for _, addr := range db.remoteShardTargets() {
+		if client, err := db.peerClient(addr); err == nil && client != nil {
+			out = append(out, client)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	db.mu.RLock()
+	peers := append([]string(nil), db.peers...)
+	db.mu.RUnlock()
+	for _, addr := range peers {
+		if client, err := db.peerClient(addr); err == nil && client != nil {
+			out = append(out, client)
+		}
+	}
+	return out
+}
+
+// fetchRawByHash pulls a raw blob for hash from a remote source, verifies the
+// returned bytes re-hash to the requested key (rejecting + not storing on
+// mismatch), then writes it into the local raw store (idempotent dedup) and
+// returns it. A terminal not-found from every source surfaces as
+// ErrRawUnavailable; transient/integrity failures are returned as-is so the
+// caller may retry.
+func (db *DB) fetchRawByHash(collection string, hash []byte) ([]byte, error) {
+	if len(hash) != 32 {
+		return nil, fmt.Errorf("corkscrewdb: raw hash must be 32 bytes, got %d", len(hash))
+	}
+	coll := db.Collection(collection)
+	if coll.err != nil {
+		return nil, coll.err
+	}
+	// Already local? Serve from the local store.
+	if local, err := coll.getRaw(hash); err == nil {
+		return local, nil
+	}
+
+	sources := db.rawSources()
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("%w: no remote source for collection %q", ErrRawUnavailable, collection)
+	}
+
+	var lastErr error
+	terminalOnly := true
+	for _, src := range sources {
+		raw, err := src.GetRaw(collection, hash)
+		if err != nil {
+			lastErr = err
+			if !errors.Is(err, ErrRawUnavailable) {
+				// Retriable (integrity / unavailable): try the next source but
+				// do not collapse to terminal.
+				terminalOnly = false
+			}
+			continue
+		}
+		// Verify the returned bytes re-hash to the requested key; reject + do
+		// not store on mismatch (treated as a transient/retriable error).
+		sum := blake3.Sum256(raw)
+		if !bytes.Equal(sum[:], hash) {
+			lastErr = fmt.Errorf("corkscrewdb: fetched raw bytes for %x re-hash to %x (mismatch)", hash, sum[:])
+			terminalOnly = false
+			continue
+		}
+		if _, err := coll.putRaw(raw); err != nil {
+			return nil, err
+		}
+		return raw, nil
+	}
+
+	if lastErr == nil {
+		return nil, fmt.Errorf("%w: %x", ErrRawUnavailable, hash)
+	}
+	if terminalOnly && errors.Is(lastErr, ErrRawUnavailable) {
+		return nil, lastErr
+	}
+	return nil, lastErr
 }

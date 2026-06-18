@@ -956,6 +956,31 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	return createdDim, nil
 }
 
+// getRaw reads a raw blob by hash from the collection's content-addressed raw
+// store, returning rawstore.ErrNotFound / rawstore.ErrIntegrity verbatim so
+// callers can classify the failure. Returns ErrRawStoreRequired if the
+// collection has no raw store.
+func (c *Collection) getRaw(hash []byte) ([]byte, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if !c.rawStoreEnabled || c.rawStore == nil {
+		return nil, ErrRawStoreRequired
+	}
+	return c.rawStore.Get(hash)
+}
+
+// putRaw stores a raw blob in the collection's raw store (idempotent dedup).
+func (c *Collection) putRaw(raw []byte) ([]byte, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if !c.rawStoreEnabled || c.rawStore == nil {
+		return nil, ErrRawStoreRequired
+	}
+	return c.rawStore.Put(raw)
+}
+
 // pinQuantizerSeed assigns the collection's quantizer seed from a replicated
 // snapshot. Seeds produced by generateSeed() span the full int64 range
 // (frequently negative), which the public WithQuantizerSeed option rejects, so

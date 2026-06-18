@@ -3,6 +3,7 @@ package corkscrewdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	grpcapi "m31labs.dev/corkscrewdb/grpc"
+	"m31labs.dev/corkscrewdb/rawstore"
 	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
@@ -282,9 +284,34 @@ func (c *grpcClient) GetRaw(collection string, hash []byte) ([]byte, error) {
 		Hash:       append([]byte(nil), hash...),
 	})
 	if err != nil {
-		return nil, normalizeTransportError(err)
+		return nil, classifyGetRawError(err)
 	}
 	return append([]byte(nil), resp.GetRaw()...), nil
+}
+
+// classifyGetRawError maps the GetRaw gRPC status code back to a retry policy:
+// NotFound -> terminal ErrRawUnavailable (the blob is gone; no retry helps);
+// DataLoss / Unavailable -> retriable (a re-read or another replica may serve
+// clean bytes), surfaced wrapped so callers can errors.Is them but NOT
+// ErrRawUnavailable.
+func classifyGetRawError(err error) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
+	}
+	switch st.Code() {
+	case codes.NotFound:
+		return fmt.Errorf("%w: %s", ErrRawUnavailable, st.Message())
+	case codes.Unauthenticated:
+		return ErrUnauthorized
+	case codes.DataLoss, codes.Unavailable:
+		return fmt.Errorf("corkscrewdb: raw fetch retriable: %s", st.Message())
+	default:
+		return errors.New(st.Message())
+	}
 }
 
 func (c *grpcClient) FreezeRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
@@ -624,6 +651,18 @@ func grpcStatusError(err error) error {
 	}
 	if errors.Is(err, ErrUnauthorized) {
 		return status.Error(codes.Unauthenticated, ErrUnauthorized.Error())
+	}
+	// Raw-store failure modes carry distinct retry semantics for the follower:
+	// not-found is terminal (codes.NotFound), integrity-mismatch is retriable
+	// (codes.DataLoss).
+	if errors.Is(err, rawstore.ErrNotFound) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	if errors.Is(err, rawstore.ErrIntegrity) {
+		return status.Error(codes.DataLoss, err.Error())
+	}
+	if errors.Is(err, ErrRawStoreRequired) {
+		return status.Error(codes.NotFound, err.Error())
 	}
 	return status.Error(codes.Unknown, err.Error())
 }

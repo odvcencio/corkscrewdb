@@ -518,13 +518,20 @@ func (s *transportServer) PruneRebalance(req RPCRebalanceRequest, _ *RPCEmpty) e
 	return s.db.pruneUnownedData(normalized)
 }
 
-// GetRaw is wired in Task 8 (raw pull-by-hash). Until then it returns the
-// pending-distribution sentinel.
-func (s *transportServer) GetRaw(req RPCGetRawRequest, _ *RPCGetRawResponse) error {
+// GetRaw serves a raw blob by hash from the collection's raw store. The two
+// distinct failure modes (not-found, integrity) are surfaced via the rawstore
+// sentinels so grpcStatusError maps them to codes.NotFound / codes.DataLoss and
+// the follower can apply the right retry policy.
+func (s *transportServer) GetRaw(req RPCGetRawRequest, resp *RPCGetRawResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	return errRemoteUnsupportedPendingDistribution
+	raw, err := s.db.Collection(req.Collection).getRaw(req.Hash)
+	if err != nil {
+		return err
+	}
+	resp.Raw = raw
+	return nil
 }
 
 // FreezeRebalance is wired in Task 14 (2PC freeze sub-phase). Until then it

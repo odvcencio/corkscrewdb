@@ -11,3 +11,9 @@ var ErrRawStoreRequired = errors.New("corkscrewdb: operation requires the raw ve
 
 // ErrInvalidSparseVector is returned when a SparseVector violates its invariants.
 var ErrInvalidSparseVector = errors.New("corkscrewdb: invalid sparse vector")
+
+// ErrRawUnavailable is the terminal error returned when a raw blob cannot be
+// fetched by hash (the source reports not-found / the blob is gone). It is
+// distinct from a retriable transient/integrity failure, which callers should
+// retry against the same or another source.
+var ErrRawUnavailable = errors.New("corkscrewdb: raw vector unavailable")
