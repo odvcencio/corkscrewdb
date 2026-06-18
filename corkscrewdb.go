@@ -764,6 +764,7 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		clock:           newHLC(db.manifest.ActorID),
 		wal:             manager,
 		dim:             meta.Dim,
+		viewCache:       newViewLRU(viewCacheSize),
 	}
 	if meta.RawStore {
 		store, err := rawstore.Open(db.rawStoreDir(name))
