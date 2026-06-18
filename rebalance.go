@@ -72,6 +72,10 @@ func (db *DB) OrchestrateRebalance(shards ...ShardAssignment) error {
 	coord := db.localMemberID()
 	epoch := db.beginRebalanceEpoch()
 
+	// Durably record that this node is driving epoch for L1 (before any peer
+	// RPC) so a crash mid-flight is recoverable as a coordinator-abort.
+	db.installCoordinatorState(epoch, l1)
+
 	losers, gainers := db.rebalanceRoles(l0, l1)
 
 	// --- Freeze sub-phase: every loser installs the range freeze and ACKs. ---
@@ -230,9 +234,14 @@ func (db *DB) commitAll(targets []string, epoch uint64, l1 []ShardAssignment) er
 		}
 		if err := client.CommitRebalance(l1, epoch); err != nil {
 			if errors.Is(err, ErrStaleEpoch) {
-				// A higher epoch (force-abort) won. Defer to the durable floor:
-				// revert local pending and abort the whole rebalance.
-				db.abortRebalanceLocal(epoch)
+				// A higher epoch (force-abort) won on this participant. Per the
+				// monotonic-epoch invariant, force-abort wins: the coordinator
+				// stops orchestrating, returns to IDLE (clearing the in-flight
+				// COMMITTING state), and surfaces the error. It does NOT proceed
+				// to Prune. Recovery — not this in-flight loop — is the authority
+				// on the final layout, deferring to whichever epoch is highest in
+				// the durable floor (§5.6).
+				db.clearRebalance()
 				return err
 			}
 			return err
@@ -259,10 +268,15 @@ func (db *DB) pruneAll(targets []string, epoch uint64, l1 []ShardAssignment) {
 
 // abortAll broadcasts Abort to the given targets (FROZEN/PREPARED participants),
 // reverting them to L0. A frozen loser MUST be reached so it unfreezes (§5.4).
+// The coordinator's own in-flight state is ALWAYS reverted, even if it never
+// appeared in the targets list (it installs coordinator state up front).
 func (db *DB) abortAll(targets []string, epoch uint64) {
+	local := db.localMemberID()
+	sawLocal := false
 	for _, target := range targets {
-		if target == db.localMemberID() {
-			db.abortRebalanceLocal(epoch)
+		if target == local {
+			sawLocal = true
+			_ = db.abortRebalanceLocal(epoch)
 			continue
 		}
 		client, err := db.peerClient(target)
@@ -270,6 +284,10 @@ func (db *DB) abortAll(targets []string, epoch uint64) {
 			continue
 		}
 		_ = client.AbortRebalance(epoch)
+	}
+	if !sawLocal {
+		// Always revert the coordinator's own installed state on abort.
+		_ = db.abortRebalanceLocal(epoch)
 	}
 }
 
@@ -424,6 +442,114 @@ func (db *DB) resolveRebalanceDecision(epoch uint64) (rebalanceDecision, uint64)
 		return decisionCommit, committed
 	}
 	return decisionAbort, committed
+}
+
+// recoverPendingRebalance resolves a non-IDLE rebalance left behind by a crash
+// (§5.3). Three cases:
+//
+//  1. This node holds a durable commit record for the in-flight epoch
+//     (phase=COMMITTING, RebalanceEpoch >= epoch): finish commit-forward.
+//  2. This node was a participant (FROZEN/PREPARED) with a recorded coordinator
+//     address: dial the coordinator and call ResolveRebalance(epoch). COMMIT =>
+//     apply L1 + unfreeze; ABORT (or supersession) => revert to L0.
+//  3. This node was the coordinator (it drove the epoch) with NO commit record:
+//     self-abort and broadcast Abort to FROZEN/PREPARED participants.
+func (db *DB) recoverPendingRebalance() error {
+	st := db.rebalanceSnapshot()
+	if st.phase == phaseIdle || len(st.pending) == 0 {
+		return nil
+	}
+	epoch := st.epoch
+	committed := db.committedEpoch()
+
+	// Case 1: we durably decided commit (COMMITTING with the floor at/above the
+	// in-flight epoch) — finish applying L1 locally and unfreeze.
+	if st.phase == phaseCommitting && committed >= epoch {
+		return db.applyShardLayout(st.pending, epoch)
+	}
+
+	local := db.localMemberID()
+
+	if st.isCoordinator {
+		// Case 3: coordinator with no commit record => the decision was never
+		// durable, so abort. Broadcast Abort so any FROZEN/PREPARED participant
+		// unfreezes, then revert locally.
+		for _, target := range db.rebalanceTargets(db.shardAssignments()) {
+			if target == local {
+				continue
+			}
+			if client, err := db.peerClient(target); err == nil {
+				_ = client.AbortRebalance(epoch)
+			}
+		}
+		db.clearRebalance()
+		return nil
+	}
+
+	// Case 2: participant — dial the persisted coordinator directly and ask for
+	// the durable decision. This closes the fence-forever hole: the coordinator
+	// is reachable even if it gave away ALL of its shards (it is in no
+	// shard-derived peer set, but its address is persisted here).
+	decision, committedEpoch, err := db.queryCoordinatorDecision(st.coordinator, epoch)
+	if err != nil {
+		// Could not reach the coordinator. Leave the freeze in place (the node
+		// stays fenced for the moving keys) rather than guessing — a later Open
+		// or an operator ForceAbortRebalance resolves it. This is the classic
+		// blocking behavior (§5.6); it is safe (no split-brain), not live.
+		return nil
+	}
+	if decision == decisionCommit && committedEpoch >= epoch {
+		return db.applyShardLayout(st.pending, epoch)
+	}
+	// ABORT, or the coordinator moved on to a higher epoch (supersession) =>
+	// revert to L0.
+	db.clearRebalance()
+	return nil
+}
+
+// queryCoordinatorDecision dials the coordinator's persisted address and asks
+// for its durable decision on epoch. Candidate-iteration over known peers is
+// the fallback ONLY when the coordinator address is absent (legacy/partial
+// manifests).
+func (db *DB) queryCoordinatorDecision(coordinator string, epoch uint64) (rebalanceDecision, uint64, error) {
+	local := db.localMemberID()
+	if strings.TrimSpace(coordinator) != "" && coordinator != local {
+		client, err := db.peerClient(coordinator)
+		if err != nil {
+			return decisionUnknown, 0, err
+		}
+		resp, err := client.ResolveRebalance(epoch)
+		if err != nil {
+			return decisionUnknown, 0, err
+		}
+		return resp.Decision, resp.CommittedEpoch, nil
+	}
+
+	// Fallback: iterate known peers (legacy/partial manifest with no recorded
+	// coordinator). The first peer that answers a definite decision wins.
+	var lastErr error
+	for _, target := range db.rebalanceTargets(db.shardAssignments()) {
+		if target == local {
+			continue
+		}
+		client, err := db.peerClient(target)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := client.ResolveRebalance(epoch)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.Decision != decisionUnknown {
+			return resp.Decision, resp.CommittedEpoch, nil
+		}
+	}
+	if lastErr != nil {
+		return decisionUnknown, 0, lastErr
+	}
+	return decisionUnknown, 0, errors.New("corkscrewdb: no coordinator reachable for rebalance recovery")
 }
 
 // abortRebalanceLocal reverts an in-flight (FROZEN/PREPARED) rebalance to L0 by
@@ -738,9 +864,11 @@ func (db *DB) applyShardLayout(shards []ShardAssignment, epoch uint64) error {
 		// Unfreeze: the layout is now L1, the moving keys are settled.
 		db.rebalance.phase = phaseIdle
 		db.rebalance.coordinator = ""
+		db.rebalance.isCoordinator = false
 		db.rebalance.pending = nil
 		db.manifest.RebalancePhase = phaseIdle.String()
 		db.manifest.RebalanceCoordinator = ""
+		db.manifest.RebalanceIsCoordinator = false
 		db.manifest.PendingShards = nil
 		db.manifest.RebalanceInFlightEpoch = 0
 	}

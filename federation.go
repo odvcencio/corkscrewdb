@@ -20,6 +20,11 @@ func (db *DB) registerServeAddr(addr string) {
 func (db *DB) localMemberID() string {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
+	return db.localMemberIDLocked()
+}
+
+// localMemberIDLocked is localMemberID without taking db.mu (caller holds it).
+func (db *DB) localMemberIDLocked() string {
 	if db.serveAddr != "" {
 		return db.serveAddr
 	}

@@ -45,10 +45,11 @@ func parseRebalancePhase(s string) rebalancePhase {
 
 // rebalanceState is the in-memory 2PC state for a node, guarded by db.mu.
 type rebalanceState struct {
-	epoch       uint64            // the in-flight epoch (0 = none in flight)
-	coordinator string            // coordinator serve address (persisted on FROZEN/PREPARED)
-	pending     []ShardAssignment // the pending L1 layout
-	phase       rebalancePhase
+	epoch         uint64            // the in-flight epoch (0 = none in flight)
+	coordinator   string            // coordinator serve address (persisted on FROZEN/PREPARED)
+	isCoordinator bool              // this node is driving the in-flight epoch
+	pending       []ShardAssignment // the pending L1 layout
+	phase         rebalancePhase
 }
 
 // rebalanceStateFromManifest reconstructs the in-memory rebalance state from a
@@ -56,9 +57,10 @@ type rebalanceState struct {
 func rebalanceStateFromManifest(m manifest) rebalanceState {
 	phase := parseRebalancePhase(m.RebalancePhase)
 	st := rebalanceState{
-		coordinator: m.RebalanceCoordinator,
-		pending:     cloneShardAssignments(m.PendingShards),
-		phase:       phase,
+		coordinator:   m.RebalanceCoordinator,
+		isCoordinator: m.RebalanceIsCoordinator,
+		pending:       cloneShardAssignments(m.PendingShards),
+		phase:         phase,
 	}
 	// RebalanceEpoch is the COMMITTED floor; RebalanceInFlightEpoch is the
 	// epoch currently being driven (recorded while non-IDLE so a recovering
@@ -146,6 +148,26 @@ func (db *DB) commitEpoch(epoch uint64) error {
 	return nil
 }
 
+// installCoordinatorState records that this node is driving the in-flight epoch
+// for L1, persisting RebalanceIsCoordinator durably so crash recovery can tell
+// a coordinator (abort if no commit record) from a participant (query the
+// coordinator). Does not install a key freeze — the coordinator only freezes if
+// it is also a loser.
+func (db *DB) installCoordinatorState(epoch uint64, next []ShardAssignment) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.rebalance.epoch = epoch
+	db.rebalance.isCoordinator = true
+	db.rebalance.coordinator = db.localMemberIDLocked()
+	if db.rebalance.phase == phaseIdle {
+		db.rebalance.phase = phaseFrozen
+	}
+	if len(db.rebalance.pending) == 0 {
+		db.rebalance.pending = cloneShardAssignments(next)
+	}
+	db.persistRebalanceLocked()
+}
+
 // clearRebalance returns to IDLE, clearing the freeze, pending layout, and
 // coordinator, and persisting the cleared state. The committed RebalanceEpoch
 // floor is preserved.
@@ -154,6 +176,7 @@ func (db *DB) clearRebalance() {
 	defer db.mu.Unlock()
 	db.rebalance.phase = phaseIdle
 	db.rebalance.coordinator = ""
+	db.rebalance.isCoordinator = false
 	db.rebalance.pending = nil
 	db.persistRebalanceLocked()
 }
@@ -163,9 +186,11 @@ func (db *DB) clearRebalance() {
 func (db *DB) persistRebalanceLocked() {
 	db.manifest.RebalancePhase = db.rebalance.phase.String()
 	db.manifest.RebalanceCoordinator = db.rebalance.coordinator
+	db.manifest.RebalanceIsCoordinator = db.rebalance.isCoordinator
 	if db.rebalance.phase == phaseIdle {
 		db.manifest.PendingShards = nil
 		db.manifest.RebalanceInFlightEpoch = 0
+		db.manifest.RebalanceIsCoordinator = false
 	} else {
 		db.manifest.PendingShards = cloneShardAssignments(db.rebalance.pending)
 		db.manifest.RebalanceInFlightEpoch = db.rebalance.epoch
@@ -180,10 +205,11 @@ func (db *DB) rebalanceSnapshot() rebalanceState {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return rebalanceState{
-		epoch:       db.rebalance.epoch,
-		coordinator: db.rebalance.coordinator,
-		pending:     cloneShardAssignments(db.rebalance.pending),
-		phase:       db.rebalance.phase,
+		epoch:         db.rebalance.epoch,
+		coordinator:   db.rebalance.coordinator,
+		isCoordinator: db.rebalance.isCoordinator,
+		pending:       cloneShardAssignments(db.rebalance.pending),
+		phase:         db.rebalance.phase,
 	}
 }
 

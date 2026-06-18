@@ -138,6 +138,7 @@ type manifest struct {
 	RebalanceEpoch         uint64            `json:"rebalance_epoch,omitempty"`           // committed floor (linearization point)
 	RebalanceInFlightEpoch uint64            `json:"rebalance_in_flight_epoch,omitempty"` // in-flight epoch while non-IDLE
 	RebalanceCoordinator   string            `json:"rebalance_coordinator,omitempty"`
+	RebalanceIsCoordinator bool              `json:"rebalance_is_coordinator,omitempty"` // this node drove the in-flight epoch
 	PendingShards          []ShardAssignment `json:"pending_shards,omitempty"`
 	RebalancePhase         string            `json:"rebalance_phase,omitempty"`
 }
@@ -213,6 +214,14 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, err
 		}
 		db.collections[name] = coll
+	}
+
+	// Recover a non-IDLE pending rebalance left behind by a crash (§5.3). Remote
+	// (Connect) clients never drive a local rebalance, so skip them.
+	if db.remote == nil {
+		if err := db.recoverPendingRebalance(); err != nil {
+			return nil, err
+		}
 	}
 	return db, nil
 }

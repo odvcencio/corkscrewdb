@@ -699,3 +699,271 @@ func TestCommitPartialFailureNoSplitBrain(t *testing.T) {
 		t.Fatalf("loser retained moving key after converge: %+v", lost)
 	}
 }
+
+// driveToPrepared puts a participant DB into a persisted PREPARED state for
+// epoch with the given coordinator address and pending layout, then closes it
+// and returns the path so the caller can reopen and exercise recovery.
+func driveToPrepared(t *testing.T, path, coordAddr string, epoch uint64, pending []ShardAssignment) {
+	t.Helper()
+	p, err := Open(path, WithProvider(nil), WithShards(twoNodeShardLayout("other", LocalShardOwner)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.installFreeze(epoch, coordAddr, pending)
+	p.markPrepared()
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedParticipantQueriesCoordinatorOnRestart(t *testing.T) {
+	maxKey := ^uint64(0)
+	pending := []ShardAssignment{{ID: "s", Owner: "other", Start: 0, End: maxKey}}
+
+	t.Run("coordinator committed -> commit-forward", func(t *testing.T) {
+		// Coordinator with a durable commit record for epoch 5.
+		coord := startServedNode(t, "coord-commit", WithProvider(nil), WithToken("s"))
+		coord.db.mu.Lock()
+		coord.db.manifest.RebalanceEpoch = 5
+		coord.db.mu.Unlock()
+		if err := coord.db.saveManifest(); err != nil {
+			t.Fatal(err)
+		}
+
+		path := filepath.Join(t.TempDir(), "p-commit.csdb")
+		driveToPrepared(t, path, coord.addr, 5, pending)
+
+		p, err := Open(path, WithProvider(nil), WithToken("s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		// Recovery committed-forward: phase IDLE and the layout is L1 (pending).
+		if p.rebalanceSnapshot().phase != phaseIdle {
+			t.Fatalf("participant not IDLE after commit-forward: %v", p.rebalanceSnapshot().phase)
+		}
+		if len(p.shardAssignments()) != 1 {
+			t.Fatalf("participant did not apply L1: shards = %+v", p.shardAssignments())
+		}
+	})
+
+	t.Run("coordinator aborted -> revert to L0", func(t *testing.T) {
+		// Coordinator with NO commit record for epoch 5 (floor at 0 => abort).
+		coord := startServedNode(t, "coord-abort", WithProvider(nil), WithToken("s"))
+
+		path := filepath.Join(t.TempDir(), "p-abort.csdb")
+		driveToPrepared(t, path, coord.addr, 5, pending)
+
+		p, err := Open(path, WithProvider(nil), WithToken("s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		if p.rebalanceSnapshot().phase != phaseIdle {
+			t.Fatalf("participant not IDLE after abort: %v", p.rebalanceSnapshot().phase)
+		}
+		// Reverted to L0 (the original two-shard layout, not the single-shard L1).
+		if len(p.shardAssignments()) != 2 {
+			t.Fatalf("participant did not revert to L0: shards = %+v", p.shardAssignments())
+		}
+	})
+
+	t.Run("coordinator gave away all shards but is still reachable", func(t *testing.T) {
+		// The coordinator owns NO shards (it gave them all away), so it is in no
+		// participant's shard-derived peer set. Recovery must STILL resolve by
+		// dialing the persisted coordinator address directly.
+		coord := startServedNode(t, "coord-empty", WithProvider(nil), WithToken("s"))
+		coord.db.mu.Lock()
+		coord.db.manifest.RebalanceEpoch = 9 // committed => commit
+		// Coordinator owns nothing under the current layout.
+		coord.db.mu.Unlock()
+		if err := coord.db.saveManifest(); err != nil {
+			t.Fatal(err)
+		}
+
+		path := filepath.Join(t.TempDir(), "p-empty.csdb")
+		// The participant's shard layout does NOT mention the coordinator at all.
+		p0, err := Open(path, WithProvider(nil), WithToken("s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p0.installFreeze(9, coord.addr, pending)
+		p0.markPrepared()
+		if err := p0.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		p, err := Open(path, WithProvider(nil), WithToken("s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		if p.rebalanceSnapshot().phase != phaseIdle {
+			t.Fatalf("participant not IDLE after dialing coordinator-with-no-shards: %v", p.rebalanceSnapshot().phase)
+		}
+	})
+}
+
+func TestCoordinatorCrashRecovery(t *testing.T) {
+	t.Run("after durable decide -> commit-forward", func(t *testing.T) {
+		a, b, l1, movingID := twoNode2PC(t)
+		// Stop right after the durable decision write (commit record present).
+		a.db.rebalanceHooks = &rebalanceHooks{
+			afterDurableDecide: func(epoch uint64) {
+				panic("stop-after-durable-decide")
+			},
+		}
+		func() {
+			defer func() { _ = recover() }()
+			_ = a.db.OrchestrateRebalance(l1...)
+		}()
+		a.db.rebalanceHooks = nil
+		// The coordinator A holds a durable commit record (COMMITTING, floor>=epoch).
+		st := a.db.rebalanceSnapshot()
+		if st.phase != phaseCommitting {
+			t.Fatalf("coordinator phase after durable decide = %v, want COMMITTING", st.phase)
+		}
+		// Recovery (re-running the recover step) commits-forward locally.
+		if err := a.db.recoverPendingRebalance(); err != nil {
+			t.Fatalf("recoverPendingRebalance err = %v", err)
+		}
+		if a.db.rebalanceSnapshot().phase != phaseIdle {
+			t.Fatalf("coordinator not IDLE after commit-forward recovery")
+		}
+		gained, err := a.db.Collection("docs").historyFor(movingID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(gained) != 1 {
+			t.Fatalf("gainer missing moving key after commit-forward: %+v", gained)
+		}
+		_ = b
+	})
+
+	t.Run("before durable decide -> abort", func(t *testing.T) {
+		a, b, l1, movingID := twoNode2PC(t)
+		// Stop right before the durable decision (no commit record): panic in the
+		// freeze barrier seam.
+		a.db.rebalanceHooks = &rebalanceHooks{
+			afterFreezeBarrier: func(epoch uint64) {
+				panic("stop-before-durable-decide")
+			},
+		}
+		func() {
+			defer func() { _ = recover() }()
+			_ = a.db.OrchestrateRebalance(l1...)
+		}()
+		a.db.rebalanceHooks = nil
+		// No commit record: floor still below the in-flight epoch.
+		if a.db.committedEpoch() >= a.db.rebalanceSnapshot().epoch {
+			t.Fatalf("unexpected commit record before durable decide")
+		}
+		// Recovery aborts: coordinator self-aborts and broadcasts Abort.
+		if err := a.db.recoverPendingRebalance(); err != nil {
+			t.Fatalf("recoverPendingRebalance err = %v", err)
+		}
+		if a.db.rebalanceSnapshot().phase != phaseIdle {
+			t.Fatalf("coordinator not IDLE after abort recovery")
+		}
+		// The frozen loser B unfroze; the moving key is writable on B again.
+		if err := b.db.Collection("docs").Put(movingID, Entry{Vector: unitVec(16, 7)}); err != nil {
+			t.Fatalf("moving-key write on loser after coordinator-abort recovery err = %v", err)
+		}
+	})
+}
+
+func TestForceAbortHighestEpochAndStaleCommitAborts(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "forceabort.csdb"), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// ForceAbortRebalance bumps the committed floor strictly above the stuck epoch.
+	before := db.committedEpoch()
+	if err := db.ForceAbortRebalance(3); err != nil {
+		t.Fatal(err)
+	}
+	after := db.committedEpoch()
+	if after <= 3 || after <= before {
+		t.Fatalf("force-abort floor = %d, want strictly > max(committed=%d, stuck=3)", after, before)
+	}
+}
+
+func TestForceAbortPersistsAndStaleCommitRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stale.csdb")
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force-abort epoch 4 => floor becomes 5.
+	if err := db.ForceAbortRebalance(4); err != nil {
+		t.Fatal(err)
+	}
+	floor := db.committedEpoch()
+	if floor <= 4 {
+		t.Fatalf("force-abort floor = %d, want > 4", floor)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.committedEpoch() != floor {
+		t.Fatalf("floor after reopen = %d, want %d (persisted)", reopened.committedEpoch(), floor)
+	}
+
+	// A stale-epoch commit (epoch <= floor) is rejected with ErrStaleEpoch.
+	if err := reopened.applyShardLayout(twoNodeShardLayout("a", "b"), 4); !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("stale commit err = %v, want ErrStaleEpoch", err)
+	}
+}
+
+func TestStaleEpochFreezeRejected(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "stalefreeze.csdb"), WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.mu.Lock()
+	db.manifest.RebalanceEpoch = 5
+	db.mu.Unlock()
+	if err := db.saveManifest(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A Freeze/Prepare with epoch <= committed floor is rejected.
+	if err := db.freezeRebalanceShards(5, "coord", twoNodeShardLayout("a", "b")); !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("stale freeze err = %v, want ErrStaleEpoch", err)
+	}
+	if err := db.pullRebalanceShards(3, "coord", twoNodeShardLayout("a", "b")); !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("stale prepare err = %v, want ErrStaleEpoch", err)
+	}
+}
+
+// TestCoordinatorStaleCommitTreatsAsAbort verifies that when a participant
+// rejects the coordinator's CommitRebalance with ErrStaleEpoch (a force-abort
+// bumped the floor past this epoch), the coordinator treats the whole rebalance
+// as aborted: it does NOT proceed to Prune and reverts its own pending state.
+func TestCoordinatorStaleCommitTreatsAsAbort(t *testing.T) {
+	a, b, l1, _ := twoNode2PC(t)
+
+	// Inject a peer that rejects Commit with ErrStaleEpoch (simulating a peer
+	// whose floor was bumped past this epoch by a concurrent force-abort).
+	injectFailingPeer(t, a.db, b.addr, "commit", 0, ErrStaleEpoch)
+
+	err := a.db.OrchestrateRebalance(l1...)
+	if !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("OrchestrateRebalance err = %v, want ErrStaleEpoch", err)
+	}
+	// The coordinator reverted its own pending state (it does not stay COMMITTING).
+	if a.db.rebalanceSnapshot().phase != phaseIdle {
+		t.Fatalf("coordinator phase after stale-commit = %v, want IDLE", a.db.rebalanceSnapshot().phase)
+	}
+}
