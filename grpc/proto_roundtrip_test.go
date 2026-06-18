@@ -117,3 +117,81 @@ func TestProtoRoundTripCodeCarrying(t *testing.T) {
 		})
 	}
 }
+
+// TestProtoRoundTripRebalanceAndRaw covers the GetRaw RPC messages and the
+// rebalance epoch / Freeze / Abort / Resolve RPC messages added in Task 2. Like
+// the test above it imports only the generated package + protobuf and stays
+// green while the root package is red.
+func TestProtoRoundTripRebalanceAndRaw(t *testing.T) {
+	hash := make([]byte, 32)
+	for i := range hash {
+		hash[i] = byte(255 - i)
+	}
+	shards := []*grpcapi.ShardAssignment{
+		{Id: "s0", Owner: "node-a", Start: 0, End: 100},
+		{Id: "s1", Owner: "node-b", Start: 100, End: 200},
+	}
+
+	cases := []struct {
+		name string
+		msg  proto.Message
+	}{
+		{
+			name: "GetRawRequest",
+			msg:  &grpcapi.GetRawRequest{Token: "tok", Collection: "docs", Hash: append([]byte(nil), hash...)},
+		},
+		{
+			name: "GetRawResponse",
+			msg:  &grpcapi.GetRawResponse{Raw: []byte{1, 2, 3, 4, 5, 6, 7, 8}},
+		},
+		{
+			name: "RebalanceRequestEpoch",
+			msg: &grpcapi.RebalanceRequest{
+				Token:  "tok",
+				Shards: []*grpcapi.ShardAssignment{shards[0], shards[1]},
+				Epoch:  7,
+			},
+		},
+		{
+			name: "FreezeRebalanceRequest",
+			msg: &grpcapi.FreezeRebalanceRequest{
+				Token:       "tok",
+				Shards:      []*grpcapi.ShardAssignment{shards[0], shards[1]},
+				Epoch:       7,
+				Coordinator: "127.0.0.1:9001",
+			},
+		},
+		{
+			name: "AbortRebalanceRequest",
+			msg:  &grpcapi.AbortRebalanceRequest{Token: "tok", Epoch: 7},
+		},
+		{
+			name: "ResolveRebalanceRequest",
+			msg:  &grpcapi.ResolveRebalanceRequest{Token: "tok", Epoch: 7},
+		},
+		{
+			name: "ResolveRebalanceResponseCommit",
+			msg:  &grpcapi.ResolveRebalanceResponse{Decision: grpcapi.Decision_DECISION_COMMIT, CommittedEpoch: 7},
+		},
+		{
+			name: "ResolveRebalanceResponseAbort",
+			msg:  &grpcapi.ResolveRebalanceResponse{Decision: grpcapi.Decision_DECISION_ABORT, CommittedEpoch: 6},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := proto.Marshal(tc.msg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := tc.msg.ProtoReflect().New().Interface()
+			if err := proto.Unmarshal(data, got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !proto.Equal(tc.msg, got) {
+				t.Fatalf("round-trip mismatch:\n want %v\n got  %v", tc.msg, got)
+			}
+		})
+	}
+}

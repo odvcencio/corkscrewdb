@@ -22,6 +22,10 @@ service CorkScrewDB {
   rpc PrepareRebalance(RebalanceRequest) returns (Empty);
   rpc CommitRebalance(RebalanceRequest) returns (Empty);
   rpc PruneRebalance(RebalanceRequest) returns (Empty);
+  rpc GetRaw(GetRawRequest) returns (GetRawResponse);
+  rpc FreezeRebalance(FreezeRebalanceRequest) returns (Empty);
+  rpc AbortRebalance(AbortRebalanceRequest) returns (Empty);
+  rpc ResolveRebalance(ResolveRebalanceRequest) returns (ResolveRebalanceResponse);
 }
 
 message Empty {}
@@ -257,4 +261,45 @@ message PullSnapshotResponse {
 message RebalanceRequest {
   string token = 1;
   repeated ShardAssignment shards = 2;
+  uint64 epoch = 3;
+}
+
+// Raw pull-by-hash (Deliverable 2).
+message GetRawRequest {
+  string token      = 1;
+  string collection = 2;
+  bytes  hash       = 3; // 32-byte blake3 key
+}
+
+message GetRawResponse {
+  bytes raw = 1; // little-endian float32 bytes; len = dim*4
+}
+
+// 2PC rebalance RPC payloads (Deliverable 4).
+message FreezeRebalanceRequest {
+  string token = 1;
+  repeated ShardAssignment shards = 2;
+  uint64 epoch = 3;
+  string coordinator = 4; // coordinator serve address, persisted by participant
+}
+
+message AbortRebalanceRequest {
+  string token = 1;
+  uint64 epoch = 2;
+}
+
+message ResolveRebalanceRequest {
+  string token = 1;
+  uint64 epoch = 2;
+}
+
+enum Decision {
+  DECISION_UNKNOWN = 0;
+  DECISION_COMMIT  = 1;
+  DECISION_ABORT   = 2;
+}
+
+message ResolveRebalanceResponse {
+  Decision decision        = 1;
+  uint64   committed_epoch = 2;
 }

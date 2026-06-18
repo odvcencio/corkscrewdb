@@ -22,6 +22,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type Decision int32
+
+const (
+	Decision_DECISION_UNKNOWN Decision = 0
+	Decision_DECISION_COMMIT  Decision = 1
+	Decision_DECISION_ABORT   Decision = 2
+)
+
+// Enum value maps for Decision.
+var (
+	Decision_name = map[int32]string{
+		0: "DECISION_UNKNOWN",
+		1: "DECISION_COMMIT",
+		2: "DECISION_ABORT",
+	}
+	Decision_value = map[string]int32{
+		"DECISION_UNKNOWN": 0,
+		"DECISION_COMMIT":  1,
+		"DECISION_ABORT":   2,
+	}
+)
+
+func (x Decision) Enum() *Decision {
+	p := new(Decision)
+	*p = x
+	return p
+}
+
+func (x Decision) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Decision) Descriptor() protoreflect.EnumDescriptor {
+	return file_corkscrewdb_proto_enumTypes[0].Descriptor()
+}
+
+func (Decision) Type() protoreflect.EnumType {
+	return &file_corkscrewdb_proto_enumTypes[0]
+}
+
+func (x Decision) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Decision.Descriptor instead.
+func (Decision) EnumDescriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{0}
+}
+
 type Empty struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -2171,6 +2220,7 @@ type RebalanceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
 	Shards        []*ShardAssignment     `protobuf:"bytes,2,rep,name=shards,proto3" json:"shards,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2217,6 +2267,343 @@ func (x *RebalanceRequest) GetShards() []*ShardAssignment {
 		return x.Shards
 	}
 	return nil
+}
+
+func (x *RebalanceRequest) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+// Raw pull-by-hash (Deliverable 2).
+type GetRawRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Collection    string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"` // 32-byte blake3 key
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRawRequest) Reset() {
+	*x = GetRawRequest{}
+	mi := &file_corkscrewdb_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRawRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRawRequest) ProtoMessage() {}
+
+func (x *GetRawRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRawRequest.ProtoReflect.Descriptor instead.
+func (*GetRawRequest) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *GetRawRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *GetRawRequest) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *GetRawRequest) GetHash() []byte {
+	if x != nil {
+		return x.Hash
+	}
+	return nil
+}
+
+type GetRawResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Raw           []byte                 `protobuf:"bytes,1,opt,name=raw,proto3" json:"raw,omitempty"` // little-endian float32 bytes; len = dim*4
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRawResponse) Reset() {
+	*x = GetRawResponse{}
+	mi := &file_corkscrewdb_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRawResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRawResponse) ProtoMessage() {}
+
+func (x *GetRawResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRawResponse.ProtoReflect.Descriptor instead.
+func (*GetRawResponse) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *GetRawResponse) GetRaw() []byte {
+	if x != nil {
+		return x.Raw
+	}
+	return nil
+}
+
+// 2PC rebalance RPC payloads (Deliverable 4).
+type FreezeRebalanceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Shards        []*ShardAssignment     `protobuf:"bytes,2,rep,name=shards,proto3" json:"shards,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Coordinator   string                 `protobuf:"bytes,4,opt,name=coordinator,proto3" json:"coordinator,omitempty"` // coordinator serve address, persisted by participant
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FreezeRebalanceRequest) Reset() {
+	*x = FreezeRebalanceRequest{}
+	mi := &file_corkscrewdb_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FreezeRebalanceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FreezeRebalanceRequest) ProtoMessage() {}
+
+func (x *FreezeRebalanceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FreezeRebalanceRequest.ProtoReflect.Descriptor instead.
+func (*FreezeRebalanceRequest) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *FreezeRebalanceRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *FreezeRebalanceRequest) GetShards() []*ShardAssignment {
+	if x != nil {
+		return x.Shards
+	}
+	return nil
+}
+
+func (x *FreezeRebalanceRequest) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *FreezeRebalanceRequest) GetCoordinator() string {
+	if x != nil {
+		return x.Coordinator
+	}
+	return ""
+}
+
+type AbortRebalanceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AbortRebalanceRequest) Reset() {
+	*x = AbortRebalanceRequest{}
+	mi := &file_corkscrewdb_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AbortRebalanceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AbortRebalanceRequest) ProtoMessage() {}
+
+func (x *AbortRebalanceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AbortRebalanceRequest.ProtoReflect.Descriptor instead.
+func (*AbortRebalanceRequest) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *AbortRebalanceRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *AbortRebalanceRequest) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+type ResolveRebalanceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveRebalanceRequest) Reset() {
+	*x = ResolveRebalanceRequest{}
+	mi := &file_corkscrewdb_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveRebalanceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveRebalanceRequest) ProtoMessage() {}
+
+func (x *ResolveRebalanceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveRebalanceRequest.ProtoReflect.Descriptor instead.
+func (*ResolveRebalanceRequest) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ResolveRebalanceRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *ResolveRebalanceRequest) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+type ResolveRebalanceResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Decision       Decision               `protobuf:"varint,1,opt,name=decision,proto3,enum=corkscrewdb.transport.v1.Decision" json:"decision,omitempty"`
+	CommittedEpoch uint64                 `protobuf:"varint,2,opt,name=committed_epoch,json=committedEpoch,proto3" json:"committed_epoch,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResolveRebalanceResponse) Reset() {
+	*x = ResolveRebalanceResponse{}
+	mi := &file_corkscrewdb_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveRebalanceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveRebalanceResponse) ProtoMessage() {}
+
+func (x *ResolveRebalanceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_corkscrewdb_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveRebalanceResponse.ProtoReflect.Descriptor instead.
+func (*ResolveRebalanceResponse) Descriptor() ([]byte, []int) {
+	return file_corkscrewdb_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *ResolveRebalanceResponse) GetDecision() Decision {
+	if x != nil {
+		return x.Decision
+	}
+	return Decision_DECISION_UNKNOWN
+}
+
+func (x *ResolveRebalanceResponse) GetCommittedEpoch() uint64 {
+	if x != nil {
+		return x.CommittedEpoch
+	}
+	return 0
 }
 
 var File_corkscrewdb_proto protoreflect.FileDescriptor
@@ -2437,10 +2824,37 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"maxLamport\x12B\n" +
 	"\arecords\x18\x06 \x03(\v2(.corkscrewdb.transport.v1.SnapshotRecordR\arecords\x12\x1b\n" +
 	"\traw_store\x18\a \x01(\bR\brawStore\x12%\n" +
-	"\x0esparse_enabled\x18\b \x01(\bR\rsparseEnabled\"k\n" +
+	"\x0esparse_enabled\x18\b \x01(\bR\rsparseEnabled\"\x81\x01\n" +
 	"\x10RebalanceRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12A\n" +
-	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards2\xbd\v\n" +
+	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\"Y\n" +
+	"\rGetRawRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\fR\x04hash\"\"\n" +
+	"\x0eGetRawResponse\x12\x10\n" +
+	"\x03raw\x18\x01 \x01(\fR\x03raw\"\xa9\x01\n" +
+	"\x16FreezeRebalanceRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12A\n" +
+	"\x06shards\x18\x02 \x03(\v2).corkscrewdb.transport.v1.ShardAssignmentR\x06shards\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12 \n" +
+	"\vcoordinator\x18\x04 \x01(\tR\vcoordinator\"C\n" +
+	"\x15AbortRebalanceRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"E\n" +
+	"\x17ResolveRebalanceRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"\x83\x01\n" +
+	"\x18ResolveRebalanceResponse\x12>\n" +
+	"\bdecision\x18\x01 \x01(\x0e2\".corkscrewdb.transport.v1.DecisionR\bdecision\x12'\n" +
+	"\x0fcommitted_epoch\x18\x02 \x01(\x04R\x0ecommittedEpoch*I\n" +
+	"\bDecision\x12\x14\n" +
+	"\x10DECISION_UNKNOWN\x10\x00\x12\x13\n" +
+	"\x0fDECISION_COMMIT\x10\x01\x12\x12\n" +
+	"\x0eDECISION_ABORT\x10\x022\xdf\x0e\n" +
 	"\vCorkScrewDB\x12U\n" +
 	"\x04Info\x12%.corkscrewdb.transport.v1.InfoRequest\x1a&.corkscrewdb.transport.v1.InfoResponse\x12f\n" +
 	"\x10EnsureCollection\x121.corkscrewdb.transport.v1.EnsureCollectionRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12b\n" +
@@ -2456,7 +2870,11 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\fPullSnapshot\x12-.corkscrewdb.transport.v1.PullSnapshotRequest\x1a..corkscrewdb.transport.v1.PullSnapshotResponse\x12_\n" +
 	"\x10PrepareRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12^\n" +
 	"\x0fCommitRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12]\n" +
-	"\x0ePruneRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.EmptyB/Z-github.com/odvcencio/corkscrewdb/grpc;grpcapib\x06proto3"
+	"\x0ePruneRebalance\x12*.corkscrewdb.transport.v1.RebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12[\n" +
+	"\x06GetRaw\x12'.corkscrewdb.transport.v1.GetRawRequest\x1a(.corkscrewdb.transport.v1.GetRawResponse\x12d\n" +
+	"\x0fFreezeRebalance\x120.corkscrewdb.transport.v1.FreezeRebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12b\n" +
+	"\x0eAbortRebalance\x12/.corkscrewdb.transport.v1.AbortRebalanceRequest\x1a\x1f.corkscrewdb.transport.v1.Empty\x12y\n" +
+	"\x10ResolveRebalance\x121.corkscrewdb.transport.v1.ResolveRebalanceRequest\x1a2.corkscrewdb.transport.v1.ResolveRebalanceResponseB/Z-github.com/odvcencio/corkscrewdb/grpc;grpcapib\x06proto3"
 
 var (
 	file_corkscrewdb_proto_rawDescOnce sync.Once
@@ -2470,116 +2888,134 @@ func file_corkscrewdb_proto_rawDescGZIP() []byte {
 	return file_corkscrewdb_proto_rawDescData
 }
 
-var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_corkscrewdb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_corkscrewdb_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
 var file_corkscrewdb_proto_goTypes = []any{
-	(*Empty)(nil),                   // 0: corkscrewdb.transport.v1.Empty
-	(*EmbeddingConfig)(nil),         // 1: corkscrewdb.transport.v1.EmbeddingConfig
-	(*CollectionInfo)(nil),          // 2: corkscrewdb.transport.v1.CollectionInfo
-	(*ShardAssignment)(nil),         // 3: corkscrewdb.transport.v1.ShardAssignment
-	(*QuantizedVector)(nil),         // 4: corkscrewdb.transport.v1.QuantizedVector
-	(*SparseBlock)(nil),             // 5: corkscrewdb.transport.v1.SparseBlock
-	(*ChildVector)(nil),             // 6: corkscrewdb.transport.v1.ChildVector
-	(*Entry)(nil),                   // 7: corkscrewdb.transport.v1.Entry
-	(*Filter)(nil),                  // 8: corkscrewdb.transport.v1.Filter
-	(*SearchResult)(nil),            // 9: corkscrewdb.transport.v1.SearchResult
-	(*Version)(nil),                 // 10: corkscrewdb.transport.v1.Version
-	(*InfoRequest)(nil),             // 11: corkscrewdb.transport.v1.InfoRequest
-	(*InfoResponse)(nil),            // 12: corkscrewdb.transport.v1.InfoResponse
-	(*EnsureCollectionRequest)(nil), // 13: corkscrewdb.transport.v1.EnsureCollectionRequest
-	(*DropCollectionRequest)(nil),   // 14: corkscrewdb.transport.v1.DropCollectionRequest
-	(*PutRequest)(nil),              // 15: corkscrewdb.transport.v1.PutRequest
-	(*PutVectorRequest)(nil),        // 16: corkscrewdb.transport.v1.PutVectorRequest
-	(*DeleteRequest)(nil),           // 17: corkscrewdb.transport.v1.DeleteRequest
-	(*SearchRequest)(nil),           // 18: corkscrewdb.transport.v1.SearchRequest
-	(*SearchVectorRequest)(nil),     // 19: corkscrewdb.transport.v1.SearchVectorRequest
-	(*SearchResponse)(nil),          // 20: corkscrewdb.transport.v1.SearchResponse
-	(*HistoryRequest)(nil),          // 21: corkscrewdb.transport.v1.HistoryRequest
-	(*HistoryResponse)(nil),         // 22: corkscrewdb.transport.v1.HistoryResponse
-	(*PullEntriesRequest)(nil),      // 23: corkscrewdb.transport.v1.PullEntriesRequest
-	(*ReplicaEntry)(nil),            // 24: corkscrewdb.transport.v1.ReplicaEntry
-	(*PullEntriesResponse)(nil),     // 25: corkscrewdb.transport.v1.PullEntriesResponse
-	(*PullSnapshotRequest)(nil),     // 26: corkscrewdb.transport.v1.PullSnapshotRequest
-	(*SnapshotVersion)(nil),         // 27: corkscrewdb.transport.v1.SnapshotVersion
-	(*SnapshotRecord)(nil),          // 28: corkscrewdb.transport.v1.SnapshotRecord
-	(*PullSnapshotResponse)(nil),    // 29: corkscrewdb.transport.v1.PullSnapshotResponse
-	(*RebalanceRequest)(nil),        // 30: corkscrewdb.transport.v1.RebalanceRequest
-	nil,                             // 31: corkscrewdb.transport.v1.ChildVector.MetadataEntry
-	nil,                             // 32: corkscrewdb.transport.v1.Entry.MetadataEntry
-	nil,                             // 33: corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	nil,                             // 34: corkscrewdb.transport.v1.Version.MetadataEntry
-	nil,                             // 35: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
-	nil,                             // 36: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	nil,                             // 37: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	(*timestamppb.Timestamp)(nil),   // 38: google.protobuf.Timestamp
+	(Decision)(0),                    // 0: corkscrewdb.transport.v1.Decision
+	(*Empty)(nil),                    // 1: corkscrewdb.transport.v1.Empty
+	(*EmbeddingConfig)(nil),          // 2: corkscrewdb.transport.v1.EmbeddingConfig
+	(*CollectionInfo)(nil),           // 3: corkscrewdb.transport.v1.CollectionInfo
+	(*ShardAssignment)(nil),          // 4: corkscrewdb.transport.v1.ShardAssignment
+	(*QuantizedVector)(nil),          // 5: corkscrewdb.transport.v1.QuantizedVector
+	(*SparseBlock)(nil),              // 6: corkscrewdb.transport.v1.SparseBlock
+	(*ChildVector)(nil),              // 7: corkscrewdb.transport.v1.ChildVector
+	(*Entry)(nil),                    // 8: corkscrewdb.transport.v1.Entry
+	(*Filter)(nil),                   // 9: corkscrewdb.transport.v1.Filter
+	(*SearchResult)(nil),             // 10: corkscrewdb.transport.v1.SearchResult
+	(*Version)(nil),                  // 11: corkscrewdb.transport.v1.Version
+	(*InfoRequest)(nil),              // 12: corkscrewdb.transport.v1.InfoRequest
+	(*InfoResponse)(nil),             // 13: corkscrewdb.transport.v1.InfoResponse
+	(*EnsureCollectionRequest)(nil),  // 14: corkscrewdb.transport.v1.EnsureCollectionRequest
+	(*DropCollectionRequest)(nil),    // 15: corkscrewdb.transport.v1.DropCollectionRequest
+	(*PutRequest)(nil),               // 16: corkscrewdb.transport.v1.PutRequest
+	(*PutVectorRequest)(nil),         // 17: corkscrewdb.transport.v1.PutVectorRequest
+	(*DeleteRequest)(nil),            // 18: corkscrewdb.transport.v1.DeleteRequest
+	(*SearchRequest)(nil),            // 19: corkscrewdb.transport.v1.SearchRequest
+	(*SearchVectorRequest)(nil),      // 20: corkscrewdb.transport.v1.SearchVectorRequest
+	(*SearchResponse)(nil),           // 21: corkscrewdb.transport.v1.SearchResponse
+	(*HistoryRequest)(nil),           // 22: corkscrewdb.transport.v1.HistoryRequest
+	(*HistoryResponse)(nil),          // 23: corkscrewdb.transport.v1.HistoryResponse
+	(*PullEntriesRequest)(nil),       // 24: corkscrewdb.transport.v1.PullEntriesRequest
+	(*ReplicaEntry)(nil),             // 25: corkscrewdb.transport.v1.ReplicaEntry
+	(*PullEntriesResponse)(nil),      // 26: corkscrewdb.transport.v1.PullEntriesResponse
+	(*PullSnapshotRequest)(nil),      // 27: corkscrewdb.transport.v1.PullSnapshotRequest
+	(*SnapshotVersion)(nil),          // 28: corkscrewdb.transport.v1.SnapshotVersion
+	(*SnapshotRecord)(nil),           // 29: corkscrewdb.transport.v1.SnapshotRecord
+	(*PullSnapshotResponse)(nil),     // 30: corkscrewdb.transport.v1.PullSnapshotResponse
+	(*RebalanceRequest)(nil),         // 31: corkscrewdb.transport.v1.RebalanceRequest
+	(*GetRawRequest)(nil),            // 32: corkscrewdb.transport.v1.GetRawRequest
+	(*GetRawResponse)(nil),           // 33: corkscrewdb.transport.v1.GetRawResponse
+	(*FreezeRebalanceRequest)(nil),   // 34: corkscrewdb.transport.v1.FreezeRebalanceRequest
+	(*AbortRebalanceRequest)(nil),    // 35: corkscrewdb.transport.v1.AbortRebalanceRequest
+	(*ResolveRebalanceRequest)(nil),  // 36: corkscrewdb.transport.v1.ResolveRebalanceRequest
+	(*ResolveRebalanceResponse)(nil), // 37: corkscrewdb.transport.v1.ResolveRebalanceResponse
+	nil,                              // 38: corkscrewdb.transport.v1.ChildVector.MetadataEntry
+	nil,                              // 39: corkscrewdb.transport.v1.Entry.MetadataEntry
+	nil,                              // 40: corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	nil,                              // 41: corkscrewdb.transport.v1.Version.MetadataEntry
+	nil,                              // 42: corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	nil,                              // 43: corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	nil,                              // 44: corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	(*timestamppb.Timestamp)(nil),    // 45: google.protobuf.Timestamp
 }
 var file_corkscrewdb_proto_depIdxs = []int32{
-	4,  // 0: corkscrewdb.transport.v1.ChildVector.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
-	31, // 1: corkscrewdb.transport.v1.ChildVector.metadata:type_name -> corkscrewdb.transport.v1.ChildVector.MetadataEntry
-	32, // 2: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
-	33, // 3: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
-	4,  // 4: corkscrewdb.transport.v1.Version.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
-	5,  // 5: corkscrewdb.transport.v1.Version.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
-	6,  // 6: corkscrewdb.transport.v1.Version.children:type_name -> corkscrewdb.transport.v1.ChildVector
-	34, // 7: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
-	38, // 8: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
-	1,  // 9: corkscrewdb.transport.v1.InfoResponse.embedding:type_name -> corkscrewdb.transport.v1.EmbeddingConfig
-	2,  // 10: corkscrewdb.transport.v1.InfoResponse.collections:type_name -> corkscrewdb.transport.v1.CollectionInfo
-	3,  // 11: corkscrewdb.transport.v1.InfoResponse.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
-	7,  // 12: corkscrewdb.transport.v1.PutRequest.entry:type_name -> corkscrewdb.transport.v1.Entry
-	35, // 13: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
-	8,  // 14: corkscrewdb.transport.v1.SearchRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
-	8,  // 15: corkscrewdb.transport.v1.SearchVectorRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
-	9,  // 16: corkscrewdb.transport.v1.SearchResponse.results:type_name -> corkscrewdb.transport.v1.SearchResult
-	10, // 17: corkscrewdb.transport.v1.HistoryResponse.versions:type_name -> corkscrewdb.transport.v1.Version
-	4,  // 18: corkscrewdb.transport.v1.ReplicaEntry.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
-	5,  // 19: corkscrewdb.transport.v1.ReplicaEntry.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
-	6,  // 20: corkscrewdb.transport.v1.ReplicaEntry.children:type_name -> corkscrewdb.transport.v1.ChildVector
-	36, // 21: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
-	38, // 22: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
-	24, // 23: corkscrewdb.transport.v1.PullEntriesResponse.entries:type_name -> corkscrewdb.transport.v1.ReplicaEntry
-	4,  // 24: corkscrewdb.transport.v1.SnapshotVersion.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
-	5,  // 25: corkscrewdb.transport.v1.SnapshotVersion.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
-	6,  // 26: corkscrewdb.transport.v1.SnapshotVersion.children:type_name -> corkscrewdb.transport.v1.ChildVector
-	37, // 27: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
-	38, // 28: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
-	27, // 29: corkscrewdb.transport.v1.SnapshotRecord.versions:type_name -> corkscrewdb.transport.v1.SnapshotVersion
-	28, // 30: corkscrewdb.transport.v1.PullSnapshotResponse.records:type_name -> corkscrewdb.transport.v1.SnapshotRecord
-	3,  // 31: corkscrewdb.transport.v1.RebalanceRequest.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
-	11, // 32: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
-	13, // 33: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
-	14, // 34: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
-	15, // 35: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
-	16, // 36: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
-	17, // 37: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
-	18, // 38: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
-	19, // 39: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
-	21, // 40: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
-	23, // 41: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
-	23, // 42: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
-	26, // 43: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
-	30, // 44: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	30, // 45: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	30, // 46: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
-	12, // 47: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
-	0,  // 48: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 49: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 50: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 51: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 52: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
-	20, // 53: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
-	20, // 54: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
-	22, // 55: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
-	25, // 56: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
-	25, // 57: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
-	29, // 58: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
-	0,  // 59: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 60: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	0,  // 61: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:output_type -> corkscrewdb.transport.v1.Empty
-	47, // [47:62] is the sub-list for method output_type
-	32, // [32:47] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	5,  // 0: corkscrewdb.transport.v1.ChildVector.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
+	38, // 1: corkscrewdb.transport.v1.ChildVector.metadata:type_name -> corkscrewdb.transport.v1.ChildVector.MetadataEntry
+	39, // 2: corkscrewdb.transport.v1.Entry.metadata:type_name -> corkscrewdb.transport.v1.Entry.MetadataEntry
+	40, // 3: corkscrewdb.transport.v1.SearchResult.metadata:type_name -> corkscrewdb.transport.v1.SearchResult.MetadataEntry
+	5,  // 4: corkscrewdb.transport.v1.Version.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
+	6,  // 5: corkscrewdb.transport.v1.Version.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
+	7,  // 6: corkscrewdb.transport.v1.Version.children:type_name -> corkscrewdb.transport.v1.ChildVector
+	41, // 7: corkscrewdb.transport.v1.Version.metadata:type_name -> corkscrewdb.transport.v1.Version.MetadataEntry
+	45, // 8: corkscrewdb.transport.v1.Version.wall_clock:type_name -> google.protobuf.Timestamp
+	2,  // 9: corkscrewdb.transport.v1.InfoResponse.embedding:type_name -> corkscrewdb.transport.v1.EmbeddingConfig
+	3,  // 10: corkscrewdb.transport.v1.InfoResponse.collections:type_name -> corkscrewdb.transport.v1.CollectionInfo
+	4,  // 11: corkscrewdb.transport.v1.InfoResponse.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
+	8,  // 12: corkscrewdb.transport.v1.PutRequest.entry:type_name -> corkscrewdb.transport.v1.Entry
+	42, // 13: corkscrewdb.transport.v1.PutVectorRequest.metadata:type_name -> corkscrewdb.transport.v1.PutVectorRequest.MetadataEntry
+	9,  // 14: corkscrewdb.transport.v1.SearchRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
+	9,  // 15: corkscrewdb.transport.v1.SearchVectorRequest.filters:type_name -> corkscrewdb.transport.v1.Filter
+	10, // 16: corkscrewdb.transport.v1.SearchResponse.results:type_name -> corkscrewdb.transport.v1.SearchResult
+	11, // 17: corkscrewdb.transport.v1.HistoryResponse.versions:type_name -> corkscrewdb.transport.v1.Version
+	5,  // 18: corkscrewdb.transport.v1.ReplicaEntry.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
+	6,  // 19: corkscrewdb.transport.v1.ReplicaEntry.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
+	7,  // 20: corkscrewdb.transport.v1.ReplicaEntry.children:type_name -> corkscrewdb.transport.v1.ChildVector
+	43, // 21: corkscrewdb.transport.v1.ReplicaEntry.metadata:type_name -> corkscrewdb.transport.v1.ReplicaEntry.MetadataEntry
+	45, // 22: corkscrewdb.transport.v1.ReplicaEntry.wall_clock:type_name -> google.protobuf.Timestamp
+	25, // 23: corkscrewdb.transport.v1.PullEntriesResponse.entries:type_name -> corkscrewdb.transport.v1.ReplicaEntry
+	5,  // 24: corkscrewdb.transport.v1.SnapshotVersion.quantized:type_name -> corkscrewdb.transport.v1.QuantizedVector
+	6,  // 25: corkscrewdb.transport.v1.SnapshotVersion.sparse:type_name -> corkscrewdb.transport.v1.SparseBlock
+	7,  // 26: corkscrewdb.transport.v1.SnapshotVersion.children:type_name -> corkscrewdb.transport.v1.ChildVector
+	44, // 27: corkscrewdb.transport.v1.SnapshotVersion.metadata:type_name -> corkscrewdb.transport.v1.SnapshotVersion.MetadataEntry
+	45, // 28: corkscrewdb.transport.v1.SnapshotVersion.wall_clock:type_name -> google.protobuf.Timestamp
+	28, // 29: corkscrewdb.transport.v1.SnapshotRecord.versions:type_name -> corkscrewdb.transport.v1.SnapshotVersion
+	29, // 30: corkscrewdb.transport.v1.PullSnapshotResponse.records:type_name -> corkscrewdb.transport.v1.SnapshotRecord
+	4,  // 31: corkscrewdb.transport.v1.RebalanceRequest.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
+	4,  // 32: corkscrewdb.transport.v1.FreezeRebalanceRequest.shards:type_name -> corkscrewdb.transport.v1.ShardAssignment
+	0,  // 33: corkscrewdb.transport.v1.ResolveRebalanceResponse.decision:type_name -> corkscrewdb.transport.v1.Decision
+	12, // 34: corkscrewdb.transport.v1.CorkScrewDB.Info:input_type -> corkscrewdb.transport.v1.InfoRequest
+	14, // 35: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:input_type -> corkscrewdb.transport.v1.EnsureCollectionRequest
+	15, // 36: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:input_type -> corkscrewdb.transport.v1.DropCollectionRequest
+	16, // 37: corkscrewdb.transport.v1.CorkScrewDB.Put:input_type -> corkscrewdb.transport.v1.PutRequest
+	17, // 38: corkscrewdb.transport.v1.CorkScrewDB.PutVector:input_type -> corkscrewdb.transport.v1.PutVectorRequest
+	18, // 39: corkscrewdb.transport.v1.CorkScrewDB.Delete:input_type -> corkscrewdb.transport.v1.DeleteRequest
+	19, // 40: corkscrewdb.transport.v1.CorkScrewDB.Search:input_type -> corkscrewdb.transport.v1.SearchRequest
+	20, // 41: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:input_type -> corkscrewdb.transport.v1.SearchVectorRequest
+	22, // 42: corkscrewdb.transport.v1.CorkScrewDB.History:input_type -> corkscrewdb.transport.v1.HistoryRequest
+	24, // 43: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
+	24, // 44: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:input_type -> corkscrewdb.transport.v1.PullEntriesRequest
+	27, // 45: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:input_type -> corkscrewdb.transport.v1.PullSnapshotRequest
+	31, // 46: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	31, // 47: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	31, // 48: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:input_type -> corkscrewdb.transport.v1.RebalanceRequest
+	32, // 49: corkscrewdb.transport.v1.CorkScrewDB.GetRaw:input_type -> corkscrewdb.transport.v1.GetRawRequest
+	34, // 50: corkscrewdb.transport.v1.CorkScrewDB.FreezeRebalance:input_type -> corkscrewdb.transport.v1.FreezeRebalanceRequest
+	35, // 51: corkscrewdb.transport.v1.CorkScrewDB.AbortRebalance:input_type -> corkscrewdb.transport.v1.AbortRebalanceRequest
+	36, // 52: corkscrewdb.transport.v1.CorkScrewDB.ResolveRebalance:input_type -> corkscrewdb.transport.v1.ResolveRebalanceRequest
+	13, // 53: corkscrewdb.transport.v1.CorkScrewDB.Info:output_type -> corkscrewdb.transport.v1.InfoResponse
+	1,  // 54: corkscrewdb.transport.v1.CorkScrewDB.EnsureCollection:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 55: corkscrewdb.transport.v1.CorkScrewDB.DropCollection:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 56: corkscrewdb.transport.v1.CorkScrewDB.Put:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 57: corkscrewdb.transport.v1.CorkScrewDB.PutVector:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 58: corkscrewdb.transport.v1.CorkScrewDB.Delete:output_type -> corkscrewdb.transport.v1.Empty
+	21, // 59: corkscrewdb.transport.v1.CorkScrewDB.Search:output_type -> corkscrewdb.transport.v1.SearchResponse
+	21, // 60: corkscrewdb.transport.v1.CorkScrewDB.SearchVector:output_type -> corkscrewdb.transport.v1.SearchResponse
+	23, // 61: corkscrewdb.transport.v1.CorkScrewDB.History:output_type -> corkscrewdb.transport.v1.HistoryResponse
+	26, // 62: corkscrewdb.transport.v1.CorkScrewDB.PullEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	26, // 63: corkscrewdb.transport.v1.CorkScrewDB.StreamEntries:output_type -> corkscrewdb.transport.v1.PullEntriesResponse
+	30, // 64: corkscrewdb.transport.v1.CorkScrewDB.PullSnapshot:output_type -> corkscrewdb.transport.v1.PullSnapshotResponse
+	1,  // 65: corkscrewdb.transport.v1.CorkScrewDB.PrepareRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 66: corkscrewdb.transport.v1.CorkScrewDB.CommitRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 67: corkscrewdb.transport.v1.CorkScrewDB.PruneRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	33, // 68: corkscrewdb.transport.v1.CorkScrewDB.GetRaw:output_type -> corkscrewdb.transport.v1.GetRawResponse
+	1,  // 69: corkscrewdb.transport.v1.CorkScrewDB.FreezeRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	1,  // 70: corkscrewdb.transport.v1.CorkScrewDB.AbortRebalance:output_type -> corkscrewdb.transport.v1.Empty
+	37, // 71: corkscrewdb.transport.v1.CorkScrewDB.ResolveRebalance:output_type -> corkscrewdb.transport.v1.ResolveRebalanceResponse
+	53, // [53:72] is the sub-list for method output_type
+	34, // [34:53] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_corkscrewdb_proto_init() }
@@ -2592,13 +3028,14 @@ func file_corkscrewdb_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_corkscrewdb_proto_rawDesc), len(file_corkscrewdb_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   38,
+			NumEnums:      1,
+			NumMessages:   44,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_corkscrewdb_proto_goTypes,
 		DependencyIndexes: file_corkscrewdb_proto_depIdxs,
+		EnumInfos:         file_corkscrewdb_proto_enumTypes,
 		MessageInfos:      file_corkscrewdb_proto_msgTypes,
 	}.Build()
 	File_corkscrewdb_proto = out.File
