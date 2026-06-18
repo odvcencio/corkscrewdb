@@ -62,6 +62,11 @@ func writeFrame(w io.Writer, key, value []byte) error {
 	return err
 }
 
+// maxRVSValueBytes caps the value allocation in readFrame.  No legitimate blob
+// in a single .rvs segment can exceed the segment size ceiling (maxSegmentBytes,
+// 64 MiB).  An inflated length prefix is corruption, not a plausible large blob.
+const maxRVSValueBytes = maxSegmentBytes
+
 // readFrame returns key, value, and the total bytes consumed by the frame.
 func readFrame(r io.Reader) (key, value []byte, n int, err error) {
 	key = make([]byte, keyLen)
@@ -71,6 +76,11 @@ func readFrame(r io.Reader) (key, value []byte, n int, err error) {
 	var valLen uint32
 	if err = binary.Read(r, binary.LittleEndian, &valLen); err != nil {
 		return nil, nil, 0, err
+	}
+	// Bound the declared length before allocating so an inflated length prefix
+	// surfaces as a typed error rather than a multi-GiB allocation.
+	if int64(valLen) > maxRVSValueBytes {
+		return nil, nil, 0, fmt.Errorf("%w: frame value length too large %d (max %d)", ErrRVSFormat, valLen, maxRVSValueBytes)
 	}
 	value = make([]byte, valLen)
 	if _, err = io.ReadFull(r, value); err != nil {

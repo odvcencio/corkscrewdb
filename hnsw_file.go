@@ -182,11 +182,21 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 	if int(nodeCount) != flat.Len() {
 		return nil, fmt.Errorf("corkscrewdb: hnsw node count mismatch: file has %d, flat index has %d", nodeCount, flat.Len())
 	}
+	// maxHNSWNodeIDBytes caps any single node ID string length read from a
+	// .hnsw file.  No legitimate node ID can exceed this generous ceiling.
+	const maxHNSWNodeIDBytes = uint32(64 << 10) // 64 KiB
+	// maxHNSWLayers / maxHNSWNeighbors bound layer and neighbour allocations.
+	const maxHNSWLayers     = int32(64)
+	const maxHNSWNeighbors  = int32(1 << 20) // 1 M neighbours per node: far above any real graph
+
 	nodeIDs := make([]string, nodeCount)
 	for i := uint32(0); i < nodeCount; i++ {
 		var idLen uint32
 		if err := read(&idLen); err != nil {
 			return nil, err
+		}
+		if idLen > maxHNSWNodeIDBytes {
+			return nil, fmt.Errorf("corkscrewdb: hnsw node ID length too large %d (max %d)", idLen, maxHNSWNodeIDBytes)
 		}
 		idBuf := make([]byte, idLen)
 		if _, err := io.ReadFull(mr, idBuf); err != nil {
@@ -199,6 +209,9 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 	if err := read(&numLayers); err != nil {
 		return nil, err
 	}
+	if numLayers < 0 || numLayers > maxHNSWLayers {
+		return nil, fmt.Errorf("corkscrewdb: hnsw layer count out of range %d (max %d)", numLayers, maxHNSWLayers)
+	}
 
 	layers := make([][][]int32, numLayers)
 	for l := int32(0); l < numLayers; l++ {
@@ -206,11 +219,17 @@ func loadHNSWFile(path string, flat *index, params HNSWParams) (*hnswIndex, erro
 		if err := read(&numNodes); err != nil {
 			return nil, err
 		}
+		if numNodes < 0 {
+			return nil, fmt.Errorf("corkscrewdb: hnsw layer %d node count negative %d", l, numNodes)
+		}
 		layers[l] = make([][]int32, numNodes)
 		for n := int32(0); n < numNodes; n++ {
 			var numNeighbors int32
 			if err := read(&numNeighbors); err != nil {
 				return nil, err
+			}
+			if numNeighbors < 0 || numNeighbors > maxHNSWNeighbors {
+				return nil, fmt.Errorf("corkscrewdb: hnsw layer %d node %d neighbor count out of range %d", l, n, numNeighbors)
 			}
 			if numNeighbors > 0 {
 				neighbors := make([]int32, numNeighbors)

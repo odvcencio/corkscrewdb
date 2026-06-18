@@ -17,6 +17,11 @@ import (
 const (
 	indexMagic   = uint32(0x54514931) // TQI1
 	indexVersion = uint8(3)
+
+	// maxIndexFieldBytes caps any single length-prefixed field read from a .tqi
+	// file.  No legitimate field can exceed a generous 64 MiB ceiling (matching
+	// the rawstore segment cap); a higher declared length is corruption.
+	maxIndexFieldBytes = uint64(64 << 20)
 )
 
 func saveIndexFile(path string, idx *index, maxLamport uint64, rawStore, sparse bool) error {
@@ -146,6 +151,12 @@ func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 		if err := read(&length); err != nil {
 			return nil, err
 		}
+		// Bound the declared length before allocating so an inflated length prefix
+		// (corruption or crafted input) surfaces as a typed error rather than an
+		// OOM-inducing multi-GiB allocation.
+		if uint64(length) > maxIndexFieldBytes {
+			return nil, fmt.Errorf("corkscrewdb: index field length too large %d (max %d)", length, maxIndexFieldBytes)
+		}
 		buf := make([]byte, length)
 		if _, err := io.ReadFull(mr, buf); err != nil {
 			return nil, err
@@ -175,9 +186,22 @@ func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 	if err := read(&dim); err != nil {
 		return nil, 0, false, false, err
 	}
+	// Bound dim before calling newIndex.  turboquant's Gaussian projection matrix
+	// is O(dim²): at dim=2048 initialisation takes ~200 ms; beyond that it
+	// blocks for seconds.  No currently-supported embedding model exceeds 2048;
+	// reject larger values as corruption to prevent DoS via crafted .tqi files.
+	const maxIndexDim = uint32(2048)
+	if dim == 0 || dim > maxIndexDim {
+		return nil, 0, false, false, fmt.Errorf("corkscrewdb: index dim out of range %d (max %d)", dim, maxIndexDim)
+	}
 	var bitWidth uint32
 	if err := read(&bitWidth); err != nil {
 		return nil, 0, false, false, err
+	}
+	// turboquant.validateIPBitWidth enforces [2,8]; reject outside that range
+	// before calling newIndex to prevent a panic inside turboquant.
+	if bitWidth < 2 || bitWidth > 8 {
+		return nil, 0, false, false, fmt.Errorf("corkscrewdb: index bitWidth out of range %d (must be 2-8)", bitWidth)
 	}
 	var seed int64
 	if err := read(&seed); err != nil {

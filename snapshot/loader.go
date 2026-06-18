@@ -17,6 +17,13 @@ import (
 const (
 	maxCompactOrdinalChildren        = 1 << 20
 	maxCompactChildBlockBytes uint64 = 512 << 20
+
+	// maxSnapshotFieldBytes bounds any single length-prefixed field in a
+	// snapshot.  Snapshots are full-collection persisted state, so they can
+	// legitimately be larger than a single WAL segment; we allow a generous
+	// 64 MiB per field — far above any plausible ID, text, or JSON blob.
+	// An inflated prefix above this ceiling is corruption, not a valid record.
+	maxSnapshotFieldBytes = uint32(64 << 20)
 )
 
 func LoadFile(path string) (Data, error) {
@@ -51,6 +58,12 @@ func read(r io.Reader) (Data, error) {
 		if err := read(&length); err != nil {
 			return nil, err
 		}
+		// Bound the declared length before allocating so an inflated length prefix
+		// (corruption or crafted input) surfaces as a typed error rather than an
+		// OOM-inducing multi-GiB allocation that swallows the rest of the file.
+		if length > maxSnapshotFieldBytes {
+			return nil, fmt.Errorf("snapshot: field length too large %d (max %d)", length, maxSnapshotFieldBytes)
+		}
 		buf := make([]byte, length)
 		if _, err := io.ReadFull(mr, buf); err != nil {
 			return nil, err
@@ -70,6 +83,21 @@ func read(r io.Reader) (Data, error) {
 	readString := func() (string, error) {
 		buf, err := readBytes()
 		return string(buf), err
+	}
+	// readCount reads a u32 element count and bounds it against a generous
+	// ceiling so an inflated count cannot trigger a giant allocation.  Each
+	// element costs at least one byte, so no legitimate count can exceed the
+	// maxReadableBytes ceiling.
+	const maxSnapshotCount = uint32(1 << 24) // 16 M items: far above any real snapshot
+	readCount := func(what string) (uint32, error) {
+		var count uint32
+		if err := read(&count); err != nil {
+			return 0, err
+		}
+		if count > maxSnapshotCount {
+			return 0, fmt.Errorf("snapshot: %s count too large %d (max %d)", what, count, maxSnapshotCount)
+		}
+		return count, nil
 	}
 
 	var data Data
@@ -124,8 +152,8 @@ func read(r io.Reader) (Data, error) {
 	}
 	data.CreatedAt = time.Unix(0, createdAt).UTC()
 
-	var recordCount uint32
-	if err := read(&recordCount); err != nil {
+	recordCount, err := readCount("records")
+	if err != nil {
 		return data, err
 	}
 	data.Records = make([]Record, 0, recordCount)
@@ -134,8 +162,8 @@ func read(r io.Reader) (Data, error) {
 		if err != nil {
 			return data, err
 		}
-		var versionCount uint32
-		if err := read(&versionCount); err != nil {
+		versionCount, err := readCount("versions")
+		if err != nil {
 			return data, err
 		}
 		record := Record{ID: id, Versions: make([]Version, 0, versionCount)}
@@ -182,8 +210,8 @@ func read(r io.Reader) (Data, error) {
 				return data, err
 			}
 			if hasSparse == 1 {
-				var count uint32
-				if err := read(&count); err != nil {
+				count, err := readCount("sparse")
+				if err != nil {
 					return data, err
 				}
 				sparse := &SparseBlock{
@@ -205,8 +233,8 @@ func read(r io.Reader) (Data, error) {
 				version.Sparse = sparse
 			}
 			{
-				var childCount uint32
-				if err := read(&childCount); err != nil {
+				childCount, err := readCount("children")
+				if err != nil {
 					return data, err
 				}
 				var childEncoding uint8
