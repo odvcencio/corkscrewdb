@@ -51,15 +51,21 @@ func (c *Collection) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 	}
 
 	// Snapshot index / dim / sparse set / per-id hydrate map under the RLock; do
-	// all scoring outside the lock (mirrors searchVectorLocal).
+	// all scoring outside the lock (mirrors searchVectorLocal). The sparse set is
+	// COPIED (not merely aliased) when the sparse channel is present, because
+	// sparseSearch iterates it outside the lock while concurrent writes mutate
+	// c.sparseSet under the write lock. Values are *SparseVector pointers into
+	// deep-cloned, immutable-after-store vectors, so a shallow map copy is safe.
 	c.mu.RLock()
 	idx := c.index
 	dim := c.dim
-	sparseSet := c.sparseSet
+	var sparseSet map[string]*SparseVector
 	var hydrateByID map[string]hydrateMeta
 	if q.Sparse != nil && len(q.Sparse.Indices) > 0 {
-		hydrateByID = make(map[string]hydrateMeta, len(sparseSet))
-		for id := range sparseSet {
+		sparseSet = make(map[string]*SparseVector, len(c.sparseSet))
+		hydrateByID = make(map[string]hydrateMeta, len(c.sparseSet))
+		for id, sv := range c.sparseSet {
+			sparseSet[id] = sv
 			versions := c.history[id]
 			if len(versions) == 0 {
 				continue
