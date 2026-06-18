@@ -381,6 +381,7 @@ func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
 		PackageVersion: db.manifest.ModuleVersion,
 		Embedding:      db.manifest.Embedding,
 		Peers:          append([]string(nil), db.peers...),
+		Collections:    db.rpcCollectionInfoLocked(),
 		Shards:         cloneShardAssignments(db.manifest.Shards),
 	}, nil
 }
@@ -388,6 +389,12 @@ func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
 func (db *DB) rpcCollectionInfo() []RPCCollectionInfo {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
+	return db.rpcCollectionInfoLocked()
+}
+
+// rpcCollectionInfoLocked returns the collection info slice without acquiring
+// the db lock; callers must hold db.mu.RLock or db.mu.Lock.
+func (db *DB) rpcCollectionInfoLocked() []RPCCollectionInfo {
 	if len(db.manifest.Collections) == 0 {
 		return nil
 	}
@@ -773,6 +780,7 @@ func sanitizePeers(peers []string) []string {
 	return out
 }
 
+// reserve-only: wired in the Performance phase
 func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 	path := db.collectionIndexPath(name)
 	if _, err := os.Stat(path); err != nil {
@@ -784,6 +792,7 @@ func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 	return loadIndexFile(path)
 }
 
+// reserve-only: wired in the Performance phase
 func (db *DB) tryLoadHNSWIndex(name string, flat *index) (*hnswIndex, error) {
 	path := db.collectionHNSWPath(name)
 	if _, err := os.Stat(path); err != nil {

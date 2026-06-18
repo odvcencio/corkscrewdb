@@ -345,6 +345,7 @@ func containsAll(s string, subs ...string) bool {
 }
 
 func TestConnectRemoteLifecycle(t *testing.T) {
+	t.Skip("restored in v0.3.0 Distribution phase: code-carrying replication over codes + raw pull-by-hash")
 	serverDB, addr := startRemoteTestServer(t, WithProvider(&mockProvider{dim: 16}), WithToken("secret"))
 	_ = serverDB
 

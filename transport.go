@@ -244,27 +244,14 @@ func (s *transportServer) Put(req RPCPutRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errRemoteUnsupportedPendingDistribution
-	}
-	return s.db.Collection(req.Collection).put(req.ID, req.Entry, !req.Internal)
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (s *transportServer) PutVector(req RPCPutVectorRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errRemoteUnsupportedPendingDistribution
-	}
-	opts := make([]PutVectorOption, 0, 2)
-	if req.Text != "" {
-		opts = append(opts, WithText(req.Text))
-	}
-	if len(req.Metadata) > 0 {
-		opts = append(opts, WithMetadata(req.Metadata))
-	}
-	return s.db.Collection(req.Collection).putVectorRequest(req.ID, req.Vector, collectPutVectorOptions(opts), !req.Internal)
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (s *transportServer) Search(req RPCSearchRequest, resp *RPCSearchResponse) error {
@@ -316,10 +303,7 @@ func (s *transportServer) Delete(req RPCDeleteRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return errRemoteUnsupportedPendingDistribution
-	}
-	return s.db.Collection(req.Collection).delete(req.ID, !req.Internal)
+	return errRemoteUnsupportedPendingDistribution
 }
 
 func (s *transportServer) authorize(token string) error {
@@ -428,113 +412,23 @@ func (s *transportServer) pullEntries(req RPCPullEntriesRequest) (RPCPullEntries
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
 	}
-	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
-	}
-	if s.db.streamer == nil {
-		return RPCPullEntriesResponse{}, nil
-	}
-	pulled := s.db.streamer.Pull(req.Collection, req.SinceClock, req.MaxEntries)
-	resp := RPCPullEntriesResponse{
-		LatestClock: pulled.LatestClock,
-		HasMore:     pulled.HasMore,
-		Entries:     make([]RPCReplicaEntry, len(pulled.Entries)),
-	}
-	for i, e := range pulled.Entries {
-		resp.Entries[i] = RPCReplicaEntry{
-			Kind:         e.Kind,
-			CollectionID: e.CollectionID,
-			VectorID:     e.VectorID,
-			Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
-			Text:         e.Text,
-			Metadata:     cloneMetadata(e.Metadata),
-			LamportClock: e.LamportClock,
-			ActorID:      e.ActorID,
-			WallClock:    e.WallClock,
-		}
-	}
-	return resp, nil
+	return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
 }
 
-func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, wait time.Duration) (RPCPullEntriesResponse, error) {
+func (s *transportServer) pullEntriesBlocking(req RPCPullEntriesRequest, _ time.Duration) (RPCPullEntriesResponse, error) {
 	if err := s.authorize(req.Token); err != nil {
 		return RPCPullEntriesResponse{}, err
 	}
-	if s.collectionUsesQuantizedOnly(req.Collection) {
-		return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
-	}
-	if s.db.streamer == nil {
-		return RPCPullEntriesResponse{}, nil
-	}
-	pulled := s.db.streamer.PullBlocking(req.Collection, req.SinceClock, req.MaxEntries, wait)
-	resp := RPCPullEntriesResponse{
-		LatestClock: pulled.LatestClock,
-		HasMore:     pulled.HasMore,
-		Entries:     make([]RPCReplicaEntry, len(pulled.Entries)),
-	}
-	for i, e := range pulled.Entries {
-		resp.Entries[i] = RPCReplicaEntry{
-			Kind:         e.Kind,
-			CollectionID: e.CollectionID,
-			VectorID:     e.VectorID,
-			Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
-			Text:         e.Text,
-			Metadata:     cloneMetadata(e.Metadata),
-			LamportClock: e.LamportClock,
-			ActorID:      e.ActorID,
-			WallClock:    e.WallClock,
-		}
-	}
-	return resp, nil
+	return RPCPullEntriesResponse{}, errRemoteUnsupportedPendingDistribution
 }
 
-func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, resp *RPCPullSnapshotResponse) error {
+func (s *transportServer) PullSnapshot(req RPCPullSnapshotRequest, _ *RPCPullSnapshotResponse) error {
 	if err := s.authorize(req.Token); err != nil {
 		return err
 	}
-	s.db.mu.RLock()
-	coll, ok := s.db.collections[req.Collection]
-	s.db.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("corkscrewdb: collection %q not found", req.Collection)
-	}
-	if !coll.rawStoreEnabled {
-		return errRemoteUnsupportedPendingDistribution
-	}
-
-	coll.mu.RLock()
-	defer coll.mu.RUnlock()
-
-	resp.Collection = coll.name
-	resp.BitWidth = coll.bitWidth
-	resp.Seed = coll.seed
-	resp.Dim = coll.dim
-	resp.MaxLamport = coll.clock.Current()
-	resp.Records = make([]RPCSnapshotRecord, 0, len(coll.history))
-	for id, versions := range coll.history {
-		record := RPCSnapshotRecord{ID: id, Versions: make([]RPCSnapshotVersion, len(versions))}
-		for i, v := range versions {
-			record.Versions[i] = RPCSnapshotVersion{
-				Embedding:    nil, // WAL v5 dropped inline embedding; Distribution rebuilds this wire.
-				Text:         v.Text,
-				Metadata:     cloneMetadata(v.Metadata),
-				LamportClock: v.LamportClock,
-				ActorID:      v.ActorID,
-				WallClock:    v.WallClock,
-				Tombstone:    v.Tombstone,
-			}
-		}
-		resp.Records = append(resp.Records, record)
-	}
-	return nil
+	return errRemoteUnsupportedPendingDistribution
 }
 
-func (s *transportServer) collectionUsesQuantizedOnly(name string) bool {
-	s.db.mu.RLock()
-	coll := s.db.collections[name]
-	s.db.mu.RUnlock()
-	return coll != nil && !coll.rawStoreEnabled
-}
 
 func (s *transportServer) PrepareRebalance(req RPCRebalanceRequest, _ *RPCEmpty) error {
 	if err := s.authorize(req.Token); err != nil {

@@ -46,6 +46,14 @@ func NewDBClients(ctx context.Context, cfg Config) (*DBClients, error) {
 	return &DBClients{rw: rw, ro: ro}, nil
 }
 
+// newLocalClients wraps a directly-opened (non-remote) *corkscrewdb.DB in a
+// *DBClients with rw and ro pointing at the same instance. Used in tests that
+// open a local DB to avoid going through the gRPC transport layer (which Phase
+// 1 gates for write/pull paths).
+func newLocalClients(db *corkscrewdb.DB) *DBClients {
+	return &DBClients{rw: db, ro: db}
+}
+
 // dialWithContext calls corkscrewdb.Connect with the given token and
 // honors ctx cancellation by racing the blocking call against ctx.Done.
 // If ctx fires first, a drain goroutine closes any *DB that arrives

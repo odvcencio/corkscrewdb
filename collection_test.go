@@ -556,6 +556,54 @@ func TestRemotePathsDisabledPendingDistribution(t *testing.T) {
 	}
 }
 
+// TestDefaultCollectionReplicationDisabledPendingDistribution asserts that the
+// multi-node server paths return errRemoteUnsupportedPendingDistribution for a
+// DEFAULT (raw-store-enabled) collection, not just for WithoutRawStore()
+// collections. This guards against the silent data-loss bug where the
+// collectionUsesQuantizedOnly gate only fired for quantized-only collections
+// and let default collections fall through to lossy (Embedding: nil) streams.
+func TestDefaultCollectionReplicationDisabledPendingDistribution(t *testing.T) {
+	db, err := Open(t.TempDir(), WithProvider(&mockProvider{dim: 4}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Default collection — raw store ON.
+	coll := db.Collection("docs")
+	if err := coll.PutVector("v1", []float32{1, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &transportServer{db: db}
+
+	// pullEntries must return the sentinel, not a lossy (Embedding: nil) stream.
+	if _, err := server.pullEntries(RPCPullEntriesRequest{Collection: "docs"}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("default-coll pullEntries err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+
+	// PullSnapshot must return the sentinel, not a vectorless snapshot.
+	var snapResp RPCPullSnapshotResponse
+	if err := server.PullSnapshot(RPCPullSnapshotRequest{Collection: "docs"}, &snapResp); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("default-coll PullSnapshot err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+
+	// PutVector (write path) must return the sentinel.
+	if err := server.PutVector(RPCPutVectorRequest{Collection: "docs", ID: "v2", Vector: []float32{0, 1, 0, 0}}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("default-coll PutVector err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+
+	// Put (text-entry write path) must return the sentinel.
+	if err := server.Put(RPCPutRequest{Collection: "docs", ID: "v3", Entry: Entry{Text: "hello"}}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("default-coll Put err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+
+	// Delete must return the sentinel.
+	if err := server.Delete(RPCDeleteRequest{Collection: "docs", ID: "v1"}, &RPCEmpty{}); !errors.Is(err, errRemoteUnsupportedPendingDistribution) {
+		t.Fatalf("default-coll Delete err = %v, want errRemoteUnsupportedPendingDistribution", err)
+	}
+}
+
 func TestQuantizedOnlySnapshotDoesNotPruneConcurrentWALWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "quantized-race.csdb")
 	db, err := Open(path, WithProvider(nil))

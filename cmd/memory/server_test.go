@@ -2,42 +2,40 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+
+	"m31labs.dev/corkscrewdb"
 )
 
-// newServerHarness spins an in-process primary + clients, composes the
-// top-level handler via NewHandler, mounts it on httptest.NewServer, and
-// returns the server URL + tokens used for auth. Cleanup tears everything
-// down on test exit (listener, clients, primary).
+// newServerHarness opens a local (non-remote) CorkScrewDB, wraps it in a
+// *DBClients via newLocalClients so writes bypass the gRPC transport layer
+// (which Phase 1 gates), composes the top-level handler via NewHandler,
+// mounts it on httptest.NewServer, and returns the server URL + tokens.
 func newServerHarness(t *testing.T) (url, agentTok, adminTok string) {
 	t.Helper()
-	addr, dbtok := newTestPrimary(t)
+	db, err := corkscrewdb.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open local db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 	const (
 		agent = "agent-bearer"
 		admin = "admin-bearer"
 	)
 	cfg := Config{
-		AddrRW:             addr,
-		AddrRO:             addr,
-		CorkscrewDBToken:   dbtok,
+		AddrRW:             "",
+		AddrRO:             "",
 		Listen:             "127.0.0.1:0",
 		AgentTokens:        map[string]string{"birch": agent},
 		AdminToken:         admin,
 		ExpectedProviderID: "corkscrewdb-default-embedder",
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	clients, err := NewDBClients(ctx, cfg)
-	if err != nil {
-		t.Fatalf("NewDBClients: %v", err)
-	}
+	clients := newLocalClients(db)
 	t.Cleanup(func() { _ = clients.Close() })
 
 	handler := NewHandler(cfg, clients, nil)
