@@ -575,12 +575,26 @@ func (db *DB) queryCoordinatorDecision(coordinator string, epoch uint64) (rebala
 // clearing the freeze. It is a no-op if already committed past the epoch (a
 // committed participant must never roll back, §5.4). Returns ErrAlreadyCommitted
 // when the epoch is at/below the committed floor and a layout was applied.
+//
+// A PREPARED gainer durably WAL-appends the rows it pulled (loadImportedVersion)
+// so a commit-side crash can never lose them. On abort that durable data must be
+// dropped — the gainer reverts to L0, where it does NOT own those keys, so the
+// orphaned rows are pruned against the (unchanged) current layout. Pruning is
+// idempotent and marks the affected collections dirty so the removal is durable.
 func (db *DB) abortRebalanceLocal(epoch uint64) error {
 	st := db.rebalanceSnapshot()
 	if st.phase == phaseCommitting && epoch <= db.committedEpoch() {
 		return ErrAlreadyCommitted
 	}
 	db.clearRebalance()
+	// Drop any rows pulled into a now-aborted gain: ownership is the unchanged
+	// current (L0) layout, which does not include the would-be-gained ranges.
+	// Only safe with an explicit layout — an empty layout resolves every key to
+	// "no owner" and would wipe the collection. The fenced 2PC path (the only one
+	// whose gainer durably imports) always has explicit shards (fencedRebalanceSafe).
+	if current := db.shardAssignments(); len(current) > 0 {
+		_ = db.pruneUnownedData(current)
+	}
 	return nil
 }
 
@@ -795,16 +809,23 @@ type importedVersion struct {
 	Tombstone    bool
 }
 
-// importVersion reconstructs a Version from transmitted codes and loads it. For
-// raw_store collections it fetches the raw blob by hash and persists it before
-// indexing (the gainer must hold raw before WAL/index, §7.3).
+// importVersion reconstructs a Version from transmitted codes and loads it
+// DURABLY. For raw_store collections it fetches the raw blob by hash and
+// persists it before indexing (the gainer must hold raw before WAL/index, §7.3).
+//
+// Unlike the replication follower (which re-pulls from its primary on restart
+// and so applies in-memory only via loadVersion), a rebalance gainer becomes the
+// authoritative owner once the 2PC COMMITs and the source PRUNES its copy.
+// loadImportedVersion appends the imported codes to the gainer's WAL and marks
+// the collection dirty so the gained rows are recoverable from the gainer's own
+// WAL+snapshot — they must NOT depend on the (now-pruned) source.
 func (db *DB) importVersion(coll *Collection, id string, rawStore bool, v importedVersion) error {
 	if rawStore && !v.Tombstone && len(v.RawHash) == 32 {
 		if _, err := db.fetchRawByHash(coll.name, v.RawHash); err != nil {
 			return err
 		}
 	}
-	return coll.loadVersion(id, Version{
+	return coll.loadImportedVersion(id, Version{
 		Quantized:    fromWALQuantized(v.Quantized),
 		dim:          v.Dim,
 		RawHash:      append([]byte(nil), v.RawHash...),

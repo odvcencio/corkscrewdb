@@ -1073,6 +1073,90 @@ func (c *Collection) loadVersion(id string, version Version) error {
 	return nil
 }
 
+// loadImportedVersion applies a rebalance-imported version DURABLY: it appends
+// the (already-quantized) codes to the gainer's WAL and marks the collection
+// dirty BEFORE building the in-memory index. This is the rebalance handoff
+// counterpart to loadVersion (the in-memory-only, markDirty=false path used by
+// WAL replay and the replication follower, which re-pulls from the primary on
+// restart). A rebalance gainer becomes the authoritative owner once the 2PC
+// COMMITs and the source PRUNES its copy, so the imported rows MUST be
+// recoverable from the gainer's own WAL+snapshot without the source — otherwise
+// a crash (or even a clean Close with no later write) silently loses them while
+// the manifest still claims ownership.
+//
+// No re-quantization happens: the codes/sparse/children transmitted by the
+// source are written to the WAL verbatim (the same payload the normal write path
+// emits, minus the float32 quantize step).
+func (c *Collection) loadImportedVersion(id string, version Version) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.validateVersionLocked(version); err != nil {
+		return err
+	}
+
+	// Idempotent re-import: a re-sent snapshot/entry for an already-applied
+	// (LamportClock, ActorID) must not double-append to the WAL. applyVersionLocked
+	// dedups on the same key, so probe history first and skip the WAL append when
+	// the version is already present.
+	if c.importedVersionPresentLocked(id, version) {
+		return nil
+	}
+
+	kind := walpkg.EntryPut
+	if version.Tombstone {
+		kind = walpkg.EntryTombstone
+	}
+	entry := walpkg.Entry{
+		Kind:         kind,
+		CollectionID: c.name,
+		VectorID:     id,
+		Quantized:    toWALQuantized(version.Quantized),
+		Dim:          version.dim,
+		RawHash:      append([]byte(nil), version.RawHash...),
+		Sparse:       toWALSparse(version.Sparse),
+		Children:     toWALChildren(version.Children),
+		Text:         version.Text,
+		Metadata:     cloneMetadata(version.Metadata),
+		LamportClock: version.LamportClock,
+		ActorID:      version.ActorID,
+		WallClock:    version.WallClock,
+	}
+	if c.wal != nil {
+		if err := c.wal.Append(entry); err != nil {
+			return err
+		}
+	}
+	if c.db != nil && c.db.streamer != nil {
+		c.db.streamer.Record(c.name, entry)
+	}
+
+	createdDim, err := c.applyVersionLocked(id, version, true)
+	if err != nil {
+		return err
+	}
+	if createdDim {
+		return c.db.persistCollectionMeta(c.name, c)
+	}
+	return nil
+}
+
+// importedVersionPresentLocked reports whether a version with the same
+// (LamportClock, ActorID) as version is already in id's history (the same
+// dedup key applyVersionLocked uses). Callers must hold c.mu.
+func (c *Collection) importedVersionPresentLocked(id string, version Version) bool {
+	versions := c.history[id]
+	pos := sort.Search(len(versions), func(i int) bool {
+		if versions[i].LamportClock != version.LamportClock {
+			return versions[i].LamportClock >= version.LamportClock
+		}
+		return versions[i].ActorID >= version.ActorID
+	})
+	return pos < len(versions) &&
+		versions[pos].LamportClock == version.LamportClock &&
+		versions[pos].ActorID == version.ActorID
+}
+
 func (c *Collection) sync() error {
 	if c.wal == nil {
 		return nil
@@ -1152,7 +1236,13 @@ func (c *Collection) persistSnapshot() error {
 	c.mu.RLock()
 	if len(c.history) == 0 {
 		c.mu.RUnlock()
-		return nil
+		// An emptied-but-dirty collection (every key removed, e.g. an aborted
+		// rebalance gainer pruning the rows it pulled, or a loser pruning a handed
+		// off range) has nothing to snapshot, but its WAL still holds the now-removed
+		// PUTs. Reset the WAL so a reopen does not RESURRECT them by replaying those
+		// orphaned entries. Without this the removal is durable in memory but lost on
+		// disk — the inverse of the import-durability hole.
+		return c.resetEmptiedWAL()
 	}
 	maxLamport := c.clock.Current()
 	data := snap.Data{
@@ -1240,6 +1330,27 @@ func (c *Collection) reachableRawHashesLocked() map[string]struct{} {
 		}
 	}
 	return reachable
+}
+
+// resetEmptiedWAL discards the WAL and any snapshot file for a collection whose
+// history is now empty but dirty (all keys removed). It re-checks emptiness under
+// the write lock so a concurrent write that landed between the read-locked check
+// in persistSnapshot and here is not silently dropped — in that case it leaves
+// the WAL intact and the collection dirty for a later snapshot.
+func (c *Collection) resetEmptiedWAL() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.history) != 0 {
+		// A write raced in; the WAL/history are authoritative — keep them.
+		return nil
+	}
+	if err := c.pruneWALLocked(); err != nil {
+		return err
+	}
+	c.dirty = false
+	// Remove every snapshot file: there is no live state to anchor one, and a
+	// stale snapshot would re-seed the removed keys on reopen.
+	return c.db.pruneSnapshots(c.name, "")
 }
 
 func (c *Collection) pruneWALLocked() error {

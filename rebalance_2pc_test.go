@@ -1066,6 +1066,154 @@ func TestCoordinatorStaleCommitTreatsAsAbort(t *testing.T) {
 	}
 }
 
+// TestGainerImportSurvivesRestart is the data-durability regression for the 2PC
+// rebalance handoff: the gainer imports a moving range, the rebalance COMMITs
+// (so the loser PRUNES its copy and the gainer is now the authoritative owner),
+// then the gainer is CLOSED and REOPENED with NO intervening write to the gained
+// key. The imported rows MUST survive the round-trip from the gainer's own
+// WAL+snapshot, because the source's copy is gone.
+//
+// Before the fix the import path applied versions in-memory only
+// (loadVersion -> applyVersionLocked markDirty=false): the imported rows were
+// neither WAL-appended nor did they mark the collection dirty, so a clean
+// Close() snapshotted nothing and the reopened gainer served an EMPTY range while
+// its manifest claimed ownership — silent data loss.
+func TestGainerImportSurvivesRestart(t *testing.T) {
+	a, b, l1, movingID := twoNode2PC(t)
+
+	if err := a.db.OrchestrateRebalance(l1...); err != nil {
+		t.Fatalf("OrchestrateRebalance err = %v", err)
+	}
+
+	// Sanity: the moving key handed off — present on A (gainer), pruned on B.
+	gained, err := a.db.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gained) != 1 {
+		t.Fatalf("gainer history after commit = %+v, want 1", gained)
+	}
+	lost, err := b.db.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lost) != 0 {
+		t.Fatalf("loser retained pruned key after commit: %+v", lost)
+	}
+	wantQuant := gained[0].Quantized
+
+	// Restart the gainer WITHOUT any write to the gained key. A clean Close()
+	// must have persisted the imported rows (snapshot and/or WAL); the source's
+	// copy is pruned, so the reopened gainer is the ONLY holder.
+	pathA := a.db.path
+	if err := a.db.Close(); err != nil {
+		t.Fatalf("close gainer err = %v", err)
+	}
+
+	reopened, err := Open(pathA, WithProvider(&mockProvider{dim: 16}), WithToken("s"))
+	if err != nil {
+		t.Fatalf("reopen gainer err = %v", err)
+	}
+	defer reopened.Close()
+	reopened.registerServeAddr(a.addr)
+
+	// The gained key must still be retrievable on the reopened gainer.
+	survived, err := reopened.Collection("docs", WithBitWidth(2)).historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(survived) != 1 {
+		t.Fatalf("gained key vanished after gainer restart: history = %+v, want 1 (silent data loss)", survived)
+	}
+	if survived[0].Quantized == nil {
+		t.Fatalf("gained key lost its codes after restart")
+	}
+	if wantQuant != nil && survived[0].Quantized != nil &&
+		len(survived[0].Quantized.MSE) != len(wantQuant.MSE) {
+		t.Fatalf("gained key codes corrupted after restart: got %d MSE bytes, want %d",
+			len(survived[0].Quantized.MSE), len(wantQuant.MSE))
+	}
+
+	// And it must be searchable (the index was rebuilt from the durable rows).
+	results, err := reopened.Collection("docs", WithBitWidth(2)).SearchVector(unitVec(16, 1), 5)
+	if err != nil {
+		t.Fatalf("search on reopened gainer err = %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == movingID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("gained key not searchable on reopened gainer; results = %+v", results)
+	}
+}
+
+// TestAbortedGainerDropsImportedRows is the symmetric-cleanup regression for the
+// durable import fix: a gainer that PULLS rows durably (WAL-appended) and then
+// ABORTS must NOT retain those rows for keys it does not own under L0 — not in
+// memory, and not durably across a restart. Otherwise the durable-import fix
+// would trade silent data loss for orphaned, never-owned data on disk.
+func TestAbortedGainerDropsImportedRows(t *testing.T) {
+	a, b, l1, movingID := twoNode2PC(t)
+
+	// Freeze the loser B and run A's gainer pull so the moving key is imported
+	// durably into A (this is the PREPARED-but-not-committed state).
+	epoch := a.db.beginRebalanceEpoch()
+	if err := b.db.freezeRebalanceShards(epoch, a.addr, l1); err != nil {
+		t.Fatalf("freeze loser err = %v", err)
+	}
+	if err := a.db.pullRebalanceShards(epoch, a.addr, l1); err != nil {
+		t.Fatalf("gainer pull err = %v", err)
+	}
+
+	// The moving key is now present on A (durably imported during pull).
+	imported, err := a.db.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("gainer did not import moving key during pull: %+v", imported)
+	}
+
+	// Abort the gainer locally (no durable commit record): it reverts to L0 and
+	// must prune the imported-but-unowned rows.
+	if err := a.db.abortRebalanceLocal(epoch); err != nil {
+		t.Fatalf("abortRebalanceLocal err = %v", err)
+	}
+	afterAbort, err := a.db.Collection("docs").historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterAbort) != 0 {
+		t.Fatalf("aborted gainer retained imported key in memory: %+v", afterAbort)
+	}
+
+	// And the prune must be durable: a clean restart of A must not resurrect the
+	// orphaned rows from the WAL.
+	pathA := a.db.path
+	if err := a.db.Close(); err != nil {
+		t.Fatalf("close gainer err = %v", err)
+	}
+	reopened, err := Open(pathA, WithProvider(&mockProvider{dim: 16}), WithToken("s"))
+	if err != nil {
+		t.Fatalf("reopen gainer err = %v", err)
+	}
+	defer reopened.Close()
+	resurrected, err := reopened.Collection("docs", WithBitWidth(2)).historyFor(movingID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resurrected) != 0 {
+		t.Fatalf("aborted gainer resurrected orphaned key after restart: %+v (durable orphan)", resurrected)
+	}
+
+	// Cleanup: unfreeze B so its cleanup-close is clean.
+	_ = b.db.abortRebalanceLocal(epoch)
+}
+
 // reservePort returns a free 127.0.0.1 address and closes its listener so the
 // caller can bind it later.
 func reservePort(t *testing.T) string {
