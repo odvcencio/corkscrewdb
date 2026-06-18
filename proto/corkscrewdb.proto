@@ -43,6 +43,28 @@ message ShardAssignment {
   uint64 end = 4;
 }
 
+// QuantizedVector mirrors wal.QuantizedVector / snapshot.QuantizedVector.
+message QuantizedVector {
+  bytes mse      = 1; // packed MSE indices ((b-1) bits/coord)
+  bytes signs    = 2; // packed QJL sign bits (1 bit/coord)
+  float res_norm = 3; // L2 norm of residual
+}
+
+// SparseBlock mirrors wal.SparseBlock.
+message SparseBlock {
+  repeated uint32 indices = 1; // sorted ascending, unique (validated on apply)
+  repeated float  values  = 2; // parallel to indices
+}
+
+// ChildVector mirrors wal.ChildVector.
+message ChildVector {
+  string             id        = 1;
+  QuantizedVector    quantized = 2;
+  uint32             dim       = 3;
+  string             text      = 4;
+  map<string, string> metadata = 5;
+}
+
 message Entry {
   string text = 1;
   repeated float vector = 2;
@@ -62,14 +84,19 @@ message SearchResult {
   uint64 version = 5;
 }
 
+// Version mirrors SnapshotVersion so a remote At() can rebuild a view index.
+// Old embedding (tag 1) removed; quantized reuses tag 1.
 message Version {
-  repeated float embedding = 1;
-  string text = 2;
-  map<string, string> metadata = 3;
-  uint64 lamport_clock = 4;
-  string actor_id = 5;
-  google.protobuf.Timestamp wall_clock = 6;
-  bool tombstone = 7;
+  QuantizedVector     quantized     = 1; // (reuses freed tag 1)
+  bytes               raw_hash      = 2;
+  SparseBlock         sparse        = 3;
+  repeated ChildVector children     = 4;
+  string              text          = 5;
+  map<string, string> metadata      = 6;
+  uint64              lamport_clock = 7;
+  string              actor_id      = 8;
+  google.protobuf.Timestamp wall_clock = 9;
+  bool                tombstone     = 10;
 }
 
 message InfoRequest {
@@ -88,6 +115,7 @@ message EnsureCollectionRequest {
   string token = 1;
   string name = 2;
   int32 bit_width = 3;
+  int64 seed = 4;
 }
 
 message DropCollectionRequest {
@@ -166,16 +194,22 @@ message PullEntriesRequest {
   int32 max_entries = 4;
 }
 
+// ReplicaEntry is the streamed WAL v5 payload. Old embedding (tag 4) removed;
+// quantized reuses tag 4.
 message ReplicaEntry {
-  uint32 kind = 1;
-  string collection_id = 2;
-  string vector_id = 3;
-  repeated float embedding = 4;
-  string text = 5;
-  map<string, string> metadata = 6;
-  uint64 lamport_clock = 7;
-  string actor_id = 8;
-  google.protobuf.Timestamp wall_clock = 9;
+  uint32              kind          = 1;
+  string              collection_id = 2;
+  string              vector_id     = 3;
+  QuantizedVector     quantized     = 4; // (reuses freed tag 4) present for dense puts
+  uint32              dim           = 5;
+  bytes               raw_hash      = 6; // 32-byte blake3 ref, empty iff WithoutRawStore
+  SparseBlock         sparse        = 7;
+  repeated ChildVector children     = 8;
+  string              text          = 9;
+  map<string, string> metadata      = 10;
+  uint64              lamport_clock = 11;
+  string              actor_id      = 12;
+  google.protobuf.Timestamp wall_clock = 13;
 }
 
 message PullEntriesResponse {
@@ -189,14 +223,19 @@ message PullSnapshotRequest {
   string collection = 2;
 }
 
+// SnapshotVersion is the full per-version state. Old embedding (tag 1) removed;
+// quantized reuses tag 1.
 message SnapshotVersion {
-  repeated float embedding = 1;
-  string text = 2;
-  map<string, string> metadata = 3;
-  uint64 lamport_clock = 4;
-  string actor_id = 5;
-  google.protobuf.Timestamp wall_clock = 6;
-  bool tombstone = 7;
+  QuantizedVector     quantized     = 1; // (reuses freed tag 1)
+  bytes               raw_hash      = 2;
+  SparseBlock         sparse        = 3;
+  repeated ChildVector children     = 4;
+  string              text          = 5;
+  map<string, string> metadata      = 6;
+  uint64              lamport_clock = 7;
+  string              actor_id      = 8;
+  google.protobuf.Timestamp wall_clock = 9;
+  bool                tombstone     = 10;
 }
 
 message SnapshotRecord {
@@ -211,6 +250,8 @@ message PullSnapshotResponse {
   int32 dim = 4;
   uint64 max_lamport = 5;
   repeated SnapshotRecord records = 6;
+  bool   raw_store      = 7; // NEW
+  bool   sparse_enabled = 8; // NEW
 }
 
 message RebalanceRequest {
