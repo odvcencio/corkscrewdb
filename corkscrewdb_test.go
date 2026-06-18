@@ -1209,3 +1209,56 @@ func TestStaleAndCorruptCacheRebuild(t *testing.T) {
 		}
 	})
 }
+
+// TestWriteManifestDurable verifies the fsync-hardened writeManifest leaves no
+// temp file beside the manifest and that the on-disk content round-trips
+// (§5.8). A true crash test is infeasible in-process; the observable contract
+// is "atomic rename leaves no temp file and the content is present."
+func TestWriteManifestDurable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+
+	m := manifest{
+		FormatVersion:   2,
+		FormatFloor:     "v0.3.0",
+		ModuleVersion:   PackageVersion,
+		ActorID:         "actor-durable",
+		DefaultBitWidth: 2,
+		Peers:           []string{"127.0.0.1:9"},
+		Collections:     map[string]collectionMeta{"docs": {BitWidth: 2, Dim: 8}},
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	if err := writeManifest(path, m); err != nil {
+		t.Fatalf("writeManifest err = %v", err)
+	}
+
+	// No .tmp leftover beside the manifest.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("writeManifest left a temp file: %q", e.Name())
+		}
+	}
+
+	// Content round-trips: reopen + unmarshal equals what was written.
+	reopened, err := loadOrCreateManifest(dir, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ActorID != m.ActorID {
+		t.Fatalf("ActorID = %q, want %q", reopened.ActorID, m.ActorID)
+	}
+	if reopened.DefaultBitWidth != m.DefaultBitWidth {
+		t.Fatalf("DefaultBitWidth = %d, want %d", reopened.DefaultBitWidth, m.DefaultBitWidth)
+	}
+	if len(reopened.Peers) != 1 || reopened.Peers[0] != "127.0.0.1:9" {
+		t.Fatalf("Peers = %v, want [127.0.0.1:9]", reopened.Peers)
+	}
+	if meta, ok := reopened.Collections["docs"]; !ok || meta.BitWidth != 2 || meta.Dim != 8 {
+		t.Fatalf("Collections[docs] = %+v, want {BitWidth:2 Dim:8}", meta)
+	}
+}

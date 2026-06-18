@@ -481,11 +481,47 @@ func writeManifest(path string, data manifest) error {
 	if err != nil {
 		return err
 	}
+	payload := append(buf, '\n')
+
+	// Durable atomic write (mirrors snapshot/snapshot.go): write to a temp file,
+	// fsync it, close, rename over the target, then fsync the parent directory so
+	// the rename itself is durable. This is the §5.8 crash-safety property the 2PC
+	// coordinator's durable-decide step leans on.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(buf, '\n'), 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(payload); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }
 
 func (db *DB) saveManifestLocked() error {
