@@ -8,7 +8,7 @@ require (
 	google.golang.org/protobuf v1.36.11
 	lukechampine.com/blake3 v1.4.1
 	m31labs.dev/eos v0.1.5-0.20260617183712-aefe4211dbee
-	m31labs.dev/turboquant v0.2.0
+	m31labs.dev/turboquant v0.2.1-0.20260618054117-90ea3cf6af00
 )
 
 require (
@@ -25,9 +25,3 @@ require (
 	m31labs.dev/mll v0.1.0 // indirect
 	m31labs.dev/prism v0.1.2 // indirect
 )
-
-// DEV-ONLY: consume the local turboquant tree carrying the in-flight
-// PreparedQuery.ScoreUpperBound accessor for the v0.3.0 Performance stream
-// (query-time two-tier prune). MUST be removed and replaced with a real
-// released turboquant version pin before v0.3.0 ship (Credibility phase).
-replace m31labs.dev/turboquant => /home/draco/work/turboquant
