@@ -512,10 +512,23 @@ func (db *DB) persistCollectionMeta(name string, c *Collection) error {
 	return db.saveManifestLocked()
 }
 
+// cacheAdoptHook / cacheRebuildHook are test-only instrumentation: exactly one
+// fires per HNSW reopen — adopt when a fresh cache is used, rebuild when the graph
+// is reconstructed from history codes.
+var (
+	cacheAdoptHook   func()
+	cacheRebuildHook func()
+)
+
 func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, error) {
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
 		return nil, err
+	}
+	// Defer the HNSW graph build so a fresh cache can be adopted without paying the
+	// per-node insert cost (D6). Flat collections are unaffected.
+	if coll.indexType == IndexHNSW {
+		coll.deferHNSWBuild = true
 	}
 
 	snapshotPath, err := snap.FindLatestFile(db.collectionDir(name))
@@ -562,6 +575,7 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 		}
 	}
 
+	walBeyondSnapshot := false
 	segments, err := walpkg.ListSegments(db.collectionWALDir(name))
 	if err != nil {
 		return nil, err
@@ -576,6 +590,7 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if entry.LamportClock <= snapshotMax {
 				continue
 			}
+			walBeyondSnapshot = true
 			if err := coll.loadVersion(entry.VectorID, Version{
 				Quantized:    fromWALQuantized(entry.Quantized),
 				RawHash:      append([]byte(nil), entry.RawHash...),
@@ -601,6 +616,16 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			return nil, err
 		}
 	}
+	// HNSW cache adoption / build (D6). The graph build was deferred; the live
+	// search structure is currently a flat *index over the live codes. Adopt a fresh
+	// cached graph when possible, else build the graph from the flat codes.
+	if coll.indexType == IndexHNSW {
+		coll.deferHNSWBuild = false
+		if err := db.finishHNSWLoad(coll, snapshotMax, walBeyondSnapshot); err != nil {
+			return nil, err
+		}
+	}
+
 	coll.mu.Lock()
 	coll.dirty = false
 	coll.mu.Unlock()
@@ -610,6 +635,96 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 		}
 	}
 	return coll, nil
+}
+
+// finishHNSWLoad adopts a fresh graph.hnsw cache for an HNSW collection, or builds
+// the graph from the flat live codes. Adoption is gated on: WAL empty beyond the
+// snapshot, a sibling .tqi cache fresh at the snapshot lamport, a present
+// graph.hnsw, and matching live node counts. Any miss falls back to a clean
+// rebuild — the snapshot+WAL stay authoritative, so a stale/corrupt cache only
+// costs a rebuild, never a wrong result.
+func (db *DB) finishHNSWLoad(coll *Collection, snapshotMax uint64, walBeyondSnapshot bool) error {
+	coll.mu.Lock()
+	defer coll.mu.Unlock()
+
+	flat, ok := coll.index.(*index)
+	if !ok {
+		// Nothing live (empty collection) or already a graph: build only if flat.
+		if coll.index == nil {
+			return nil
+		}
+		if _, isHW := coll.index.(*hnswIndex); isHW {
+			return nil
+		}
+	}
+
+	if flat != nil && !walBeyondSnapshot {
+		if hw := db.tryAdoptFreshHNSW(coll, flat, snapshotMax); hw != nil {
+			coll.index = hw
+			if cacheAdoptHook != nil {
+				cacheAdoptHook()
+			}
+			return nil
+		}
+	}
+
+	// Rebuild the graph from the flat live codes (cache stale/absent/corrupt).
+	if cacheRebuildHook != nil {
+		cacheRebuildHook()
+	}
+	coll.rebuildHNSWFromFlatLocked(flat)
+	return nil
+}
+
+// tryAdoptFreshHNSW returns the adopted cached graph when the .tqi sibling is fresh
+// (lamport == snapshotMax) and node counts match; otherwise nil. The flat passed in
+// (built during deferred load) provides the live codes the loaded graph wraps.
+func (db *DB) tryAdoptFreshHNSW(coll *Collection, flat *index, snapshotMax uint64) *hnswIndex {
+	hnswPath := db.collectionHNSWPath(coll.name)
+	if _, err := os.Stat(hnswPath); err != nil {
+		return nil // no graph cache
+	}
+	cachedFlat, idxLamport, err := db.tryLoadCollectionIndex(coll.name)
+	if err != nil || cachedFlat == nil {
+		return nil // no/corrupt .tqi -> graph cache is not fresh (option (i))
+	}
+	if idxLamport != snapshotMax {
+		return nil // .tqi stale relative to the snapshot
+	}
+	if cachedFlat.Len() != flat.Len() {
+		return nil // node-count mismatch
+	}
+	// Load the graph over the cached flat (which carries the persisted live codes,
+	// ordered to match the saved layers). A CRC/version/count failure -> rebuild.
+	hw, err := loadHNSWFile(hnswPath, cachedFlat, coll.hnswParamsOrDefault())
+	if err != nil {
+		return nil
+	}
+	return hw
+}
+
+// rebuildHNSWFromFlatLocked builds the HNSW graph from the flat index's live codes
+// and installs it as the collection's index. Caller holds coll.mu.
+func (c *Collection) rebuildHNSWFromFlatLocked(flat *index) {
+	params := c.hnswParamsOrDefault()
+	hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, params)
+	if flat != nil {
+		for _, e := range flat.snapshotEntries() {
+			if e.child {
+				continue
+			}
+			hw.AddQuantized(e.id, e.qv, e.text, e.metadata, e.version)
+		}
+	}
+	c.index = hw
+}
+
+func (c *Collection) hnswParamsOrDefault() HNSWParams {
+	params := c.hnsw
+	if params.M == 0 && params.EfConstruction == 0 && params.EfSearch == 0 {
+		return defaultHNSWParams()
+	}
+	return params
 }
 
 func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, error) {
@@ -792,16 +907,4 @@ func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 		return nil, 0, err
 	}
 	return loadIndexFile(path)
-}
-
-// reserve-only: wired in the Performance phase
-func (db *DB) tryLoadHNSWIndex(name string, flat *index) (*hnswIndex, error) {
-	path := db.collectionHNSWPath(name)
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return loadHNSWFile(path, flat, defaultHNSWParams())
 }

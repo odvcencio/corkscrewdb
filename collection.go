@@ -34,6 +34,11 @@ type Collection struct {
 
 	scorer Scorer // optional injected scorer (runtime-only, not persisted in meta)
 
+	// deferHNSWBuild, when set during reopen, makes applyVersionLocked build a flat
+	// index even for an HNSW collection so the costly graph build can be skipped
+	// (cache adoption) or run once after the cache-freshness check (D6).
+	deferHNSWBuild bool
+
 	mu        sync.RWMutex
 	index     indexer
 	history   map[string][]Version
@@ -868,7 +873,9 @@ func (c *Collection) applyVersionLocked(id string, version Version, markDirty bo
 	}
 	if !latest.Tombstone {
 		if c.index == nil {
-			if c.indexType == IndexHNSW && len(latest.Children) == 0 {
+			// During deferred reopen, build a flat index even for HNSW collections;
+			// the graph is adopted from cache or built once after the freshness check.
+			if c.indexType == IndexHNSW && len(latest.Children) == 0 && !c.deferHNSWBuild {
 				c.index = newHNSWIndex(c.dim, c.bitWidth, c.seed, c.hnsw)
 			} else {
 				c.index = newIndex(c.dim, c.bitWidth, c.seed)
@@ -940,6 +947,11 @@ func (c *Collection) close() error {
 	if c.dirty {
 		if err := c.persistSnapshot(); err != nil {
 			errs = append(errs, err)
+		} else {
+			// Caches are pure optimizations over the now-durable snapshot. Written
+			// best-effort (failures swallowed, never fail close). A clean (non-dirty)
+			// close writes nothing and relies on the prior close's cache (D6).
+			c.writeCachesBestEffort()
 		}
 	}
 	if c.wal != nil {
@@ -953,6 +965,49 @@ func (c *Collection) close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// writeCachesBestEffort persists the live search index as the .tqi/graph.hnsw
+// caches, stamped with the snapshot's MaxLamport. graph.hnsw is written FIRST and
+// .tqi (the lamport authority) SECOND, so a graph.hnsw without a fresh sibling
+// .tqi is treated as stale on load (option (i): graph.hnsw carries no lamport).
+// All failures are swallowed — the snapshot+WAL remain authoritative.
+func (c *Collection) writeCachesBestEffort() {
+	c.mu.RLock()
+	maxLamport := c.clock.Current()
+	idx := c.flatIndexForCacheLocked()
+	idxType := c.indexType
+	var hw *hnswIndex
+	if h, ok := c.index.(*hnswIndex); ok {
+		hw = h
+	}
+	rawStore := c.rawStoreEnabled
+	sparse := c.sparseEnabled
+	c.mu.RUnlock()
+	if idx == nil {
+		return
+	}
+	hnswPath := c.db.collectionHNSWPath(c.name)
+	indexPath := c.db.collectionIndexPath(c.name)
+	// graph.hnsw FIRST, then .tqi — option (i) ordering.
+	if idxType == IndexHNSW && hw != nil {
+		_ = saveHNSWFile(hnswPath, hw) // best-effort; swallowed
+	}
+	_ = saveIndexFile(indexPath, idx, maxLamport, rawStore, sparse) // best-effort
+}
+
+// flatIndexForCacheLocked returns the flat *index underlying the live search
+// structure (the flat index itself, or the HNSW graph's wrapped flat). Caller
+// holds c.mu.
+func (c *Collection) flatIndexForCacheLocked() *index {
+	switch idx := c.index.(type) {
+	case *index:
+		return idx
+	case *hnswIndex:
+		return idx.flat
+	default:
+		return nil
+	}
 }
 
 func (c *Collection) persistSnapshot() error {
