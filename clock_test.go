@@ -52,12 +52,17 @@ func TestHLCNowAdvances(t *testing.T) {
 }
 
 func TestHLCWitness(t *testing.T) {
+	orig := wallNow
+	defer func() { wallNow = orig }()
+	const nowMs = uint64(1_000_000)
+	wallNow = func() uint64 { return nowMs }
+
 	h := newHLC("test-actor")
 	_ = h.Now()
 	_ = h.Now()
 
-	// Create a remote clock far in the future.
-	remote := packHLC(9999999999999, 42)
+	// Create a remote clock within the allowed skew window (10 s ahead).
+	remote := packHLC(nowMs+10_000, 42)
 	h.Witness(remote)
 
 	next := h.Now()
@@ -113,5 +118,27 @@ func TestHLCActorTiebreak(t *testing.T) {
 	}
 	if h1.Current() != h2.Current() {
 		t.Fatal("expected same clock value for tiebreak test")
+	}
+}
+
+func TestWitnessClampsFarFutureRemote(t *testing.T) {
+	orig := wallNow
+	defer func() { wallNow = orig }()
+	const nowMs = uint64(1_000_000)
+	wallNow = func() uint64 { return nowMs }
+
+	h := newHLC("a")
+	farFuture := packHLC(nowMs+120_000, 0)
+	h.Witness(farFuture)
+	phys, _ := unpackHLC(h.Current())
+	if phys > nowMs+witnessMaxSkewMs {
+		t.Fatalf("Witness accepted a clock %d ms ahead (max %d)", phys-nowMs, witnessMaxSkewMs)
+	}
+
+	h2 := newHLC("b")
+	near := packHLC(nowMs+5_000, 0)
+	h2.Witness(near)
+	if h2.Current() != near {
+		t.Fatalf("Witness rejected an in-bound clock: got %d want %d", h2.Current(), near)
 	}
 }

@@ -34,6 +34,10 @@ const (
 	CorkScrewDB_PrepareRebalance_FullMethodName = "/corkscrewdb.transport.v1.CorkScrewDB/PrepareRebalance"
 	CorkScrewDB_CommitRebalance_FullMethodName  = "/corkscrewdb.transport.v1.CorkScrewDB/CommitRebalance"
 	CorkScrewDB_PruneRebalance_FullMethodName   = "/corkscrewdb.transport.v1.CorkScrewDB/PruneRebalance"
+	CorkScrewDB_GetRaw_FullMethodName           = "/corkscrewdb.transport.v1.CorkScrewDB/GetRaw"
+	CorkScrewDB_FreezeRebalance_FullMethodName  = "/corkscrewdb.transport.v1.CorkScrewDB/FreezeRebalance"
+	CorkScrewDB_AbortRebalance_FullMethodName   = "/corkscrewdb.transport.v1.CorkScrewDB/AbortRebalance"
+	CorkScrewDB_ResolveRebalance_FullMethodName = "/corkscrewdb.transport.v1.CorkScrewDB/ResolveRebalance"
 )
 
 // CorkScrewDBClient is the client API for CorkScrewDB service.
@@ -55,6 +59,10 @@ type CorkScrewDBClient interface {
 	PrepareRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
 	CommitRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
 	PruneRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
+	GetRaw(ctx context.Context, in *GetRawRequest, opts ...grpc.CallOption) (*GetRawResponse, error)
+	FreezeRebalance(ctx context.Context, in *FreezeRebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
+	AbortRebalance(ctx context.Context, in *AbortRebalanceRequest, opts ...grpc.CallOption) (*Empty, error)
+	ResolveRebalance(ctx context.Context, in *ResolveRebalanceRequest, opts ...grpc.CallOption) (*ResolveRebalanceResponse, error)
 }
 
 type corkScrewDBClient struct {
@@ -224,6 +232,46 @@ func (c *corkScrewDBClient) PruneRebalance(ctx context.Context, in *RebalanceReq
 	return out, nil
 }
 
+func (c *corkScrewDBClient) GetRaw(ctx context.Context, in *GetRawRequest, opts ...grpc.CallOption) (*GetRawResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRawResponse)
+	err := c.cc.Invoke(ctx, CorkScrewDB_GetRaw_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *corkScrewDBClient) FreezeRebalance(ctx context.Context, in *FreezeRebalanceRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, CorkScrewDB_FreezeRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *corkScrewDBClient) AbortRebalance(ctx context.Context, in *AbortRebalanceRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, CorkScrewDB_AbortRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *corkScrewDBClient) ResolveRebalance(ctx context.Context, in *ResolveRebalanceRequest, opts ...grpc.CallOption) (*ResolveRebalanceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveRebalanceResponse)
+	err := c.cc.Invoke(ctx, CorkScrewDB_ResolveRebalance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CorkScrewDBServer is the server API for CorkScrewDB service.
 // All implementations should embed UnimplementedCorkScrewDBServer
 // for forward compatibility.
@@ -243,6 +291,10 @@ type CorkScrewDBServer interface {
 	PrepareRebalance(context.Context, *RebalanceRequest) (*Empty, error)
 	CommitRebalance(context.Context, *RebalanceRequest) (*Empty, error)
 	PruneRebalance(context.Context, *RebalanceRequest) (*Empty, error)
+	GetRaw(context.Context, *GetRawRequest) (*GetRawResponse, error)
+	FreezeRebalance(context.Context, *FreezeRebalanceRequest) (*Empty, error)
+	AbortRebalance(context.Context, *AbortRebalanceRequest) (*Empty, error)
+	ResolveRebalance(context.Context, *ResolveRebalanceRequest) (*ResolveRebalanceResponse, error)
 }
 
 // UnimplementedCorkScrewDBServer should be embedded to have
@@ -296,6 +348,18 @@ func (UnimplementedCorkScrewDBServer) CommitRebalance(context.Context, *Rebalanc
 }
 func (UnimplementedCorkScrewDBServer) PruneRebalance(context.Context, *RebalanceRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PruneRebalance not implemented")
+}
+func (UnimplementedCorkScrewDBServer) GetRaw(context.Context, *GetRawRequest) (*GetRawResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRaw not implemented")
+}
+func (UnimplementedCorkScrewDBServer) FreezeRebalance(context.Context, *FreezeRebalanceRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FreezeRebalance not implemented")
+}
+func (UnimplementedCorkScrewDBServer) AbortRebalance(context.Context, *AbortRebalanceRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AbortRebalance not implemented")
+}
+func (UnimplementedCorkScrewDBServer) ResolveRebalance(context.Context, *ResolveRebalanceRequest) (*ResolveRebalanceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveRebalance not implemented")
 }
 func (UnimplementedCorkScrewDBServer) testEmbeddedByValue() {}
 
@@ -580,6 +644,78 @@ func _CorkScrewDB_PruneRebalance_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CorkScrewDB_GetRaw_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRawRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).GetRaw(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_GetRaw_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).GetRaw(ctx, req.(*GetRawRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CorkScrewDB_FreezeRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreezeRebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).FreezeRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_FreezeRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).FreezeRebalance(ctx, req.(*FreezeRebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CorkScrewDB_AbortRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortRebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).AbortRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_AbortRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).AbortRebalance(ctx, req.(*AbortRebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CorkScrewDB_ResolveRebalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveRebalanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CorkScrewDBServer).ResolveRebalance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CorkScrewDB_ResolveRebalance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CorkScrewDBServer).ResolveRebalance(ctx, req.(*ResolveRebalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CorkScrewDB_ServiceDesc is the grpc.ServiceDesc for CorkScrewDB service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -642,6 +778,22 @@ var CorkScrewDB_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PruneRebalance",
 			Handler:    _CorkScrewDB_PruneRebalance_Handler,
+		},
+		{
+			MethodName: "GetRaw",
+			Handler:    _CorkScrewDB_GetRaw_Handler,
+		},
+		{
+			MethodName: "FreezeRebalance",
+			Handler:    _CorkScrewDB_FreezeRebalance_Handler,
+		},
+		{
+			MethodName: "AbortRebalance",
+			Handler:    _CorkScrewDB_AbortRebalance_Handler,
+		},
+		{
+			MethodName: "ResolveRebalance",
+			Handler:    _CorkScrewDB_ResolveRebalance_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -108,6 +108,36 @@ func (m *Manager) Close() error {
 	return err
 }
 
+// PruneAndReset removes all existing WAL segments and opens a fresh segment.
+func (m *Manager) PruneAndReset() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.writer != nil {
+		if err := m.writer.Close(); err != nil {
+			return err
+		}
+		m.writer = nil
+	}
+	segments, err := ListSegments(m.dir)
+	if err != nil {
+		return err
+	}
+	for _, segment := range segments {
+		if err := os.Remove(segment); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	m.activeNumber = 1
+	m.activePath = segmentPath(m.dir, m.activeNumber)
+	writer, err := NewWriterWithSync(m.activePath, m.syncMode)
+	if err != nil {
+		return err
+	}
+	m.writer = writer
+	m.activeSize = 0
+	return nil
+}
+
 func (m *Manager) ActivePath() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

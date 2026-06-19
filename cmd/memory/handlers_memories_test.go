@@ -9,28 +9,21 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
+
+	"m31labs.dev/corkscrewdb"
 )
 
-// newMemoriesHandler spins up an in-process CorkScrewDB primary via the
-// same newTestPrimary helper used in dbclient_test.go, wires a
-// *DBClients with rw+ro pointing at it, and returns a fresh handler.
+// newMemoriesHandler opens a local (non-remote) CorkScrewDB, wraps it in a
+// *DBClients via newLocalClients so writes bypass the gRPC transport layer
+// (which Phase 1 gates), and returns a fresh handler.
 func newMemoriesHandler(t *testing.T) *MemoriesHandler {
 	t.Helper()
-	addr, token := newTestPrimary(t)
-	cfg := Config{
-		AddrRW:             addr,
-		AddrRO:             addr,
-		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	clients, err := NewDBClients(ctx, cfg)
+	db, err := corkscrewdb.Open(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewDBClients: %v", err)
+		t.Fatalf("open local db: %v", err)
 	}
-	t.Cleanup(func() { _ = clients.Close() })
+	t.Cleanup(func() { _ = db.Close() })
+	clients := newLocalClients(db)
 	return NewMemoriesHandler(clients, nil)
 }
 
@@ -379,4 +372,3 @@ func TestMemoriesHandlers_PostAgentOverridesSpoof(t *testing.T) {
 		t.Errorf("metadata[other] = %q, want ok (other fields should survive)", meta["other"])
 	}
 }
-

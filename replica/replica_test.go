@@ -250,3 +250,55 @@ func TestFollowerRequiresFields(t *testing.T) {
 		t.Fatal("expected error for missing puller")
 	}
 }
+
+func TestVersionEntryCarriesCodes(t *testing.T) {
+	rawHash := make([]byte, 32)
+	for i := range rawHash {
+		rawHash[i] = byte(i)
+	}
+	ve := VersionEntry{
+		Quantized:    &walpkg.QuantizedVector{MSE: []byte{1, 2, 3}, Signs: []byte{0xFF}, ResNorm: 1.25},
+		Dim:          8,
+		RawHash:      rawHash,
+		Sparse:       &walpkg.SparseBlock{Indices: []uint32{0, 2}, Values: []float32{0.5, 0.25}},
+		Children:     []walpkg.ChildVector{{ID: "c0", Quantized: &walpkg.QuantizedVector{MSE: []byte{9}, Signs: []byte{1}, ResNorm: 0.5}, Dim: 8, Text: "c0"}},
+		Text:         "hello",
+		Metadata:     map[string]string{"k": "v"},
+		LamportClock: 10,
+		ActorID:      "a",
+		WallClock:    time.Now().UTC(),
+		Tombstone:    false,
+	}
+
+	data := SnapshotData{
+		Collection: "docs",
+		BitWidth:   2,
+		Seed:       42,
+		Dim:        8,
+		MaxLamport: 10,
+		Entries:    []VersionRecord{{ID: "vec-1", Versions: []VersionEntry{ve}}},
+	}
+
+	got := data.Entries[0].Versions[0]
+	if got.Quantized == nil || string(got.Quantized.MSE) != string(ve.Quantized.MSE) {
+		t.Fatalf("quantized MSE not preserved: %+v", got.Quantized)
+	}
+	if got.Quantized.ResNorm != ve.Quantized.ResNorm {
+		t.Fatalf("res norm mismatch: %v != %v", got.Quantized.ResNorm, ve.Quantized.ResNorm)
+	}
+	if got.Dim != 8 {
+		t.Fatalf("dim mismatch: %d", got.Dim)
+	}
+	if len(got.RawHash) != 32 {
+		t.Fatalf("raw hash len = %d", len(got.RawHash))
+	}
+	if got.Sparse == nil || len(got.Sparse.Indices) != 2 {
+		t.Fatalf("sparse not preserved: %+v", got.Sparse)
+	}
+	if len(got.Children) != 1 || got.Children[0].ID != "c0" {
+		t.Fatalf("children not preserved: %+v", got.Children)
+	}
+	if got.LamportClock != 10 || got.ActorID != "a" {
+		t.Fatalf("clocks not preserved: clock=%d actor=%q", got.LamportClock, got.ActorID)
+	}
+}

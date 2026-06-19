@@ -28,6 +28,8 @@ type serverOpts struct {
 	Peers                string
 	BitWidth             int
 	OffloadDir           string
+	EosArtifact          string
+	EosProviderID        string
 	ReplicateFrom        string
 	ReplicateCollections string
 	// ReadyCh, if non-nil, receives the bound listener address after the
@@ -75,6 +77,8 @@ func main() {
 		peers                = flag.String("peers", "", "comma-separated peer addresses")
 		bitWidth             = flag.Int("bit-width", 2, "default quantization bit width")
 		offloadDir           = flag.String("offload-dir", "", "local directory for cold storage offload (empty = disabled)")
+		eosArtifact          = flag.String("eos-artifact", os.Getenv("CORKSCREWDB_EOS_ARTIFACT"), "Eos embedding artifact path for the default provider (or CORKSCREWDB_EOS_ARTIFACT)")
+		eosProviderID        = flag.String("eos-provider-id", os.Getenv("CORKSCREWDB_EOS_PROVIDER_ID"), "provider ID/alias for -eos-artifact (or CORKSCREWDB_EOS_PROVIDER_ID; default with artifact = corkscrewdb-default-embedder)")
 		replicateFrom        = flag.String("replicate-from", "", "gRPC address of a primary to follow (empty = primary mode)")
 		replicateCollections = flag.String("replicate-collections", "", "comma-separated collection names to replicate (required with -replicate-from)")
 	)
@@ -102,6 +106,8 @@ func main() {
 		Peers:                *peers,
 		BitWidth:             *bitWidth,
 		OffloadDir:           *offloadDir,
+		EosArtifact:          *eosArtifact,
+		EosProviderID:        *eosProviderID,
 		ReplicateFrom:        *replicateFrom,
 		ReplicateCollections: *replicateCollections,
 	}
@@ -122,6 +128,13 @@ func runServer(ctx context.Context, opts serverOpts) error {
 	dbOpts := []corkscrewdb.Option{
 		corkscrewdb.WithWALSegmentSize(8 << 20),
 	}
+	provider, err := loadServerProvider(opts)
+	if err != nil {
+		return err
+	}
+	if provider != nil {
+		dbOpts = append(dbOpts, corkscrewdb.WithProvider(provider))
+	}
 	if opts.Token != "" {
 		dbOpts = append(dbOpts, corkscrewdb.WithToken(opts.Token))
 	}
@@ -131,6 +144,9 @@ func runServer(ctx context.Context, opts serverOpts) error {
 
 	db, err := corkscrewdb.Open(opts.DataDir, dbOpts...)
 	if err != nil {
+		if provider != nil {
+			_ = provider.Close()
+		}
 		return fmt.Errorf("open: %w", err)
 	}
 
@@ -237,6 +253,24 @@ func runServer(ctx context.Context, opts serverOpts) error {
 		errs = append(errs, fmt.Errorf("close: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+const defaultEosProviderAlias = "corkscrewdb-default-embedder"
+
+func loadServerProvider(opts serverOpts) (corkscrewdb.EmbeddingProvider, error) {
+	artifact := strings.TrimSpace(opts.EosArtifact)
+	if artifact == "" {
+		return nil, nil
+	}
+	providerID := strings.TrimSpace(opts.EosProviderID)
+	if providerID == "" {
+		providerID = defaultEosProviderAlias
+	}
+	provider, err := corkscrewdb.LoadEosProviderWithID(providerID, artifact)
+	if err != nil {
+		return nil, fmt.Errorf("load Eos provider %q: %w", artifact, err)
+	}
+	return provider, nil
 }
 
 // replicationStartupTimeout bounds how long the connect + catch-up phase

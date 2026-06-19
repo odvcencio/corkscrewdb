@@ -2,6 +2,39 @@
 
 All notable changes to CorkScrewDB are documented here.
 
+## v0.3.0 — 2026-06-18
+
+### Added
+
+- **Sparse vectors and hybrid search** — `SparseVector{Indices, Values}` on `Entry`; `WithSparse()` collection option; `SearchMulti(MultiQuery{Dense, Sparse, Text, Filters, Fusion}, k)` on both `Collection` and `CollectionView` for point-in-time hybrid search.
+- **Fusion policies** — `RRFFusion{K}` (Reciprocal Rank Fusion, default `K=60`) and `WeightedFusion{Dense, Sparse}` (min-max-normalized linear combination); selectable via `MultiQuery.Fusion`.
+- **Content-addressed raw vector store** — raw float32 vectors retained by default in blake3-keyed `.rvs` segments; `WithoutRawStore()` opts out (quantized-codes-only mode). Replaces the removed `WithVectorStorage` / `WithQuantizedOnlyPersistence`.
+- **Real HNSW index** — RNG/hub-protected neighbor pruning (LEANN), O(degree) tombstone delete with free-list slot reuse, build-from-quantized-codes (no raw vectors needed at rebuild), persisted node IDs in `graph.hnsw v2`.
+- **`RebuildIndex(IndexHNSW)`** — switches a flat collection to HNSW in place; uses default params (`M=16`, `EfConstruction=200`, `EfSearch=50`).
+- **Query-time two-tier prune** — `turboquant.ScoreUpperBound` early-out in the flat scorer loop (D3); reduces scoring work when the residual-norm bound is tighter than the current k-th score.
+- **Batched-multi scorer** — `ScoreTopKMulti(pqs, k, accept)` on the `Scorer` interface; single corpus pass for all queries using `InnerProductPreparedBatchTo`.
+- **Pluggable `Scorer` seam** — `WithScorer(Scorer)` collection option; optional CUDA GPU scorer via build tag `cuda` (`scorer_cuda.go` / `scorer_nocuda.go`).
+- **LRU point-in-time view cache** — `At()` / `AtTime()` views are memoized in a per-collection LRU to avoid repeated index reconstruction on identical clock values.
+- **Distribution: code-carrying replication** — WAL entries carry quantized codes so followers can reconstruct the index without pulling raw vectors for every entry.
+- **Distribution: raw pull-by-hash** — followers can retrieve raw vectors from the raw store by blake3 hash when needed (e.g., HNSW rebuild on a replica).
+- **Distribution: streamer rebuilt from WAL** — the replication `Streamer` reconstructs its send position from the WAL on restart rather than requiring a durable cursor file.
+- **Distribution: 2PC rebalance** — `OrchestrateRebalance(...)` runs a two-phase-commit protocol: freeze writes to migrating keys, wait for a quorum barrier, pull data from old owners, durably record the decision (`writeManifest` with fsync), flip routing, prune. Crash recovery (resume from persisted phase) and force-abort are both supported.
+
+### Changed
+
+- **`WithoutRawStore()` replaces `WithVectorStorage` / `WithQuantizedOnlyPersistence`** — the old storage-mode enum and its options are removed. Use `WithoutRawStore()` for quantized-codes-only collections; the default (raw store enabled) is unchanged.
+- **HNSW params honored at creation** — `WithHNSWParams(HNSWParams{M, EfConstruction, EfSearch})` is persisted in the manifest and applied at creation time. `RebuildIndex` uses the default params regardless.
+- **Index/graph cache re-wire** — on reopen, the HNSW graph is adopted from the persisted file before WAL replay; a deferred-build path skips costly graph construction when the cache is fresh.
+- **Format versions (greenfield v0.3.0 floor — no v0.2.0 migration):** WAL v5, snapshot v6, manifest v2, `.tqi` v3, `graph.hnsw` v2, `.rvs` v1.
+
+### Fixed
+
+- **AtTime same-millisecond ordering** — `AtTime` now correctly orders entries when multiple versions share the same wall-clock millisecond by falling back to Lamport clock for tiebreak.
+- **Bounded HLC Witness** — the HLC `Witness` call now caps the accepted wall-clock offset to prevent unbounded clock drift from a rogue or misconfigured peer.
+- **O(log v) history insert** — version history insertion uses binary search to maintain sorted order in O(log v) rather than a linear scan.
+- **WAL interior-corruption surfacing** — interior-frame CRC failures now return a distinct error rather than being silently swallowed as a clean end-of-segment.
+- **Fuzz-hardened decoders** — `.tqi`, `graph.hnsw`, `.rvs`, and WAL decoders enforce bounded allocations on all length-prefixed fields; malformed inputs cannot cause unbounded memory growth.
+
 ## v0.2.0 — 2026-04-10
 
 ### Added

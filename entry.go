@@ -3,6 +3,8 @@ package corkscrewdb
 import (
 	"sort"
 	"time"
+
+	"m31labs.dev/turboquant"
 )
 
 // Entry is the input payload for Put operations.
@@ -10,17 +12,46 @@ type Entry struct {
 	Text     string
 	Vector   []float32
 	Metadata map[string]string
+	Sparse   *SparseVector
 }
 
 // Version is one immutable version in an entry's history.
 type Version struct {
-	Embedding    []float32
+	Quantized    *turboquant.IPQuantized // ALWAYS present for non-tombstone dense versions
+	RawHash      []byte                  // blake3-256 ref into the raw store; nil iff WithoutRawStore or tombstone
+	Sparse       *SparseVector           // optional lexical/learned-sparse channel
+	Children     []ChildVector           // multivector children (quantized; ordinal-compactible)
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
 	ActorID      string
 	WallClock    time.Time
 	Tombstone    bool
+	dim          int
+}
+
+// MultiVectorEntry is the input payload for a packed parent multivector write.
+type MultiVectorEntry struct {
+	Text     string
+	Metadata map[string]string
+	Children []MultiVectorChild
+}
+
+// MultiVectorChild is one compact child vector stored under a logical parent.
+type MultiVectorChild struct {
+	ID       string
+	Vector   []float32
+	Text     string
+	Metadata map[string]string
+}
+
+// ChildVector is one immutable packed child in a parent version (quantized-only).
+type ChildVector struct {
+	ID        string
+	Quantized *turboquant.IPQuantized
+	Text      string
+	Metadata  map[string]string
+	dim       int
 }
 
 // SearchResult is one ranked similarity-search hit.
@@ -30,6 +61,19 @@ type SearchResult struct {
 	Text     string
 	Metadata map[string]string
 	Version  uint64
+}
+
+// ParentSearchResult is one parent result rolled up from the highest-scoring child.
+type ParentSearchResult struct {
+	ID            string
+	Score         float32
+	Text          string
+	Metadata      map[string]string
+	Version       uint64
+	ChildID       string
+	ChildScore    float32
+	ChildText     string
+	ChildMetadata map[string]string
 }
 
 func sortSearchResults(results []SearchResult) {
@@ -89,6 +133,45 @@ func WithText(text string) PutVectorOption {
 	})
 }
 
+type parentSearchConfig struct {
+	parentFilters  []FilterOption
+	childFilters   []FilterOption
+	childOverfetch int
+}
+
+// ParentSearchOption configures SearchParents and SearchParentsVector calls.
+type ParentSearchOption interface {
+	applyParentSearch(*parentSearchConfig)
+}
+
+type parentSearchOptionFunc func(*parentSearchConfig)
+
+func (f parentSearchOptionFunc) applyParentSearch(cfg *parentSearchConfig) {
+	f(cfg)
+}
+
+// WithParentFilters restricts parent results by exact parent metadata matches.
+func WithParentFilters(filters ...FilterOption) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.parentFilters = append([]FilterOption(nil), filters...)
+	})
+}
+
+// WithChildFilters restricts parent results by exact winning-child metadata matches.
+func WithChildFilters(filters ...FilterOption) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.childFilters = append([]FilterOption(nil), filters...)
+	})
+}
+
+// WithChildOverfetch reserves future approximate-index child overfetch control.
+// Local flat v1 parent search is exact and rejects positive overfetch values.
+func WithChildOverfetch(n int) ParentSearchOption {
+	return parentSearchOptionFunc(func(cfg *parentSearchConfig) {
+		cfg.childOverfetch = n
+	})
+}
+
 // IndexType selects the vector index algorithm.
 type IndexType int
 
@@ -100,11 +183,25 @@ const (
 )
 
 type collectionConfig struct {
-	bitWidth       int
-	indexType      IndexType
-	hnswM          int
-	hnswEfConstruct int
-	hnswEfSearch   int
+	bitWidth      int
+	seed          int64
+	indexType     IndexType
+	hnsw          HNSWParams
+	rawStore      bool // default true; cleared by WithoutRawStore
+	rawStoreSet   bool
+	sparseEnabled bool
+	scorer        Scorer // optional injected scorer; flat path uses defaultScorer when nil
+}
+
+// HNSWParams is the persisted HNSW configuration.
+type HNSWParams struct {
+	M              int // max connections per layer (default 16)
+	EfConstruction int // build-time beam width (default 200)
+	EfSearch       int // query-time beam width (default 50)
+}
+
+func defaultCollectionConfig(bitWidth int) collectionConfig {
+	return collectionConfig{bitWidth: bitWidth, rawStore: true}
 }
 
 // CollectionOption configures Collection creation.
@@ -125,20 +222,41 @@ func WithBitWidth(bits int) CollectionOption {
 	})
 }
 
-// WithIndexType selects the vector index algorithm.
-func WithIndexType(t IndexType) CollectionOption {
+// WithQuantizerSeed sets the collection quantizer seed for reproducible indexes.
+func WithQuantizerSeed(seed int64) CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
-		cfg.indexType = t
+		cfg.seed = seed
 	})
 }
 
-// WithHNSWParams configures HNSW-specific parameters.
-func WithHNSWParams(m, efConstruction, efSearch int) CollectionOption {
+// WithIndexType selects the vector index algorithm.
+func WithIndexType(t IndexType) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.indexType = t })
+}
+
+// WithHNSWParams configures and persists HNSW-specific parameters.
+func WithHNSWParams(p HNSWParams) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.hnsw = p })
+}
+
+// WithoutRawStore opts out of the default content-addressed raw vector store.
+func WithoutRawStore() CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
-		cfg.hnswM = m
-		cfg.hnswEfConstruct = efConstruction
-		cfg.hnswEfSearch = efSearch
+		cfg.rawStore = false
+		cfg.rawStoreSet = true
 	})
+}
+
+// WithSparse enables the sparse channel for this collection.
+func WithSparse() CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.sparseEnabled = true })
+}
+
+// WithScorer injects a custom Scorer into the collection (frozen API seam).
+// The flat search path uses defaultScorer when no scorer is provided.
+// Full WithScorer injection into the flat path is deferred to the Performance phase.
+func WithScorer(s Scorer) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.scorer = s })
 }
 
 func cloneMetadata(meta map[string]string) map[string]string {
@@ -162,15 +280,46 @@ func cloneVector(vec []float32) []float32 {
 }
 
 func cloneVersion(v Version) Version {
+	var qv *turboquant.IPQuantized
+	if v.Quantized != nil {
+		cloned := cloneQuantized(*v.Quantized)
+		qv = &cloned
+	}
 	return Version{
-		Embedding:    cloneVector(v.Embedding),
+		Quantized:    qv,
+		RawHash:      append([]byte(nil), v.RawHash...),
+		Sparse:       cloneSparseVector(v.Sparse),
 		Text:         v.Text,
 		Metadata:     cloneMetadata(v.Metadata),
+		Children:     cloneChildVectors(v.Children),
 		LamportClock: v.LamportClock,
 		ActorID:      v.ActorID,
 		WallClock:    v.WallClock,
 		Tombstone:    v.Tombstone,
+		dim:          v.dim,
 	}
+}
+
+func cloneChildVectors(children []ChildVector) []ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]ChildVector, len(children))
+	for i, child := range children {
+		var qv *turboquant.IPQuantized
+		if child.Quantized != nil {
+			cloned := cloneQuantized(*child.Quantized)
+			qv = &cloned
+		}
+		out[i] = ChildVector{
+			ID:        child.ID,
+			Quantized: qv,
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+			dim:       child.dim,
+		}
+	}
+	return out
 }
 
 func matchesFilters(meta map[string]string, filters []FilterOption) bool {
@@ -187,6 +336,16 @@ func collectPutVectorOptions(opts []PutVectorOption) putVectorConfig {
 	for _, opt := range opts {
 		if opt != nil {
 			opt.applyPutVector(&cfg)
+		}
+	}
+	return cfg
+}
+
+func collectParentSearchOptions(opts []ParentSearchOption) parentSearchConfig {
+	var cfg parentSearchConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyParentSearch(&cfg)
 		}
 	}
 	return cfg

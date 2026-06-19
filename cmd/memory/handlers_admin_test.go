@@ -8,28 +8,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+
+	"m31labs.dev/corkscrewdb"
 )
 
-// newAdminHandler spins up an in-process CorkScrewDB primary, wires a
-// *DBClients with rw+ro pointing at it, and returns a fresh
-// *AdminHandler for test use.
+// newAdminHandler opens a local (non-remote) CorkScrewDB, wraps it in a
+// *DBClients via newLocalClients so writes bypass the gRPC transport layer
+// (which Phase 1 gates), and returns a fresh *AdminHandler for test use.
 func newAdminHandler(t *testing.T) *AdminHandler {
 	t.Helper()
-	addr, token := newTestPrimary(t)
-	cfg := Config{
-		AddrRW:             addr,
-		AddrRO:             addr,
-		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	clients, err := NewDBClients(ctx, cfg)
+	db, err := corkscrewdb.Open(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewDBClients: %v", err)
+		t.Fatalf("open local db: %v", err)
 	}
-	t.Cleanup(func() { _ = clients.Close() })
+	t.Cleanup(func() { _ = db.Close() })
+	clients := newLocalClients(db)
 	return NewAdminHandler(clients, nil)
 }
 
@@ -104,9 +97,9 @@ func getAdminShards(t *testing.T, h *AdminHandler, adminCtx bool) (*httptest.Res
 func TestAdmin_CreateMissingContext500(t *testing.T) {
 	h := newAdminHandler(t)
 	rec, body := postAdminCollection(t, h, false, map[string]any{
-		"name":       "agent-memory",
-		"bit_width":  2,
-		"retention":  "keep-all",
+		"name":      "agent-memory",
+		"bit_width": 2,
+		"retention": "keep-all",
 	})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())

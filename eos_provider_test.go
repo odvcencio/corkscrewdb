@@ -1,6 +1,8 @@
 package corkscrewdb
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +11,37 @@ import (
 	eosruntime "m31labs.dev/eos/runtime"
 	"m31labs.dev/eos/runtime/backend"
 )
+
+func TestEmbeddedDefaultEosProviderAssetHashes(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "artifact",
+			path: "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll",
+			want: defaultEosProviderArtifactSHA256,
+		},
+		{
+			name: "tokenizer",
+			path: "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.tokenizer.mll",
+			want: defaultEosProviderTokenizerSHA256,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := defaultEosProviderAssets.ReadFile(tc.path)
+			if err != nil {
+				t.Fatalf("read embedded %s: %v", tc.path, err)
+			}
+			sum := sha256.Sum256(data)
+			if got := hex.EncodeToString(sum[:]); got != tc.want {
+				t.Fatalf("%s sha256 = %s, want %s", tc.name, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestLoadEosProviderEncodes(t *testing.T) {
 	path := writeTinyEosProviderPackage(t)
@@ -66,17 +99,54 @@ func TestLoadEosProviderEncodes(t *testing.T) {
 	}
 }
 
+func TestLoadEosProviderWithIDOverridesManifestName(t *testing.T) {
+	path := writeTinyEosProviderPackage(t)
+	provider, err := LoadEosProviderWithID("corkscrewdb-default-embedder", path)
+	if err != nil {
+		t.Fatalf("load Eos provider with ID: %v", err)
+	}
+	defer provider.Close()
+
+	named, ok := provider.(interface{ ProviderID() string })
+	if !ok {
+		t.Fatal("expected Eos provider to expose ProviderID")
+	}
+	if got := named.ProviderID(); got != "corkscrewdb-default-embedder" {
+		t.Fatalf("provider id = %q, want %q", got, "corkscrewdb-default-embedder")
+	}
+	if got := provider.Dim(); got != 3 {
+		t.Fatalf("provider dim = %d, want 3", got)
+	}
+}
+
 func TestOpenDefaultsToEosProvider(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
-	if db.manifest.Embedding.ID != "manta-embed-v0" {
-		t.Fatalf("default embedding provider id = %q, want %q", db.manifest.Embedding.ID, "manta-embed-v0")
+	if db.manifest.Embedding.ID != defaultEosProviderID {
+		t.Fatalf("default embedding provider id = %q, want %q", db.manifest.Embedding.ID, defaultEosProviderID)
 	}
-	if db.manifest.Embedding.Dim <= 0 {
-		t.Fatalf("default embedding dim = %d, want > 0", db.manifest.Embedding.Dim)
+	if db.manifest.Embedding.Dim != 256 {
+		t.Fatalf("default embedding dim = %d, want 256", db.manifest.Embedding.Dim)
+	}
+	vec, err := db.provider.Encode("hello world")
+	if err != nil {
+		t.Fatalf("encode with default provider: %v", err)
+	}
+	if len(vec) != 256 {
+		t.Fatalf("default embedding len = %d, want 256", len(vec))
+	}
+	var nonZero bool
+	for _, value := range vec {
+		if value != 0 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		t.Fatal("expected non-zero default Eos embedding")
 	}
 }
 

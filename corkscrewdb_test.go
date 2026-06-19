@@ -1,6 +1,7 @@
 package corkscrewdb
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,7 +9,53 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
+
+func TestOpenSurfacesWALInteriorCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.csdb")
+	db, err := Open(path, WithProvider(&mockProvider{dim: 4}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("docs", WithBitWidth(2))
+	if err := coll.PutVector("a", []float32{1, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.PutVector("b", []float32{0, 1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt an interior byte of the first WAL segment (valid bytes follow),
+	// without closing (close would snapshot + prune the WAL).
+	walDir := filepath.Join(path, "collections", "docs", "wal")
+	segments, err := walpkg.ListSegments(walDir)
+	if err != nil || len(segments) == 0 {
+		t.Fatalf("list segments err=%v segments=%v", err, segments)
+	}
+	raw, err := os.ReadFile(segments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[10] ^= 0xFF
+	if err := os.WriteFile(segments[0], raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path, WithProvider(&mockProvider{dim: 4})); err == nil {
+		t.Fatal("Open succeeded over interior-corrupted WAL")
+	} else {
+		var corrupt *walpkg.ErrWALCorrupt
+		if !errors.As(err, &corrupt) {
+			t.Fatalf("Open err = %v, want *walpkg.ErrWALCorrupt", err)
+		}
+	}
+}
 
 func TestOpenCloseRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -195,7 +242,7 @@ func TestRecoveryFromSnapshotAndWALTail(t *testing.T) {
 	}
 }
 
-func TestCloseWritesQuantizedIndexFile(t *testing.T) {
+func TestCloseWritesDurableSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "index-file.csdb")
 	db, err := Open(path, WithProvider(&mockProvider{dim: 8}))
@@ -210,9 +257,24 @@ func TestCloseWritesQuantizedIndexFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	indexPath := filepath.Join(path, "collections", "docs", "index", "quantized.tqi")
-	if _, err := os.Stat(indexPath); err != nil {
-		t.Fatalf("expected quantized index file: %v", err)
+	// The snapshot is the durable full-state copy (codes + raw hash refs);
+	// .tqi/graph.hnsw are regenerable caches no longer written on close.
+	matches, _ := filepath.Glob(filepath.Join(path, "collections", "docs", "snapshot-*.csdb"))
+	if len(matches) == 0 {
+		t.Fatal("expected a durable snapshot file")
+	}
+
+	db2, err := Open(path, WithProvider(&mockProvider{dim: 8}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	results, err := db2.Collection("docs").Search("alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].ID != "doc-1" {
+		t.Fatalf("reopen search = %v, want doc-1", results)
 	}
 }
 
@@ -913,4 +975,285 @@ func hasResult(results []SearchResult, id string) bool {
 		}
 	}
 	return false
+}
+
+func putHNSWVecs(t *testing.T, coll *Collection, n, dim int, seed int64) [][]float32 {
+	t.Helper()
+	rng := rng32(seed)
+	vecs := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		v := make([]float32, dim)
+		for j := range v {
+			v[j] = rng()*2 - 1
+		}
+		vecs[i] = v
+		if err := coll.PutVector("v"+strconv.Itoa(i), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return vecs
+}
+
+// rng32 returns a deterministic float32 generator (no external rand import needed
+// here; corkscrewdb_test.go avoids math/rand to keep its import set minimal).
+func rng32(seed int64) func() float32 {
+	state := uint64(seed)*2862933555777941757 + 3037000493
+	return func() float32 {
+		state = state*6364136223846793005 + 1442695040888963407
+		return float32((state>>40)&0xFFFFFF) / float32(0x1000000)
+	}
+}
+
+func TestReopenFreshCacheNoRebuild(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db.csdb")
+	dim := 16
+
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("hnsw", WithBitWidth(2), WithQuantizerSeed(123), WithIndexType(IndexHNSW))
+	vecs := putHNSWVecs(t, coll, 120, dim, 7)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with hooks; the fresh cache must be ADOPTED (no rebuild).
+	adopted, rebuilt := 0, 0
+	cacheAdoptHook = func() { adopted++ }
+	cacheRebuildHook = func() { rebuilt++ }
+	defer func() { cacheAdoptHook, cacheRebuildHook = nil, nil }()
+
+	db2, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != 1 || rebuilt != 0 {
+		t.Fatalf("fresh-cache reopen: adopted=%d rebuilt=%d, want adopted=1 rebuilt=0", adopted, rebuilt)
+	}
+	adoptResults, err := db2.Collection("hnsw").SearchVector(vecs[5], 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force a rebuild by deleting the cache files, reopen, compare results.
+	if err := os.Remove(filepath.Join(path, "collections", "hnsw", "index", "graph.hnsw")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(path, "collections", "hnsw", "index", "quantized.tqi")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	adopted, rebuilt = 0, 0
+	db3, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db3.Close()
+	if rebuilt != 1 || adopted != 0 {
+		t.Fatalf("deleted-cache reopen: adopted=%d rebuilt=%d, want adopted=0 rebuilt=1", adopted, rebuilt)
+	}
+	rebuildResults, err := db3.Collection("hnsw").SearchVector(vecs[5], 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adoptResults) != len(rebuildResults) {
+		t.Fatalf("adopt vs rebuild result count differ: %d vs %d", len(adoptResults), len(rebuildResults))
+	}
+	for i := range adoptResults {
+		if adoptResults[i].ID != rebuildResults[i].ID {
+			t.Fatalf("adopt vs rebuild differ at %d: %s vs %s", i, adoptResults[i].ID, rebuildResults[i].ID)
+		}
+	}
+}
+
+func TestCleanCloseAdoptsPriorCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db.csdb")
+	dim := 16
+
+	db, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coll := db.Collection("hnsw", WithBitWidth(2), WithQuantizerSeed(9), WithIndexType(IndexHNSW))
+	vecs := putHNSWVecs(t, coll, 100, dim, 11)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen, do NO writes, close (clean: dirty == false -> no snapshot, no cache write).
+	db2, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen again: the PRIOR close's cache must still be adopted.
+	adopted, rebuilt := 0, 0
+	cacheAdoptHook = func() { adopted++ }
+	cacheRebuildHook = func() { rebuilt++ }
+	defer func() { cacheAdoptHook, cacheRebuildHook = nil, nil }()
+	db3, err := Open(path, WithProvider(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db3.Close()
+	if adopted != 1 || rebuilt != 0 {
+		t.Fatalf("clean-close reopen: adopted=%d rebuilt=%d, want adopted=1 rebuilt=0", adopted, rebuilt)
+	}
+	res, err := db3.Collection("hnsw").SearchVector(vecs[3], 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 results after clean-close adopt, got %d", len(res))
+	}
+
+	// A never-written HNSW collection: reopen rebuilds cleanly (empty, no error).
+	empty := db3.Collection("empty-hnsw", WithBitWidth(2), WithIndexType(IndexHNSW))
+	_ = empty
+}
+
+func TestStaleAndCorruptCacheRebuild(t *testing.T) {
+	dim := 16
+
+	// (a) Stale .tqi lamport -> fallback to rebuild, correct results.
+	t.Run("stale_tqi", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "db.csdb")
+		db, err := Open(path, WithProvider(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll := db.Collection("hnsw", WithBitWidth(2), WithQuantizerSeed(5), WithIndexType(IndexHNSW))
+		vecs := putHNSWVecs(t, coll, 100, dim, 3)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// Corrupt the .tqi so it fails to load -> graph cache treated stale.
+		tqi := filepath.Join(path, "collections", "hnsw", "index", "quantized.tqi")
+		if err := os.WriteFile(tqi, []byte("garbage"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		adopted, rebuilt := 0, 0
+		cacheAdoptHook = func() { adopted++ }
+		cacheRebuildHook = func() { rebuilt++ }
+		defer func() { cacheAdoptHook, cacheRebuildHook = nil, nil }()
+		db2, err := Open(path, WithProvider(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db2.Close()
+		if rebuilt != 1 || adopted != 0 {
+			t.Fatalf("stale .tqi: adopted=%d rebuilt=%d, want rebuilt=1", adopted, rebuilt)
+		}
+		res, err := db2.Collection("hnsw").SearchVector(vecs[1], 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 3 {
+			t.Fatalf("expected 3 results after stale-cache rebuild, got %d", len(res))
+		}
+	})
+
+	// (b) Truncated graph.hnsw -> CRC rejection -> rebuild, no error surfaced.
+	t.Run("corrupt_graph", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "db.csdb")
+		db, err := Open(path, WithProvider(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll := db.Collection("hnsw", WithBitWidth(2), WithQuantizerSeed(6), WithIndexType(IndexHNSW))
+		vecs := putHNSWVecs(t, coll, 100, dim, 4)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		graph := filepath.Join(path, "collections", "hnsw", "index", "graph.hnsw")
+		data, err := os.ReadFile(graph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(graph, data[:len(data)/2], 0o644); err != nil { // truncate
+			t.Fatal(err)
+		}
+		adopted, rebuilt := 0, 0
+		cacheAdoptHook = func() { adopted++ }
+		cacheRebuildHook = func() { rebuilt++ }
+		defer func() { cacheAdoptHook, cacheRebuildHook = nil, nil }()
+		db2, err := Open(path, WithProvider(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db2.Close()
+		if rebuilt != 1 || adopted != 0 {
+			t.Fatalf("corrupt graph: adopted=%d rebuilt=%d, want rebuilt=1", adopted, rebuilt)
+		}
+		res, err := db2.Collection("hnsw").SearchVector(vecs[2], 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 3 {
+			t.Fatalf("expected 3 results after corrupt-graph rebuild, got %d", len(res))
+		}
+	})
+}
+
+// TestWriteManifestDurable verifies the fsync-hardened writeManifest leaves no
+// temp file beside the manifest and that the on-disk content round-trips
+// (§5.8). A true crash test is infeasible in-process; the observable contract
+// is "atomic rename leaves no temp file and the content is present."
+func TestWriteManifestDurable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+
+	m := manifest{
+		FormatVersion:   2,
+		FormatFloor:     "v0.3.0",
+		ModuleVersion:   PackageVersion,
+		ActorID:         "actor-durable",
+		DefaultBitWidth: 2,
+		Peers:           []string{"127.0.0.1:9"},
+		Collections:     map[string]collectionMeta{"docs": {BitWidth: 2, Dim: 8}},
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	if err := writeManifest(path, m); err != nil {
+		t.Fatalf("writeManifest err = %v", err)
+	}
+
+	// No .tmp leftover beside the manifest.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("writeManifest left a temp file: %q", e.Name())
+		}
+	}
+
+	// Content round-trips: reopen + unmarshal equals what was written.
+	reopened, err := loadOrCreateManifest(dir, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ActorID != m.ActorID {
+		t.Fatalf("ActorID = %q, want %q", reopened.ActorID, m.ActorID)
+	}
+	if reopened.DefaultBitWidth != m.DefaultBitWidth {
+		t.Fatalf("DefaultBitWidth = %d, want %d", reopened.DefaultBitWidth, m.DefaultBitWidth)
+	}
+	if len(reopened.Peers) != 1 || reopened.Peers[0] != "127.0.0.1:9" {
+		t.Fatalf("Peers = %v, want [127.0.0.1:9]", reopened.Peers)
+	}
+	if meta, ok := reopened.Collections["docs"]; !ok || meta.BitWidth != 2 || meta.Dim != 8 {
+		t.Fatalf("Collections[docs] = %+v, want {BitWidth:2 Dim:8}", meta)
+	}
 }

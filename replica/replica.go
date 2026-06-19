@@ -30,9 +30,13 @@ type VersionRecord struct {
 	Versions []VersionEntry
 }
 
-// VersionEntry is a single version in a record's history.
+// VersionEntry is a single version in a record's history (WAL v5 payload).
 type VersionEntry struct {
-	Embedding    []float32
+	Quantized    *walpkg.QuantizedVector // codes; nil for sparse-only / tombstone
+	Dim          int
+	RawHash      []byte // 32-byte blake3 ref, empty iff WithoutRawStore
+	Sparse       *walpkg.SparseBlock
+	Children     []walpkg.ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64

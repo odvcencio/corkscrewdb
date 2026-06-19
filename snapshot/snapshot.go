@@ -4,28 +4,38 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(2)
+	snapshotVersion = uint8(6) // v0.3.0 floor
+
+	childEncodingLegacy                  = uint8(0)
+	childEncodingCompactQuantizedOrdinal = uint8(1)
 )
+
+// ErrFormatTooOld is returned when a snapshot predates the v0.3.0 floor.
+var ErrFormatTooOld = errors.New("snapshot: format older than v0.3.0 floor")
 
 // Data is one collection snapshot.
 type Data struct {
-	Collection string
-	BitWidth   int
-	Seed       int64
-	Dim        int
-	MaxLamport uint64
-	CreatedAt  time.Time
-	Records    []Record
+	Collection    string
+	BitWidth      int
+	Seed          int64
+	Dim           int
+	RawStore      bool
+	SparseEnabled bool
+	MaxLamport    uint64
+	CreatedAt     time.Time
+	Records       []Record
 }
 
 // Record is one vector ID plus full version history.
@@ -36,7 +46,10 @@ type Record struct {
 
 // Version is one immutable version stored in a snapshot.
 type Version struct {
-	Embedding    []float32
+	Quantized    *QuantizedVector
+	RawHash      []byte
+	Sparse       *SparseBlock
+	Children     []ChildVector
 	Text         string
 	Metadata     map[string]string
 	LamportClock uint64
@@ -45,19 +58,72 @@ type Version struct {
 	Tombstone    bool
 }
 
+// QuantizedVector stores a TurboQuant inner-product payload.
+type QuantizedVector struct {
+	MSE     []byte
+	Signs   []byte
+	ResNorm float32
+}
+
+// SparseBlock is a sparse channel persisted in the snapshot.
+type SparseBlock struct {
+	Indices []uint32
+	Values  []float32
+}
+
+// ChildVector stores one packed child vector inside a parent snapshot version.
+type ChildVector struct {
+	ID        string
+	Quantized *QuantizedVector
+	Dim       int
+	Text      string
+	Metadata  map[string]string
+}
+
 func WriteFile(path string, data Data) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	payload, err := marshal(data)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := dirFile.Sync(); err != nil {
+		_ = dirFile.Close()
+		return err
+	}
+	return dirFile.Close()
 }
 
 func marshal(data Data) ([]byte, error) {
@@ -96,6 +162,19 @@ func marshal(data Data) ([]byte, error) {
 	if err := write(uint32(data.Dim)); err != nil {
 		return nil, err
 	}
+	var rawStoreByte, sparseByte uint8
+	if data.RawStore {
+		rawStoreByte = 1
+	}
+	if data.SparseEnabled {
+		sparseByte = 1
+	}
+	if err := write(rawStoreByte); err != nil {
+		return nil, err
+	}
+	if err := write(sparseByte); err != nil {
+		return nil, err
+	}
 	if err := write(data.MaxLamport); err != nil {
 		return nil, err
 	}
@@ -113,11 +192,69 @@ func marshal(data Data) ([]byte, error) {
 			return nil, err
 		}
 		for _, version := range record.Versions {
-			embedding := make([]byte, len(version.Embedding)*4)
-			for i, value := range version.Embedding {
-				binary.LittleEndian.PutUint32(embedding[i*4:], math.Float32bits(value))
+			if version.Quantized != nil {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if err := writeBytes(version.Quantized.MSE); err != nil {
+					return nil, err
+				}
+				if err := writeBytes(version.Quantized.Signs); err != nil {
+					return nil, err
+				}
+				if err := write(math.Float32bits(version.Quantized.ResNorm)); err != nil {
+					return nil, err
+				}
+			} else if err := write(uint8(0)); err != nil {
+				return nil, err
 			}
-			if err := writeBytes(embedding); err != nil {
+			// RawHash block: presence byte + 32 bytes iff present.
+			if len(version.RawHash) == 32 {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if _, err := mw.Write(version.RawHash); err != nil {
+					return nil, err
+				}
+			} else if err := write(uint8(0)); err != nil {
+				return nil, err
+			}
+			// Sparse block: presence byte + count(u32) + indices + values.
+			if version.Sparse != nil && len(version.Sparse.Indices) > 0 {
+				if err := write(uint8(1)); err != nil {
+					return nil, err
+				}
+				if err := write(uint32(len(version.Sparse.Indices))); err != nil {
+					return nil, err
+				}
+				for _, idx := range version.Sparse.Indices {
+					if err := write(idx); err != nil {
+						return nil, err
+					}
+				}
+				for _, val := range version.Sparse.Values {
+					if err := write(math.Float32bits(val)); err != nil {
+						return nil, err
+					}
+				}
+			} else if err := write(uint8(0)); err != nil {
+				return nil, err
+			}
+			childEncoding := childEncodingLegacy
+			if canUseCompactQuantizedOrdinalChildren(version.Children) {
+				childEncoding = childEncodingCompactQuantizedOrdinal
+			}
+			if err := write(uint32(len(version.Children))); err != nil {
+				return nil, err
+			}
+			if err := write(childEncoding); err != nil {
+				return nil, err
+			}
+			if childEncoding == childEncodingCompactQuantizedOrdinal {
+				if err := writeCompactQuantizedOrdinalChildren(mw, write, version.Children); err != nil {
+					return nil, err
+				}
+			} else if err := writeLegacyChildren(write, writeBytes, writeString, version.Children); err != nil {
 				return nil, err
 			}
 			if err := writeString(version.Text); err != nil {
@@ -152,4 +289,109 @@ func marshal(data Data) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func writeLegacyChildren(
+	write func(any) error,
+	writeBytes func([]byte) error,
+	writeString func(string) error,
+	children []ChildVector,
+) error {
+	for _, child := range children {
+		if err := writeString(child.ID); err != nil {
+			return err
+		}
+		if child.Quantized != nil {
+			if err := write(uint8(1)); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.MSE); err != nil {
+				return err
+			}
+			if err := writeBytes(child.Quantized.Signs); err != nil {
+				return err
+			}
+			if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+				return err
+			}
+		} else if err := write(uint8(0)); err != nil {
+			return err
+		}
+		if err := write(uint32(child.Dim)); err != nil {
+			return err
+		}
+		if err := writeString(child.Text); err != nil {
+			return err
+		}
+		childMetaJSON, err := json.Marshal(child.Metadata)
+		if err != nil {
+			return err
+		}
+		if err := writeBytes(childMetaJSON); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canUseCompactQuantizedOrdinalChildren(children []ChildVector) bool {
+	if len(children) == 0 {
+		return false
+	}
+	first := children[0]
+	if first.Quantized == nil || first.Dim <= 0 || first.Text != "" || len(first.Metadata) != 0 {
+		return false
+	}
+	mseLen := len(first.Quantized.MSE)
+	signsLen := len(first.Quantized.Signs)
+	if mseLen == 0 || signsLen == 0 {
+		return false
+	}
+	for i, child := range children {
+		if child.ID != strconv.Itoa(i) || child.Quantized == nil || child.Dim != first.Dim {
+			return false
+		}
+		if child.Text != "" || len(child.Metadata) != 0 {
+			return false
+		}
+		if len(child.Quantized.MSE) != mseLen || len(child.Quantized.Signs) != signsLen {
+			return false
+		}
+	}
+	return true
+}
+
+func writeCompactQuantizedOrdinalChildren(
+	w io.Writer,
+	write func(any) error,
+	children []ChildVector,
+) error {
+	dim := uint32(children[0].Dim)
+	mseLen := uint32(len(children[0].Quantized.MSE))
+	signsLen := uint32(len(children[0].Quantized.Signs))
+	if err := write(dim); err != nil {
+		return err
+	}
+	if err := write(mseLen); err != nil {
+		return err
+	}
+	if err := write(signsLen); err != nil {
+		return err
+	}
+	for _, child := range children {
+		if _, err := w.Write(child.Quantized.MSE); err != nil {
+			return err
+		}
+	}
+	for _, child := range children {
+		if _, err := w.Write(child.Quantized.Signs); err != nil {
+			return err
+		}
+	}
+	for _, child := range children {
+		if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

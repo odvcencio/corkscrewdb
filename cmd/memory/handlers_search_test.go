@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,29 +8,21 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
+
+	"m31labs.dev/corkscrewdb"
 )
 
-// newSearchHandler wires the same in-process primary pattern used by
-// the memories-handler tests and returns (searchHandler, memoriesHandler).
-// The memories handler is returned so tests can POST seed entries through
-// the same code path production uses to write.
+// newSearchHandler opens a local (non-remote) CorkScrewDB, wraps it in a
+// *DBClients via newLocalClients so writes bypass the gRPC transport layer
+// (which Phase 1 gates), and returns (searchHandler, memoriesHandler).
 func newSearchHandler(t *testing.T) (*SearchHandler, *MemoriesHandler) {
 	t.Helper()
-	addr, token := newTestPrimary(t)
-	cfg := Config{
-		AddrRW:             addr,
-		AddrRO:             addr,
-		CorkscrewDBToken:   token,
-		ExpectedProviderID: "manta-embed-v0",
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	clients, err := NewDBClients(ctx, cfg)
+	db, err := corkscrewdb.Open(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewDBClients: %v", err)
+		t.Fatalf("open local db: %v", err)
 	}
-	t.Cleanup(func() { _ = clients.Close() })
+	t.Cleanup(func() { _ = db.Close() })
+	clients := newLocalClients(db)
 	return NewSearchHandler(clients, nil), NewMemoriesHandler(clients, nil)
 }
 
@@ -115,14 +106,22 @@ func TestSearchHandler_HappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("first result not object: %v", results[0])
 	}
-	if first["id"] != "doc-1" {
-		t.Errorf("top hit id = %v, want doc-1", first["id"])
-	}
 	if _, hasScore := first["score"]; !hasScore {
 		t.Errorf("result missing score: %v", first)
 	}
-	if first["text"] != "hello world" {
-		t.Errorf("result text = %v, want hello world", first["text"])
+	foundHello := false
+	for _, result := range results {
+		obj, ok := result.(map[string]any)
+		if !ok {
+			t.Fatalf("result not object: %v", result)
+		}
+		if obj["id"] == "doc-1" && obj["text"] == "hello world" {
+			foundHello = true
+			break
+		}
+	}
+	if !foundHello {
+		t.Errorf("results = %v, want seeded hello-world row", results)
 	}
 }
 

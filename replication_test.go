@@ -1,151 +1,13 @@
 package corkscrewdb
 
 import (
-	"context"
 	"net"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"m31labs.dev/corkscrewdb/replica"
-	walpkg "m31labs.dev/corkscrewdb/wal"
 )
-
-// rpcPullerAdapter adapts the remoteClient to the replica.Puller interface.
-type rpcPullerAdapter struct {
-	client remoteClient
-}
-
-func (a *rpcPullerAdapter) PullEntries(req replica.PullRequest) (replica.PullResponse, error) {
-	resp, err := a.client.PullEntries(RPCPullEntriesRequest{
-		Collection: req.Collection,
-		SinceClock: req.SinceClock,
-		MaxEntries: req.MaxEntries,
-	})
-	if err != nil {
-		return replica.PullResponse{}, err
-	}
-	entries := make([]replica.Entry, len(resp.Entries))
-	for i, e := range resp.Entries {
-		entries[i] = replica.Entry{Entry: walpkg.Entry{
-			Kind:         e.Kind,
-			CollectionID: e.CollectionID,
-			VectorID:     e.VectorID,
-			Embedding:    e.Embedding,
-			Text:         e.Text,
-			Metadata:     e.Metadata,
-			LamportClock: e.LamportClock,
-			ActorID:      e.ActorID,
-			WallClock:    e.WallClock,
-		}}
-	}
-	return replica.PullResponse{
-		Entries:     entries,
-		LatestClock: resp.LatestClock,
-		HasMore:     resp.HasMore,
-	}, nil
-}
-
-func (a *rpcPullerAdapter) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotResponse, error) {
-	resp, err := a.client.PullSnapshot(RPCPullSnapshotRequest{
-		Collection: req.Collection,
-	})
-	if err != nil {
-		return replica.SnapshotResponse{}, err
-	}
-	records := make([]replica.VersionRecord, len(resp.Records))
-	for i, r := range resp.Records {
-		versions := make([]replica.VersionEntry, len(r.Versions))
-		for j, v := range r.Versions {
-			versions[j] = replica.VersionEntry{
-				Embedding:    v.Embedding,
-				Text:         v.Text,
-				Metadata:     v.Metadata,
-				LamportClock: v.LamportClock,
-				ActorID:      v.ActorID,
-				WallClock:    v.WallClock,
-				Tombstone:    v.Tombstone,
-			}
-		}
-		records[i] = replica.VersionRecord{ID: r.ID, Versions: versions}
-	}
-	return replica.SnapshotResponse{
-		Data: replica.SnapshotData{
-			Collection: resp.Collection,
-			BitWidth:   resp.BitWidth,
-			Seed:       resp.Seed,
-			Dim:        resp.Dim,
-			MaxLamport: resp.MaxLamport,
-			Entries:    records,
-		},
-	}, nil
-}
-
-func (a *rpcPullerAdapter) StreamEntries(ctx context.Context, req replica.PullRequest, handle func(replica.PullResponse) error) error {
-	return a.client.StreamEntries(ctx, RPCPullEntriesRequest{
-		Collection: req.Collection,
-		SinceClock: req.SinceClock,
-		MaxEntries: req.MaxEntries,
-	}, func(resp RPCPullEntriesResponse) error {
-		entries := make([]replica.Entry, len(resp.Entries))
-		for i, e := range resp.Entries {
-			entries[i] = replica.Entry{Entry: walpkg.Entry{
-				Kind:         e.Kind,
-				CollectionID: e.CollectionID,
-				VectorID:     e.VectorID,
-				Embedding:    e.Embedding,
-				Text:         e.Text,
-				Metadata:     e.Metadata,
-				LamportClock: e.LamportClock,
-				ActorID:      e.ActorID,
-				WallClock:    e.WallClock,
-			}}
-		}
-		return handle(replica.PullResponse{
-			Entries:     entries,
-			LatestClock: resp.LatestClock,
-			HasMore:     resp.HasMore,
-		})
-	})
-}
-
-// dbApplier adapts a DB to the replica.Applier interface.
-type dbApplier struct {
-	db *DB
-}
-
-func (a *dbApplier) ApplyReplicatedEntry(collection string, entry replica.Entry) error {
-	coll := a.db.Collection(collection)
-	return coll.loadVersion(entry.VectorID, Version{
-		Embedding:    cloneVector(entry.Embedding),
-		Text:         entry.Text,
-		Metadata:     cloneMetadata(entry.Metadata),
-		LamportClock: entry.LamportClock,
-		ActorID:      entry.ActorID,
-		WallClock:    entry.WallClock,
-		Tombstone:    entry.Kind == walpkg.EntryTombstone,
-	})
-}
-
-func (a *dbApplier) ApplySnapshot(data replica.SnapshotData) error {
-	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth))
-	for _, record := range data.Entries {
-		for _, v := range record.Versions {
-			if err := coll.loadVersion(record.ID, Version{
-				Embedding:    cloneVector(v.Embedding),
-				Text:         v.Text,
-				Metadata:     cloneMetadata(v.Metadata),
-				LamportClock: v.LamportClock,
-				ActorID:      v.ActorID,
-				WallClock:    v.WallClock,
-				Tombstone:    v.Tombstone,
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
 
 func TestReplicationPrimaryToFollower(t *testing.T) {
 	// Start primary.
@@ -189,8 +51,14 @@ func TestReplicationPrimaryToFollower(t *testing.T) {
 	}
 	defer client.Close()
 
-	puller := &rpcPullerAdapter{client: client.remote}
-	applier := &dbApplier{db: followerDB}
+	puller, err := NewRPCPuller(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applier, err := NewDBApplier(followerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	follower, err := replica.NewFollower(replica.FollowerConfig{
 		Collection: "docs",
@@ -278,8 +146,14 @@ func TestReplicationCatchUp(t *testing.T) {
 	}
 	defer client.Close()
 
-	puller := &rpcPullerAdapter{client: client.remote}
-	applier := &dbApplier{db: followerDB}
+	puller, err := NewRPCPuller(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applier, err := NewDBApplier(followerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	follower, err := replica.NewFollower(replica.FollowerConfig{
 		Collection: "docs",
@@ -310,6 +184,24 @@ func TestReplicationCatchUp(t *testing.T) {
 	}
 	if len(h2) != 1 {
 		t.Fatalf("follower new-1 history len = %d, want 1", len(h2))
+	}
+
+	// Directly cover the Task 9 streamer-from-WAL seed: pullEntries(sinceClock=0)
+	// MUST return the pre-Serve entry (existing-1), proving the streamer was
+	// rebuilt from the WAL on Open and the snapshot path does not mask it (§8.1).
+	server := &transportServer{db: primaryDB}
+	pulled, err := server.pullEntries(RPCPullEntriesRequest{Token: "secret", Collection: "docs", SinceClock: 0, MaxEntries: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawExisting bool
+	for _, e := range pulled.Entries {
+		if e.VectorID == "existing-1" {
+			sawExisting = true
+		}
+	}
+	if !sawExisting {
+		t.Fatalf("pullEntries(sinceClock=0) did not return the pre-Serve entry existing-1; got %d entries", len(pulled.Entries))
 	}
 }
 
@@ -343,8 +235,14 @@ func TestReplicationStreamingFollowerReceivesLiveWrites(t *testing.T) {
 	}
 	defer client.Close()
 
-	puller := &rpcPullerAdapter{client: client.remote}
-	applier := &dbApplier{db: followerDB}
+	puller, err := NewRPCPuller(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applier, err := NewDBApplier(followerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	follower, err := replica.NewFollower(replica.FollowerConfig{
 		Collection: "docs",

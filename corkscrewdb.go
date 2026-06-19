@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"m31labs.dev/corkscrewdb/rawstore"
 	"m31labs.dev/corkscrewdb/replica"
 	snap "m31labs.dev/corkscrewdb/snapshot"
 	walpkg "m31labs.dev/corkscrewdb/wal"
@@ -96,10 +97,30 @@ type DB struct {
 	peerClients map[string]remoteClient
 	streamer    *replica.Streamer
 	closed      bool
+
+	// rebalance holds the in-memory 2PC rebalance state (epoch / phase /
+	// coordinator / pending layout), guarded by db.mu and mirrored to the
+	// manifest on FROZEN/PREPARED transitions for crash recovery.
+	rebalance rebalanceState
+
+	// rebalanceHooks is a test-only injectable set of function seams used to
+	// deterministically interleave the 2PC phases (freeze barrier, gainer pull,
+	// durable decide) without time.Sleep. Nil in production.
+	rebalanceHooks *rebalanceHooks
+}
+
+// rebalanceHooks are test-only seams fired during OrchestrateRebalance so the
+// freeze-barrier proof, PREPARE-race, and coordinator-crash tests are
+// deterministic under -race. All fields are nil in production.
+type rebalanceHooks struct {
+	afterFreezeBarrier func(epoch uint64)
+	beforePull         func(target string)
+	afterDurableDecide func(epoch uint64)
 }
 
 type manifest struct {
 	FormatVersion   int                       `json:"format_version"`
+	FormatFloor     string                    `json:"format_floor"`
 	ModuleVersion   string                    `json:"module_version"`
 	ActorID         string                    `json:"actor_id"`
 	DefaultBitWidth int                       `json:"default_bit_width"`
@@ -109,6 +130,17 @@ type manifest struct {
 	Collections     map[string]collectionMeta `json:"collections"`
 	CreatedAt       time.Time                 `json:"created_at"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
+
+	// Rebalance 2PC durable state (§5.2, §5.3). RebalancePhase is "" / "IDLE"
+	// when no rebalance is pending. RebalanceCoordinator is the coordinator's
+	// serve address, persisted so a recovering PREPARED participant can dial it
+	// directly even when the coordinator gave away all of its shards.
+	RebalanceEpoch         uint64            `json:"rebalance_epoch,omitempty"`           // committed floor (linearization point)
+	RebalanceInFlightEpoch uint64            `json:"rebalance_in_flight_epoch,omitempty"` // in-flight epoch while non-IDLE
+	RebalanceCoordinator   string            `json:"rebalance_coordinator,omitempty"`
+	RebalanceIsCoordinator bool              `json:"rebalance_is_coordinator,omitempty"` // this node drove the in-flight epoch
+	PendingShards          []ShardAssignment `json:"pending_shards,omitempty"`
+	RebalancePhase         string            `json:"rebalance_phase,omitempty"`
 }
 
 type embeddingConfig struct {
@@ -117,9 +149,13 @@ type embeddingConfig struct {
 }
 
 type collectionMeta struct {
-	BitWidth int   `json:"bit_width"`
-	Seed     int64 `json:"seed"`
-	Dim      int   `json:"dim"`
+	BitWidth      int         `json:"bit_width"`
+	Seed          int64       `json:"seed"`
+	Dim           int         `json:"dim"`
+	RawStore      bool        `json:"raw_store"`
+	SparseEnabled bool        `json:"sparse_enabled"`
+	IndexType     string      `json:"index_type"` // "flat" | "hnsw"
+	HNSW          *HNSWParams `json:"hnsw,omitempty"`
 }
 
 type providerIdentifier interface {
@@ -167,6 +203,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		peerClients:    make(map[string]remoteClient),
 		streamer:       replica.NewStreamer(),
 	}
+	db.rebalance = rebalanceStateFromManifest(manifestData)
 	if err := db.saveManifest(); err != nil {
 		return nil, err
 	}
@@ -177,6 +214,14 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, err
 		}
 		db.collections[name] = coll
+	}
+
+	// Recover a non-IDLE pending rebalance left behind by a crash (§5.3). Remote
+	// (Connect) clients never drive a local rebalance, so skip them.
+	if db.remote == nil {
+		if err := db.recoverPendingRebalance(); err != nil {
+			return nil, err
+		}
 	}
 	return db, nil
 }
@@ -206,6 +251,9 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				opt.applyCollection(&cfg)
 			}
 		}
+		if cfg.seed < 0 {
+			return &Collection{db: db, name: name, bitWidth: existing.bitWidth, seed: existing.seed, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
+		}
 		if cfg.bitWidth != 0 && cfg.bitWidth != existing.bitWidth {
 			return &Collection{
 				db:       db,
@@ -216,10 +264,30 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				err:      fmt.Errorf("corkscrewdb: collection %q already exists with bit width %d", name, existing.bitWidth),
 			}
 		}
+		if cfg.seed != 0 && cfg.seed != existing.seed {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with quantizer seed %d", name, existing.seed),
+			}
+		}
+		if cfg.rawStoreSet && cfg.rawStore != existing.rawStoreEnabled {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with raw store %v", name, existing.rawStoreEnabled),
+			}
+		}
 		return existing
 	}
 
-	cfg := collectionConfig{bitWidth: db.manifest.DefaultBitWidth}
+	cfg := defaultCollectionConfig(db.manifest.DefaultBitWidth)
 	for _, opt := range opts {
 		if opt != nil {
 			opt.applyCollection(&cfg)
@@ -228,15 +296,27 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 	if cfg.bitWidth < 2 {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: bit width must be >= 2")}
 	}
+	if cfg.seed < 0 {
+		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
+	}
 
 	meta := collectionMeta{
-		BitWidth: cfg.bitWidth,
-		Seed:     generateSeed(),
+		BitWidth:      cfg.bitWidth,
+		Seed:          cfg.seed,
+		RawStore:      cfg.rawStore,
+		SparseEnabled: cfg.sparseEnabled,
+		IndexType:     indexTypeString(cfg.indexType),
+	}
+	if cfg.indexType == IndexHNSW {
+		hnsw := cfg.hnsw
+		meta.HNSW = &hnsw
 	}
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: err}
 	}
+	coll.scorer = cfg.scorer // runtime-only injection (§10); not persisted in meta
+	meta.Seed = coll.seed
 	db.collections[name] = coll
 	db.manifest.Collections[name] = meta
 	if err := db.saveManifestLocked(); err != nil {
@@ -341,6 +421,7 @@ func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
 		PackageVersion: db.manifest.ModuleVersion,
 		Embedding:      db.manifest.Embedding,
 		Peers:          append([]string(nil), db.peers...),
+		Collections:    db.rpcCollectionInfoLocked(),
 		Shards:         cloneShardAssignments(db.manifest.Shards),
 	}, nil
 }
@@ -348,6 +429,12 @@ func (db *DB) RemoteInfo() (RPCInfoResponse, error) {
 func (db *DB) rpcCollectionInfo() []RPCCollectionInfo {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
+	return db.rpcCollectionInfoLocked()
+}
+
+// rpcCollectionInfoLocked returns the collection info slice without acquiring
+// the db lock; callers must hold db.mu.RLock or db.mu.Lock.
+func (db *DB) rpcCollectionInfoLocked() []RPCCollectionInfo {
 	if len(db.manifest.Collections) == 0 {
 		return nil
 	}
@@ -396,7 +483,8 @@ func loadOrCreateManifest(path string, defaultBits int) (manifest, error) {
 		}
 		now := time.Now().UTC()
 		m := manifest{
-			FormatVersion:   1,
+			FormatVersion:   2,
+			FormatFloor:     "v0.3.0",
 			ModuleVersion:   PackageVersion,
 			ActorID:         generateActorID(),
 			DefaultBitWidth: defaultBits,
@@ -412,6 +500,9 @@ func loadOrCreateManifest(path string, defaultBits int) (manifest, error) {
 	var m manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return manifest{}, err
+	}
+	if m.FormatVersion < 2 {
+		return manifest{}, fmt.Errorf("%w: manifest format version %d", ErrFormatTooOld, m.FormatVersion)
 	}
 	if m.Collections == nil {
 		m.Collections = make(map[string]collectionMeta)
@@ -429,32 +520,116 @@ func writeManifest(path string, data manifest) error {
 	if err != nil {
 		return err
 	}
+	payload := append(buf, '\n')
+
+	// Durable atomic write (mirrors snapshot/snapshot.go): write to a temp file,
+	// fsync it, close, rename over the target, then fsync the parent directory so
+	// the rename itself is durable. This is the §5.8 crash-safety property the 2PC
+	// coordinator's durable-decide step leans on.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(buf, '\n'), 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(payload); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }
 
 func (db *DB) saveManifestLocked() error {
 	return writeManifest(filepath.Join(db.path, "manifest.json"), db.manifest)
 }
 
-func (db *DB) persistCollectionMeta(name string, bitWidth, dim int, seed int64) error {
+func (db *DB) persistCollectionMeta(name string, c *Collection) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	meta := db.manifest.Collections[name]
-	meta.BitWidth = bitWidth
-	meta.Dim = dim
-	meta.Seed = seed
+	meta.BitWidth = c.bitWidth
+	meta.Dim = c.dim
+	meta.Seed = c.seed
+	meta.RawStore = c.rawStoreEnabled
+	meta.SparseEnabled = c.sparseEnabled
+	meta.IndexType = indexTypeString(c.indexType)
+	if c.indexType == IndexHNSW {
+		hnsw := c.hnsw
+		meta.HNSW = &hnsw
+	} else {
+		meta.HNSW = nil
+	}
 	db.manifest.Collections[name] = meta
 	return db.saveManifestLocked()
+}
+
+// cacheAdoptHook / cacheRebuildHook are test-only instrumentation: exactly one
+// fires per HNSW reopen — adopt when a fresh cache is used, rebuild when the graph
+// is reconstructed from history codes.
+var (
+	cacheAdoptHook   func()
+	cacheRebuildHook func()
+)
+
+// synthWALEntry rebuilds a walpkg.Entry from a snapshot version so the
+// replication streamer can be seeded from snapshot live history during Open.
+// It reads the version's codes (NOT a float embedding), mirroring what a live
+// Put would have appended to the WAL. Tombstones become EntryTombstone.
+func synthWALEntry(collection, id string, dim int, v snap.Version) walpkg.Entry {
+	kind := walpkg.EntryPut
+	if v.Tombstone {
+		kind = walpkg.EntryTombstone
+	}
+	return walpkg.Entry{
+		Kind:         kind,
+		CollectionID: collection,
+		VectorID:     id,
+		Quantized:    toWALQuantized(fromSnapshotQuantized(v.Quantized)),
+		Dim:          dim,
+		RawHash:      append([]byte(nil), v.RawHash...),
+		Sparse:       toWALSparse(fromSnapshotSparse(v.Sparse)),
+		Children:     toWALChildren(fromSnapshotChildren(v.Children)),
+		Text:         v.Text,
+		Metadata:     cloneMetadata(v.Metadata),
+		LamportClock: v.LamportClock,
+		ActorID:      v.ActorID,
+		WallClock:    v.WallClock,
+	}
 }
 
 func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, error) {
 	coll, err := db.newCollection(name, meta)
 	if err != nil {
 		return nil, err
+	}
+	// Defer the HNSW graph build so a fresh cache can be adopted without paying the
+	// per-node insert cost (D6). Flat collections are unaffected.
+	if coll.indexType == IndexHNSW {
+		coll.deferHNSWBuild = true
 	}
 
 	snapshotPath, err := snap.FindLatestFile(db.collectionDir(name))
@@ -475,10 +650,18 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if data.Seed != 0 {
 				coll.seed = data.Seed
 			}
+			if data.Dim != 0 {
+				coll.dim = data.Dim
+			}
+			var seedEntries []walpkg.Entry
 			for _, record := range data.Records {
 				for _, version := range record.Versions {
 					if err := coll.loadVersion(record.ID, Version{
-						Embedding:    cloneVector(version.Embedding),
+						Quantized:    fromSnapshotQuantized(version.Quantized),
+						RawHash:      append([]byte(nil), version.RawHash...),
+						Sparse:       fromSnapshotSparse(version.Sparse),
+						Children:     fromSnapshotChildren(version.Children),
+						dim:          data.Dim,
 						Text:         version.Text,
 						Metadata:     cloneMetadata(version.Metadata),
 						LamportClock: version.LamportClock,
@@ -488,25 +671,30 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 					}); err != nil {
 						return nil, err
 					}
+					// Seed the replication streamer from snapshot live history
+					// (clock <= snapshotMax). PruneAndReset deletes pre-snapshot
+					// WAL segments, so the WAL tail alone cannot reconstruct this
+					// history; the snapshot seed is required (§4.2).
+					if db.streamer != nil {
+						seedEntries = append(seedEntries, synthWALEntry(name, record.ID, data.Dim, version))
+					}
 				}
+			}
+			// Streamer.Record assumes append order is clock order (pullLocked
+			// binary-searches ascending), but snapshot history is emitted in
+			// (id, clock) order. Sort the seed batch by LamportClock before
+			// recording.
+			sort.SliceStable(seedEntries, func(i, j int) bool {
+				return seedEntries[i].LamportClock < seedEntries[j].LamportClock
+			})
+			for _, e := range seedEntries {
+				db.streamer.Record(name, e)
 			}
 			snapshotMax = data.MaxLamport
-			if restored, restoredLamport, err := db.tryLoadCollectionIndex(name); err == nil && restored != nil && restoredLamport == snapshotMax {
-				coll.mu.Lock()
-				// Check if an HNSW graph file exists; if so, wrap the flat index.
-				if hw, err := db.tryLoadHNSWIndex(name, restored); err == nil && hw != nil {
-					coll.index = hw
-				} else {
-					coll.index = restored
-				}
-				if coll.dim == 0 {
-					coll.dim = restored.Dim()
-				}
-				coll.mu.Unlock()
-			}
 		}
 	}
 
+	walBeyondSnapshot := false
 	segments, err := walpkg.ListSegments(db.collectionWALDir(name))
 	if err != nil {
 		return nil, err
@@ -521,8 +709,13 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			if entry.LamportClock <= snapshotMax {
 				continue
 			}
+			walBeyondSnapshot = true
 			if err := coll.loadVersion(entry.VectorID, Version{
-				Embedding:    cloneVector(entry.Embedding),
+				Quantized:    fromWALQuantized(entry.Quantized),
+				RawHash:      append([]byte(nil), entry.RawHash...),
+				Sparse:       fromWALSparse(entry.Sparse),
+				Children:     fromWALChildren(entry.Children),
+				dim:          entry.Dim,
 				Text:         entry.Text,
 				Metadata:     cloneMetadata(entry.Metadata),
 				LamportClock: entry.LamportClock,
@@ -533,6 +726,14 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 				_ = reader.Close()
 				return nil, err
 			}
+			// Seed the streamer from the WAL tail (clock > snapshotMax). Entries
+			// are already clock-ordered (appends use a monotonic clock), and the
+			// strict > snapshotMax bound means no duplicate with the snapshot
+			// seed above. When there is no snapshot, snapshotMax == 0 so every
+			// replayed entry seeds the streamer.
+			if db.streamer != nil {
+				db.streamer.Record(name, entry)
+			}
 		}
 		if err := reader.Err(); err != nil {
 			_ = reader.Close()
@@ -542,15 +743,115 @@ func (db *DB) loadCollection(name string, meta collectionMeta) (*Collection, err
 			return nil, err
 		}
 	}
+	// HNSW cache adoption / build (D6). The graph build was deferred; the live
+	// search structure is currently a flat *index over the live codes. Adopt a fresh
+	// cached graph when possible, else build the graph from the flat codes.
+	if coll.indexType == IndexHNSW {
+		coll.deferHNSWBuild = false
+		if err := db.finishHNSWLoad(coll, snapshotMax, walBeyondSnapshot); err != nil {
+			return nil, err
+		}
+	}
+
 	coll.mu.Lock()
 	coll.dirty = false
 	coll.mu.Unlock()
 	if coll.dim != meta.Dim || coll.bitWidth != meta.BitWidth || coll.seed != meta.Seed {
-		if err := db.persistCollectionMeta(name, coll.bitWidth, coll.dim, coll.seed); err != nil {
+		if err := db.persistCollectionMeta(name, coll); err != nil {
 			return nil, err
 		}
 	}
 	return coll, nil
+}
+
+// finishHNSWLoad adopts a fresh graph.hnsw cache for an HNSW collection, or builds
+// the graph from the flat live codes. Adoption is gated on: WAL empty beyond the
+// snapshot, a sibling .tqi cache fresh at the snapshot lamport, a present
+// graph.hnsw, and matching live node counts. Any miss falls back to a clean
+// rebuild — the snapshot+WAL stay authoritative, so a stale/corrupt cache only
+// costs a rebuild, never a wrong result.
+func (db *DB) finishHNSWLoad(coll *Collection, snapshotMax uint64, walBeyondSnapshot bool) error {
+	coll.mu.Lock()
+	defer coll.mu.Unlock()
+
+	flat, ok := coll.index.(*index)
+	if !ok {
+		// Nothing live (empty collection) or already a graph: build only if flat.
+		if coll.index == nil {
+			return nil
+		}
+		if _, isHW := coll.index.(*hnswIndex); isHW {
+			return nil
+		}
+	}
+
+	if flat != nil && !walBeyondSnapshot {
+		if hw := db.tryAdoptFreshHNSW(coll, flat, snapshotMax); hw != nil {
+			coll.index = hw
+			if cacheAdoptHook != nil {
+				cacheAdoptHook()
+			}
+			return nil
+		}
+	}
+
+	// Rebuild the graph from the flat live codes (cache stale/absent/corrupt).
+	if cacheRebuildHook != nil {
+		cacheRebuildHook()
+	}
+	coll.rebuildHNSWFromFlatLocked(flat)
+	return nil
+}
+
+// tryAdoptFreshHNSW returns the adopted cached graph when the .tqi sibling is fresh
+// (lamport == snapshotMax) and node counts match; otherwise nil. The flat passed in
+// (built during deferred load) provides the live codes the loaded graph wraps.
+func (db *DB) tryAdoptFreshHNSW(coll *Collection, flat *index, snapshotMax uint64) *hnswIndex {
+	hnswPath := db.collectionHNSWPath(coll.name)
+	if _, err := os.Stat(hnswPath); err != nil {
+		return nil // no graph cache
+	}
+	cachedFlat, idxLamport, err := db.tryLoadCollectionIndex(coll.name)
+	if err != nil || cachedFlat == nil {
+		return nil // no/corrupt .tqi -> graph cache is not fresh (option (i))
+	}
+	if idxLamport != snapshotMax {
+		return nil // .tqi stale relative to the snapshot
+	}
+	if cachedFlat.Len() != flat.Len() {
+		return nil // node-count mismatch
+	}
+	// Load the graph over the cached flat (which carries the persisted live codes,
+	// ordered to match the saved layers). A CRC/version/count failure -> rebuild.
+	hw, err := loadHNSWFile(hnswPath, cachedFlat, coll.hnswParamsOrDefault())
+	if err != nil {
+		return nil
+	}
+	return hw
+}
+
+// rebuildHNSWFromFlatLocked builds the HNSW graph from the flat index's live codes
+// and installs it as the collection's index. Caller holds coll.mu.
+func (c *Collection) rebuildHNSWFromFlatLocked(flat *index) {
+	params := c.hnswParamsOrDefault()
+	hw := newHNSWIndex(c.dim, c.bitWidth, c.seed, params)
+	if flat != nil {
+		for _, e := range flat.snapshotEntries() {
+			if e.child {
+				continue
+			}
+			hw.AddQuantized(e.id, e.qv, e.text, e.metadata, e.version)
+		}
+	}
+	c.index = hw
+}
+
+func (c *Collection) hnswParamsOrDefault() HNSWParams {
+	params := c.hnsw
+	if params.M == 0 && params.EfConstruction == 0 && params.EfSearch == 0 {
+		return defaultHNSWParams()
+	}
+	return params
 }
 
 func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, error) {
@@ -567,16 +868,50 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Collection{
-		db:       db,
-		name:     name,
-		bitWidth: meta.BitWidth,
-		seed:     meta.Seed,
-		encoder:  db.encoder,
-		history:  make(map[string][]Version),
-		clock:    newHLC(db.manifest.ActorID),
-		wal:      manager,
-	}, nil
+	indexType := IndexFlat
+	if meta.IndexType == "hnsw" {
+		indexType = IndexHNSW
+	}
+	hnsw := defaultHNSWParams()
+	if meta.HNSW != nil {
+		hnsw = *meta.HNSW
+	}
+	coll := &Collection{
+		db:              db,
+		name:            name,
+		bitWidth:        meta.BitWidth,
+		seed:            meta.Seed,
+		encoder:         db.encoder,
+		rawStoreEnabled: meta.RawStore,
+		sparseEnabled:   meta.SparseEnabled,
+		indexType:       indexType,
+		hnsw:            hnsw,
+		history:         make(map[string][]Version),
+		sparseSet:       make(map[string]*SparseVector),
+		clock:           newHLC(db.manifest.ActorID),
+		wal:             manager,
+		dim:             meta.Dim,
+		viewCache:       newViewLRU(viewCacheSize),
+	}
+	if meta.RawStore {
+		store, err := rawstore.Open(db.rawStoreDir(name))
+		if err != nil {
+			_ = manager.Close()
+			return nil, err
+		}
+		coll.rawStore = store
+	}
+	return coll, nil
+}
+
+func (db *DB) pruneWAL(name string) error {
+	db.mu.RLock()
+	coll := db.collections[name]
+	db.mu.RUnlock()
+	if coll == nil || coll.wal == nil {
+		return nil
+	}
+	return coll.wal.PruneAndReset()
 }
 
 func (db *DB) pruneSnapshots(name, keep string) error {
@@ -613,6 +948,10 @@ func (db *DB) collectionHNSWPath(name string) string {
 
 func (db *DB) collectionWALDir(name string) string {
 	return filepath.Join(db.collectionDir(name), "wal")
+}
+
+func (db *DB) rawStoreDir(name string) string {
+	return filepath.Join(db.collectionDir(name), "raw")
 }
 
 func validCollectionName(name string) bool {
@@ -686,6 +1025,7 @@ func sanitizePeers(peers []string) []string {
 	return out
 }
 
+// reserve-only: wired in the Performance phase
 func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 	path := db.collectionIndexPath(name)
 	if _, err := os.Stat(path); err != nil {
@@ -695,15 +1035,4 @@ func (db *DB) tryLoadCollectionIndex(name string) (*index, uint64, error) {
 		return nil, 0, err
 	}
 	return loadIndexFile(path)
-}
-
-func (db *DB) tryLoadHNSWIndex(name string, flat *index) (*hnswIndex, error) {
-	path := db.collectionHNSWPath(name)
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return loadHNSWFile(path, flat, defaultHNSWParams())
 }

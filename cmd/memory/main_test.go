@@ -12,7 +12,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("MEMORY_LISTEN", "0.0.0.0:8080")
 	t.Setenv("MEMORY_AGENT_TOKENS", `{"birch":"tok-a","cedar":"tok-b"}`)
 	t.Setenv("MEMORY_ADMIN_TOKEN", "admin-tok")
-	t.Setenv("EXPECTED_PROVIDER_ID", "manta-embed-v0")
+	t.Setenv("EXPECTED_PROVIDER_ID", "corkscrewdb-default-embedder")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -33,7 +33,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if cfg.AdminToken != "admin-tok" {
 		t.Fatalf("admin: %s", cfg.AdminToken)
 	}
-	if cfg.ExpectedProviderID != "manta-embed-v0" {
+	if cfg.ExpectedProviderID != "corkscrewdb-default-embedder" {
 		t.Fatalf("provider id: %s", cfg.ExpectedProviderID)
 	}
 	if len(cfg.AgentTokens) != 2 || cfg.AgentTokens["birch"] != "tok-a" || cfg.AgentTokens["cedar"] != "tok-b" {
@@ -56,7 +56,7 @@ func TestLoadConfigDefaultsListenAndProviderID(t *testing.T) {
 	if cfg.Listen != "0.0.0.0:8080" {
 		t.Fatalf("default listen: %s", cfg.Listen)
 	}
-	if cfg.ExpectedProviderID != "manta-embed-v0" {
+	if cfg.ExpectedProviderID != "corkscrewdb-default-embedder" {
 		t.Fatalf("default provider: %s", cfg.ExpectedProviderID)
 	}
 }

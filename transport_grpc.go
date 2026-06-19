@@ -3,18 +3,21 @@ package corkscrewdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
 	"strings"
 	"time"
 
-	grpcapi "m31labs.dev/corkscrewdb/grpc"
 	grpcgo "google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	grpcapi "m31labs.dev/corkscrewdb/grpc"
+	"m31labs.dev/corkscrewdb/rawstore"
+	walpkg "m31labs.dev/corkscrewdb/wal"
 )
 
 const (
@@ -247,28 +250,123 @@ func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotRe
 	return fromProtoPullSnapshotResponse(resp), nil
 }
 
-func (c *grpcClient) PrepareRebalance(shards []ShardAssignment) error {
+func (c *grpcClient) PrepareRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
 	_, err := c.client.PrepareRebalance(context.Background(), &grpcapi.RebalanceRequest{
-		Token:  c.token,
-		Shards: toProtoShardAssignments(shards),
+		Token:       c.token,
+		Shards:      toProtoShardAssignments(shards),
+		Epoch:       epoch,
+		Coordinator: coordinator,
 	})
 	return normalizeTransportError(err)
 }
 
-func (c *grpcClient) CommitRebalance(shards []ShardAssignment) error {
+func (c *grpcClient) CommitRebalance(shards []ShardAssignment, epoch uint64) error {
 	_, err := c.client.CommitRebalance(context.Background(), &grpcapi.RebalanceRequest{
 		Token:  c.token,
 		Shards: toProtoShardAssignments(shards),
+		Epoch:  epoch,
 	})
 	return normalizeTransportError(err)
 }
 
-func (c *grpcClient) PruneRebalance(shards []ShardAssignment) error {
+func (c *grpcClient) PruneRebalance(shards []ShardAssignment, epoch uint64) error {
 	_, err := c.client.PruneRebalance(context.Background(), &grpcapi.RebalanceRequest{
 		Token:  c.token,
 		Shards: toProtoShardAssignments(shards),
+		Epoch:  epoch,
 	})
 	return normalizeTransportError(err)
+}
+
+func (c *grpcClient) GetRaw(collection string, hash []byte) ([]byte, error) {
+	resp, err := c.client.GetRaw(context.Background(), &grpcapi.GetRawRequest{
+		Token:      c.token,
+		Collection: collection,
+		Hash:       append([]byte(nil), hash...),
+	})
+	if err != nil {
+		return nil, classifyGetRawError(err)
+	}
+	return append([]byte(nil), resp.GetRaw()...), nil
+}
+
+// classifyGetRawError maps the GetRaw gRPC status code back to a retry policy:
+// NotFound -> terminal ErrRawUnavailable (the blob is gone; no retry helps);
+// DataLoss / Unavailable -> retriable (a re-read or another replica may serve
+// clean bytes), surfaced wrapped so callers can errors.Is them but NOT
+// ErrRawUnavailable.
+func classifyGetRawError(err error) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
+	}
+	switch st.Code() {
+	case codes.NotFound:
+		return fmt.Errorf("%w: %s", ErrRawUnavailable, st.Message())
+	case codes.Unauthenticated:
+		return ErrUnauthorized
+	case codes.DataLoss, codes.Unavailable:
+		return fmt.Errorf("corkscrewdb: raw fetch retriable: %s", st.Message())
+	default:
+		return errors.New(st.Message())
+	}
+}
+
+func (c *grpcClient) FreezeRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
+	_, err := c.client.FreezeRebalance(context.Background(), &grpcapi.FreezeRebalanceRequest{
+		Token:       c.token,
+		Shards:      toProtoShardAssignments(shards),
+		Epoch:       epoch,
+		Coordinator: coordinator,
+	})
+	return normalizeTransportError(err)
+}
+
+func (c *grpcClient) AbortRebalance(epoch uint64) error {
+	_, err := c.client.AbortRebalance(context.Background(), &grpcapi.AbortRebalanceRequest{
+		Token: c.token,
+		Epoch: epoch,
+	})
+	return normalizeTransportError(err)
+}
+
+func (c *grpcClient) ResolveRebalance(epoch uint64) (RPCResolveRebalanceResponse, error) {
+	resp, err := c.client.ResolveRebalance(context.Background(), &grpcapi.ResolveRebalanceRequest{
+		Token: c.token,
+		Epoch: epoch,
+	})
+	if err != nil {
+		return RPCResolveRebalanceResponse{}, normalizeTransportError(err)
+	}
+	return RPCResolveRebalanceResponse{
+		Decision:       fromProtoDecision(resp.GetDecision()),
+		CommittedEpoch: resp.GetCommittedEpoch(),
+	}, nil
+}
+
+func toProtoDecision(d rebalanceDecision) grpcapi.Decision {
+	switch d {
+	case decisionCommit:
+		return grpcapi.Decision_DECISION_COMMIT
+	case decisionAbort:
+		return grpcapi.Decision_DECISION_ABORT
+	default:
+		return grpcapi.Decision_DECISION_UNKNOWN
+	}
+}
+
+func fromProtoDecision(d grpcapi.Decision) rebalanceDecision {
+	switch d {
+	case grpcapi.Decision_DECISION_COMMIT:
+		return decisionCommit
+	case grpcapi.Decision_DECISION_ABORT:
+		return decisionAbort
+	default:
+		return decisionUnknown
+	}
 }
 
 type grpcServer struct {
@@ -306,6 +404,7 @@ func (s *grpcServer) EnsureCollection(_ context.Context, req *grpcapi.EnsureColl
 		Token:    req.GetToken(),
 		Name:     req.GetName(),
 		BitWidth: int(req.GetBitWidth()),
+		Seed:     req.GetSeed(),
 	}, &RPCEmpty{}); err != nil {
 		return nil, grpcStatusError(err)
 	}
@@ -461,8 +560,10 @@ func (s *grpcServer) PullSnapshot(_ context.Context, req *grpcapi.PullSnapshotRe
 
 func (s *grpcServer) PrepareRebalance(_ context.Context, req *grpcapi.RebalanceRequest) (*grpcapi.Empty, error) {
 	if err := s.handler.PrepareRebalance(RPCRebalanceRequest{
-		Token:  req.GetToken(),
-		Shards: fromProtoShardAssignments(req.GetShards()),
+		Token:       req.GetToken(),
+		Shards:      fromProtoShardAssignments(req.GetShards()),
+		Epoch:       req.GetEpoch(),
+		Coordinator: req.GetCoordinator(),
 	}, &RPCEmpty{}); err != nil {
 		return nil, grpcStatusError(err)
 	}
@@ -473,6 +574,7 @@ func (s *grpcServer) CommitRebalance(_ context.Context, req *grpcapi.RebalanceRe
 	if err := s.handler.CommitRebalance(RPCRebalanceRequest{
 		Token:  req.GetToken(),
 		Shards: fromProtoShardAssignments(req.GetShards()),
+		Epoch:  req.GetEpoch(),
 	}, &RPCEmpty{}); err != nil {
 		return nil, grpcStatusError(err)
 	}
@@ -483,10 +585,59 @@ func (s *grpcServer) PruneRebalance(_ context.Context, req *grpcapi.RebalanceReq
 	if err := s.handler.PruneRebalance(RPCRebalanceRequest{
 		Token:  req.GetToken(),
 		Shards: fromProtoShardAssignments(req.GetShards()),
+		Epoch:  req.GetEpoch(),
 	}, &RPCEmpty{}); err != nil {
 		return nil, grpcStatusError(err)
 	}
 	return &grpcapi.Empty{}, nil
+}
+
+func (s *grpcServer) GetRaw(_ context.Context, req *grpcapi.GetRawRequest) (*grpcapi.GetRawResponse, error) {
+	var resp RPCGetRawResponse
+	if err := s.handler.GetRaw(RPCGetRawRequest{
+		Token:      req.GetToken(),
+		Collection: req.GetCollection(),
+		Hash:       append([]byte(nil), req.GetHash()...),
+	}, &resp); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.GetRawResponse{Raw: append([]byte(nil), resp.Raw...)}, nil
+}
+
+func (s *grpcServer) FreezeRebalance(_ context.Context, req *grpcapi.FreezeRebalanceRequest) (*grpcapi.Empty, error) {
+	if err := s.handler.FreezeRebalance(RPCFreezeRebalanceRequest{
+		Token:       req.GetToken(),
+		Shards:      fromProtoShardAssignments(req.GetShards()),
+		Epoch:       req.GetEpoch(),
+		Coordinator: req.GetCoordinator(),
+	}, &RPCEmpty{}); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.Empty{}, nil
+}
+
+func (s *grpcServer) AbortRebalance(_ context.Context, req *grpcapi.AbortRebalanceRequest) (*grpcapi.Empty, error) {
+	if err := s.handler.AbortRebalance(RPCAbortRebalanceRequest{
+		Token: req.GetToken(),
+		Epoch: req.GetEpoch(),
+	}, &RPCEmpty{}); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.Empty{}, nil
+}
+
+func (s *grpcServer) ResolveRebalance(_ context.Context, req *grpcapi.ResolveRebalanceRequest) (*grpcapi.ResolveRebalanceResponse, error) {
+	var resp RPCResolveRebalanceResponse
+	if err := s.handler.ResolveRebalance(RPCResolveRebalanceRequest{
+		Token: req.GetToken(),
+		Epoch: req.GetEpoch(),
+	}, &resp); err != nil {
+		return nil, grpcStatusError(err)
+	}
+	return &grpcapi.ResolveRebalanceResponse{
+		Decision:       toProtoDecision(resp.Decision),
+		CommittedEpoch: resp.CommittedEpoch,
+	}, nil
 }
 
 func int32FromInt(v int, label string) (int32, error) {
@@ -502,6 +653,36 @@ func grpcStatusError(err error) error {
 	}
 	if errors.Is(err, ErrUnauthorized) {
 		return status.Error(codes.Unauthenticated, ErrUnauthorized.Error())
+	}
+	// Raw-store failure modes carry distinct retry semantics for the follower:
+	// not-found is terminal (codes.NotFound), integrity-mismatch is retriable
+	// (codes.DataLoss).
+	if errors.Is(err, rawstore.ErrNotFound) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	if errors.Is(err, rawstore.ErrIntegrity) {
+		return status.Error(codes.DataLoss, err.Error())
+	}
+	if errors.Is(err, ErrRawStoreRequired) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	// Rebalance 2PC control-plane errors carry distinct codes so the coordinator
+	// can errors.Is them across the wire (a stale-epoch Commit rejection means a
+	// force-abort superseded this rebalance).
+	if errors.Is(err, ErrStaleEpoch) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if errors.Is(err, ErrAlreadyCommitted) {
+		return status.Error(codes.AlreadyExists, err.Error())
+	}
+	if errors.Is(err, ErrRebalanceInProgress) {
+		return status.Error(codes.Aborted, err.Error())
+	}
+	if errors.Is(err, ErrLegacyRebalanceUnsafe) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if errors.Is(err, ErrWrongOwner) {
+		return status.Error(codes.PermissionDenied, err.Error())
 	}
 	return status.Error(codes.Unknown, err.Error())
 }
@@ -519,6 +700,16 @@ func normalizeTransportError(err error) error {
 		return nil
 	case codes.Unauthenticated:
 		return ErrUnauthorized
+	case codes.FailedPrecondition:
+		return fmt.Errorf("%w: %s", ErrStaleEpoch, st.Message())
+	case codes.AlreadyExists:
+		return fmt.Errorf("%w: %s", ErrAlreadyCommitted, st.Message())
+	case codes.Aborted:
+		return fmt.Errorf("%w: %s", ErrRebalanceInProgress, st.Message())
+	case codes.InvalidArgument:
+		return fmt.Errorf("%w: %s", ErrLegacyRebalanceUnsafe, st.Message())
+	case codes.PermissionDenied:
+		return fmt.Errorf("%w: %s", ErrWrongOwner, st.Message())
 	default:
 		return errors.New(st.Message())
 	}
@@ -704,6 +895,83 @@ func fromProtoSearchResults(results []*grpcapi.SearchResult) []SearchResult {
 	return out
 }
 
+// toProtoQuantized maps a wal.QuantizedVector onto the wire message.
+func toProtoQuantized(qv *walpkg.QuantizedVector) *grpcapi.QuantizedVector {
+	if qv == nil {
+		return nil
+	}
+	return &grpcapi.QuantizedVector{
+		Mse:     append([]byte(nil), qv.MSE...),
+		Signs:   append([]byte(nil), qv.Signs...),
+		ResNorm: qv.ResNorm,
+	}
+}
+
+func fromProtoQuantized(qv *grpcapi.QuantizedVector) *walpkg.QuantizedVector {
+	if qv == nil {
+		return nil
+	}
+	return &walpkg.QuantizedVector{
+		MSE:     append([]byte(nil), qv.GetMse()...),
+		Signs:   append([]byte(nil), qv.GetSigns()...),
+		ResNorm: qv.GetResNorm(),
+	}
+}
+
+func toProtoSparseBlock(sb *walpkg.SparseBlock) *grpcapi.SparseBlock {
+	if sb == nil {
+		return nil
+	}
+	return &grpcapi.SparseBlock{
+		Indices: append([]uint32(nil), sb.Indices...),
+		Values:  append([]float32(nil), sb.Values...),
+	}
+}
+
+func fromProtoSparseBlock(sb *grpcapi.SparseBlock) *walpkg.SparseBlock {
+	if sb == nil {
+		return nil
+	}
+	return &walpkg.SparseBlock{
+		Indices: append([]uint32(nil), sb.GetIndices()...),
+		Values:  append([]float32(nil), sb.GetValues()...),
+	}
+}
+
+func toProtoChildVectors(children []walpkg.ChildVector) []*grpcapi.ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]*grpcapi.ChildVector, len(children))
+	for i, child := range children {
+		out[i] = &grpcapi.ChildVector{
+			Id:        child.ID,
+			Quantized: toProtoQuantized(child.Quantized),
+			Dim:       uint32(child.Dim),
+			Text:      child.Text,
+			Metadata:  cloneMetadata(child.Metadata),
+		}
+	}
+	return out
+}
+
+func fromProtoChildVectors(children []*grpcapi.ChildVector) []walpkg.ChildVector {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]walpkg.ChildVector, len(children))
+	for i, child := range children {
+		out[i] = walpkg.ChildVector{
+			ID:        child.GetId(),
+			Quantized: fromProtoQuantized(child.GetQuantized()),
+			Dim:       int(child.GetDim()),
+			Text:      child.GetText(),
+			Metadata:  cloneMetadata(child.GetMetadata()),
+		}
+	}
+	return out
+}
+
 func toProtoVersions(versions []Version) []*grpcapi.Version {
 	if len(versions) == 0 {
 		return nil
@@ -711,7 +979,10 @@ func toProtoVersions(versions []Version) []*grpcapi.Version {
 	out := make([]*grpcapi.Version, len(versions))
 	for i, version := range versions {
 		out[i] = &grpcapi.Version{
-			Embedding:    cloneVector(version.Embedding),
+			Quantized:    toProtoQuantized(toWALQuantized(version.Quantized)),
+			RawHash:      append([]byte(nil), version.RawHash...),
+			Sparse:       toProtoSparseBlock(toWALSparse(version.Sparse)),
+			Children:     toProtoChildVectors(toWALChildren(version.Children)),
 			Text:         version.Text,
 			Metadata:     cloneMetadata(version.Metadata),
 			LamportClock: version.LamportClock,
@@ -730,7 +1001,10 @@ func fromProtoVersions(versions []*grpcapi.Version) []Version {
 	out := make([]Version, len(versions))
 	for i, version := range versions {
 		out[i] = Version{
-			Embedding:    cloneVector(version.GetEmbedding()),
+			Quantized:    fromWALQuantized(fromProtoQuantized(version.GetQuantized())),
+			RawHash:      append([]byte(nil), version.GetRawHash()...),
+			Sparse:       fromWALSparse(fromProtoSparseBlock(version.GetSparse())),
+			Children:     fromWALChildren(fromProtoChildVectors(version.GetChildren())),
 			Text:         version.GetText(),
 			Metadata:     cloneMetadata(version.GetMetadata()),
 			LamportClock: version.GetLamportClock(),
@@ -756,7 +1030,11 @@ func toProtoPullEntriesResponse(resp RPCPullEntriesResponse) *grpcapi.PullEntrie
 			Kind:         uint32(entry.Kind),
 			CollectionId: entry.CollectionID,
 			VectorId:     entry.VectorID,
-			Embedding:    cloneVector(entry.Embedding),
+			Quantized:    toProtoQuantized(entry.Quantized),
+			Dim:          uint32(entry.Dim),
+			RawHash:      append([]byte(nil), entry.RawHash...),
+			Sparse:       toProtoSparseBlock(entry.Sparse),
+			Children:     toProtoChildVectors(entry.Children),
 			Text:         entry.Text,
 			Metadata:     cloneMetadata(entry.Metadata),
 			LamportClock: entry.LamportClock,
@@ -784,7 +1062,11 @@ func fromProtoPullEntriesResponse(resp *grpcapi.PullEntriesResponse) RPCPullEntr
 			Kind:         uint8(entry.GetKind()),
 			CollectionID: entry.GetCollectionId(),
 			VectorID:     entry.GetVectorId(),
-			Embedding:    cloneVector(entry.GetEmbedding()),
+			Quantized:    fromProtoQuantized(entry.GetQuantized()),
+			Dim:          int(entry.GetDim()),
+			RawHash:      append([]byte(nil), entry.GetRawHash()...),
+			Sparse:       fromProtoSparseBlock(entry.GetSparse()),
+			Children:     fromProtoChildVectors(entry.GetChildren()),
 			Text:         entry.GetText(),
 			Metadata:     cloneMetadata(entry.GetMetadata()),
 			LamportClock: entry.GetLamportClock(),
@@ -797,11 +1079,13 @@ func fromProtoPullEntriesResponse(resp *grpcapi.PullEntriesResponse) RPCPullEntr
 
 func toProtoPullSnapshotResponse(resp RPCPullSnapshotResponse) *grpcapi.PullSnapshotResponse {
 	out := &grpcapi.PullSnapshotResponse{
-		Collection: resp.Collection,
-		BitWidth:   int32(resp.BitWidth),
-		Seed:       resp.Seed,
-		Dim:        int32(resp.Dim),
-		MaxLamport: resp.MaxLamport,
+		Collection:    resp.Collection,
+		BitWidth:      int32(resp.BitWidth),
+		Seed:          resp.Seed,
+		Dim:           int32(resp.Dim),
+		MaxLamport:    resp.MaxLamport,
+		RawStore:      resp.RawStore,
+		SparseEnabled: resp.SparseEnabled,
 	}
 	if len(resp.Records) == 0 {
 		return out
@@ -814,7 +1098,10 @@ func toProtoPullSnapshotResponse(resp RPCPullSnapshotResponse) *grpcapi.PullSnap
 		}
 		for j, version := range record.Versions {
 			item.Versions[j] = &grpcapi.SnapshotVersion{
-				Embedding:    cloneVector(version.Embedding),
+				Quantized:    toProtoQuantized(version.Quantized),
+				RawHash:      append([]byte(nil), version.RawHash...),
+				Sparse:       toProtoSparseBlock(version.Sparse),
+				Children:     toProtoChildVectors(version.Children),
 				Text:         version.Text,
 				Metadata:     cloneMetadata(version.Metadata),
 				LamportClock: version.LamportClock,
@@ -833,11 +1120,13 @@ func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSn
 		return RPCPullSnapshotResponse{}
 	}
 	out := RPCPullSnapshotResponse{
-		Collection: resp.GetCollection(),
-		BitWidth:   int(resp.GetBitWidth()),
-		Seed:       resp.GetSeed(),
-		Dim:        int(resp.GetDim()),
-		MaxLamport: resp.GetMaxLamport(),
+		Collection:    resp.GetCollection(),
+		BitWidth:      int(resp.GetBitWidth()),
+		Seed:          resp.GetSeed(),
+		Dim:           int(resp.GetDim()),
+		MaxLamport:    resp.GetMaxLamport(),
+		RawStore:      resp.GetRawStore(),
+		SparseEnabled: resp.GetSparseEnabled(),
 	}
 	if len(resp.GetRecords()) == 0 {
 		return out
@@ -850,7 +1139,11 @@ func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSn
 		}
 		for j, version := range record.GetVersions() {
 			item.Versions[j] = RPCSnapshotVersion{
-				Embedding:    cloneVector(version.GetEmbedding()),
+				Quantized:    fromProtoQuantized(version.GetQuantized()),
+				Dim:          int(resp.GetDim()),
+				RawHash:      append([]byte(nil), version.GetRawHash()...),
+				Sparse:       fromProtoSparseBlock(version.GetSparse()),
+				Children:     fromProtoChildVectors(version.GetChildren()),
 				Text:         version.GetText(),
 				Metadata:     cloneMetadata(version.GetMetadata()),
 				LamportClock: version.GetLamportClock(),
