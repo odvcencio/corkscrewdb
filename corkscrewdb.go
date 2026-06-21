@@ -284,6 +284,38 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 				err:      fmt.Errorf("corkscrewdb: collection %q already exists with raw store %v", name, existing.rawStoreEnabled),
 			}
 		}
+		// WithSparse on an existing non-sparse collection is a silent no-op that
+		// later surfaces as a confusing SearchMulti rejection; report a clear
+		// mismatch instead, mirroring the seed/bitWidth/rawStore checks above.
+		if cfg.sparseEnabled && !existing.sparseEnabled {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists without the sparse channel (WithSparse)", name),
+			}
+		}
+		// WithIndexType that disagrees with the persisted index type is likewise a
+		// silent drop today; surface it. (Switching index type is RebuildIndex's
+		// job, not a re-open option.)
+		if cfg.indexTypeSet && cfg.indexType != existing.indexType {
+			return &Collection{
+				db:       db,
+				name:     name,
+				bitWidth: existing.bitWidth,
+				seed:     existing.seed,
+				encoder:  db.encoder,
+				err:      fmt.Errorf("corkscrewdb: collection %q already exists with index type %q", name, indexTypeString(existing.indexType)),
+			}
+		}
+		// Re-apply a runtime-only WithScorer on the resident collection. The scorer
+		// is not persisted in meta (§10), so a post-restart reopen is the only way
+		// to (re-)inject a runtime scorer (e.g. a GPU scorer) into a live collection.
+		if cfg.scorer != nil {
+			existing.scorer = cfg.scorer
+		}
 		return existing
 	}
 
@@ -307,7 +339,11 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 		SparseEnabled: cfg.sparseEnabled,
 		IndexType:     indexTypeString(cfg.indexType),
 	}
-	if cfg.indexType == IndexHNSW {
+	// Persist HNSW params whenever the index is HNSW OR WithHNSWParams was
+	// explicitly supplied. A flat collection created WithHNSWParams must retain
+	// them so a later RebuildIndex(IndexHNSW) honors the supplied params instead
+	// of silently falling back to defaults.
+	if cfg.indexType == IndexHNSW || cfg.hnswSet {
 		hnsw := cfg.hnsw
 		meta.HNSW = &hnsw
 	}
@@ -336,19 +372,28 @@ func (db *DB) DropCollection(name string) error {
 	if db.remote != nil {
 		return db.remote.DropCollection(name)
 	}
+	// Invariant: never acquire db.mu while holding c.mu (persistCollectionMeta /
+	// saveManifest take db.mu, and they are called from under c.mu by the write
+	// path). coll.close() -> persistSnapshot does its own c.mu dance, so we MUST
+	// release db.mu before calling close()/os.RemoveAll, exactly like Close().
+	// Holding db.mu across close() reintroduces the db.mu->c.mu vs c.mu->db.mu
+	// AB-BA deadlock with a concurrent first-write.
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	coll, ok := db.collections[name]
 	if !ok {
+		db.mu.Unlock()
 		return nil
-	}
-	if err := coll.close(); err != nil {
-		return err
 	}
 	delete(db.collections, name)
 	delete(db.manifest.Collections, name)
-	if err := db.saveManifestLocked(); err != nil {
+	saveErr := db.saveManifestLocked()
+	db.mu.Unlock()
+
+	if err := coll.close(); err != nil {
 		return err
+	}
+	if saveErr != nil {
+		return saveErr
 	}
 	return os.RemoveAll(db.collectionDir(name))
 }
@@ -577,7 +622,10 @@ func (db *DB) persistCollectionMeta(name string, c *Collection) error {
 	meta.RawStore = c.rawStoreEnabled
 	meta.SparseEnabled = c.sparseEnabled
 	meta.IndexType = indexTypeString(c.indexType)
-	if c.indexType == IndexHNSW {
+	// Persist HNSW params for an HNSW collection, OR for a flat collection that
+	// carries non-default params (created WithHNSWParams). Erasing them here would
+	// make a later RebuildIndex(IndexHNSW) silently fall back to defaults (Bug 6).
+	if c.indexType == IndexHNSW || c.hnsw != defaultHNSWParams() {
 		hnsw := c.hnsw
 		meta.HNSW = &hnsw
 	} else {

@@ -16,12 +16,14 @@ type Entry struct {
 
 // SnapshotData is the full state of one collection for catch-up replication.
 type SnapshotData struct {
-	Collection string
-	BitWidth   int
-	Seed       int64
-	Dim        int
-	MaxLamport uint64
-	Entries    []VersionRecord
+	Collection    string
+	BitWidth      int
+	Seed          int64
+	Dim           int
+	MaxLamport    uint64
+	RawStore      bool // mirrors the primary's WithoutRawStore choice
+	SparseEnabled bool // mirrors the primary's WithSparse choice (hybrid)
+	Entries       []VersionRecord
 }
 
 // VersionRecord is one vector ID with its full version history.

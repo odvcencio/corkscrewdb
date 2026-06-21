@@ -1225,7 +1225,19 @@ func (c *Collection) sync() error {
 
 func (c *Collection) close() error {
 	var errs []error
-	if c.dirty {
+	// Snapshot the fields close() inspects under the lock. Reading c.dirty
+	// unlocked races with the markDirty write in applyVersionLocked and could read
+	// a stale c.dirty==false, skipping persistSnapshot and silently dropping a
+	// just-written version. persistSnapshot/writeCachesBestEffort do their own
+	// c.mu dance, so the snapshot is read under a short-lived lock that is released
+	// before those calls (callers are expected to have quiesced writers first).
+	c.mu.RLock()
+	dirty := c.dirty
+	wal := c.wal
+	rawStore := c.rawStore
+	c.mu.RUnlock()
+
+	if dirty {
 		if err := c.persistSnapshot(); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -1235,13 +1247,13 @@ func (c *Collection) close() error {
 			c.writeCachesBestEffort()
 		}
 	}
-	if c.wal != nil {
-		if err := c.wal.Close(); err != nil {
+	if wal != nil {
+		if err := wal.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if c.rawStore != nil {
-		if err := c.rawStore.Close(); err != nil {
+	if rawStore != nil {
+		if err := rawStore.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}

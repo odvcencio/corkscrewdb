@@ -462,6 +462,10 @@ func (db *DB) resolveRebalanceDecision(epoch uint64) (rebalanceDecision, uint64)
 //     supersession, committedEpoch != epoch) => revert to L0.
 //  3. This node was the coordinator (it drove the epoch) with NO commit record:
 //     self-abort and broadcast Abort to FROZEN/PREPARED participants.
+//
+// Liveness limit: this runs ONLY at Open. A stuck coordinator's participants stay
+// write-fenced until they reopen (re-running this recovery) or an operator calls
+// ForceAbortRebalance — there is no background reconciler.
 func (db *DB) recoverPendingRebalance() error {
 	st := db.rebalanceSnapshot()
 	if st.phase == phaseIdle || len(st.pending) == 0 {
@@ -957,8 +961,17 @@ func (c *Collection) removeLocalIDs(ids []string) error {
 			continue
 		}
 		delete(c.history, id)
+		// Mirror applyVersionLocked's full teardown (collection.go) so a pruned id
+		// leaves NO residue: drop the sparse channel entry (else it leaks into the
+		// sparse active set), remove the dense entry, and remove any packed
+		// multivector children from the flat index (else pruned children linger and
+		// surface from SearchParents).
+		delete(c.sparseSet, id)
 		if c.index != nil {
 			c.index.Remove(id)
+			if flat, ok := c.index.(*index); ok {
+				flat.removePackedChildren(id)
+			}
 		}
 		changed = true
 	}
@@ -968,6 +981,13 @@ func (c *Collection) removeLocalIDs(ids []string) error {
 	if len(c.history) == 0 {
 		c.index = nil
 		c.dim = 0
+	}
+	// Invalidate the ENTIRE point-in-time view cache. A rebalance prune is not
+	// clock-stamped: it removes ids regardless of clock, so even a historical
+	// At(clock) view built before the prune would still serve the now-removed
+	// ids. invalidateHead(0) drops every cached view (clock >= 0).
+	if c.viewCache != nil {
+		c.viewCache.invalidateHead(0)
 	}
 	c.dirty = true
 	return nil

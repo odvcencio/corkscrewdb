@@ -99,12 +99,14 @@ func (p *RPCPuller) PullSnapshot(req replica.SnapshotRequest) (replica.SnapshotR
 	}
 	return replica.SnapshotResponse{
 		Data: replica.SnapshotData{
-			Collection: resp.Collection,
-			BitWidth:   resp.BitWidth,
-			Seed:       resp.Seed,
-			Dim:        resp.Dim,
-			MaxLamport: resp.MaxLamport,
-			Entries:    records,
+			Collection:    resp.Collection,
+			BitWidth:      resp.BitWidth,
+			Seed:          resp.Seed,
+			Dim:           resp.Dim,
+			MaxLamport:    resp.MaxLamport,
+			RawStore:      resp.RawStore,
+			SparseEnabled: resp.SparseEnabled,
+			Entries:       records,
 		},
 	}, nil
 }
@@ -147,7 +149,24 @@ func (a *DBApplier) ApplyReplicatedEntry(collection string, entry replica.Entry)
 	// the same loadVersion -> applyVersionLocked path WAL replay uses. NO
 	// re-quantization: the codes are inserted verbatim. Idempotent: applyVersionLocked
 	// dedups on (LamportClock, ActorID).
-	coll := a.db.Collection(collection)
+	//
+	// Entry-stream-only replication (no prior CatchUp/ApplySnapshot) creates the
+	// follower collection lazily. When the very first entry carries a sparse
+	// payload the collection must be created WithSparse(), or the follower's
+	// SearchMulti later rejects sparse queries even though the sparse channel is
+	// indexed. The preferred path is CatchUp first (which carries the flag
+	// explicitly via ApplySnapshot); this handles the snapshot-less stream. We
+	// only request WithSparse() when the collection does not yet exist as
+	// non-sparse, so a mixed stream into an existing non-sparse collection does
+	// not trip the WithSparse mismatch error.
+	var opts []CollectionOption
+	if fromWALSparse(entry.Sparse) != nil && a.db.collectionSparseCompatible(collection) {
+		opts = append(opts, WithSparse())
+	}
+	coll := a.db.Collection(collection, opts...)
+	if coll.err != nil {
+		return coll.err
+	}
 	return coll.loadVersion(entry.VectorID, Version{
 		Quantized:    fromWALQuantized(entry.Quantized),
 		dim:          entry.Dim,
@@ -163,13 +182,43 @@ func (a *DBApplier) ApplyReplicatedEntry(collection string, entry replica.Entry)
 	})
 }
 
+// collectionSparseCompatible reports whether requesting WithSparse() for the
+// named collection is safe: true when the collection does not exist yet (so the
+// follower can create it sparse), or it already exists with the sparse channel
+// enabled. It returns false for an existing non-sparse collection so the
+// entry-stream applier does not trip the WithSparse mismatch error (Bug 5).
+func (db *DB) collectionSparseCompatible(name string) bool {
+	if db == nil {
+		return false
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	existing, ok := db.collections[name]
+	if !ok {
+		return true
+	}
+	return existing.sparseEnabled
+}
+
 func (a *DBApplier) ApplySnapshot(data replica.SnapshotData) error {
 	// Pin bitWidth + seed so the codes are meaningful on the follower (§2.1).
 	// The quantizer seed is set directly rather than via WithQuantizerSeed
 	// because generateSeed() yields full-range int64 values (often negative),
 	// which the WithQuantizerSeed option rejects; the snapshot-load path
 	// (corkscrewdb.go) assigns coll.seed the same way.
-	coll := a.db.Collection(data.Collection, WithBitWidth(data.BitWidth))
+	//
+	// Mirror the primary's sparse/raw-store config so a hybrid (WithSparse)
+	// collection replicates its sparse channel: without WithSparse here the
+	// follower's SearchMulti rejects sparse queries (multi.go), and a raw-store
+	// mismatch would diverge from the primary's storage form.
+	opts := []CollectionOption{WithBitWidth(data.BitWidth)}
+	if !data.RawStore {
+		opts = append(opts, WithoutRawStore())
+	}
+	if data.SparseEnabled {
+		opts = append(opts, WithSparse())
+	}
+	coll := a.db.Collection(data.Collection, opts...)
 	if coll.err != nil {
 		return coll.err
 	}
