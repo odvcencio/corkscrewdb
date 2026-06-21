@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"lukechampine.com/blake3"
 )
@@ -70,6 +71,7 @@ func (s *Store) openActive(segs []int) error {
 		num = segs[len(segs)-1]
 	}
 	path := segmentPath(s.dir, num)
+	created := len(segs) == 0
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -89,6 +91,14 @@ func (s *Store) openActive(segs []int) error {
 			return err
 		}
 		info, _ = f.Stat()
+	}
+	// A brand-new segment's directory entry must be fsynced so the filename
+	// survives a crash; one dir-fsync per creation, never per append.
+	if created {
+		if err := fsyncDir(s.dir); err != nil {
+			_ = f.Close()
+			return err
+		}
 	}
 	s.active = f
 	s.activeNum = num
@@ -249,15 +259,30 @@ func (s *Store) GC(reachable map[string]struct{}) error {
 		_ = f.Close()
 		return err
 	}
+	// The compacted segment holds EVERY reachable raw blob. Its file contents
+	// are now fsynced, but its directory entry (filename) is not yet durable.
+	// fsync the parent directory BEFORE removing the old segments so that a
+	// crash cannot leave us with the old segments unlinked and the new
+	// segment's dirent lost -- which would lose the entire live raw set.
+	if err := fsyncDir(s.dir); err != nil {
+		_ = f.Close()
+		return err
+	}
 	s.active = f
 	s.activeNum = newNum
 	s.activeSz = offset
 	s.index = newIndex
-	// Remove old segments only after the compacted one is durable.
+	// Remove old segments only after the compacted one (and its dirent) is durable.
 	for _, num := range oldSegs {
 		if err := os.Remove(segmentPath(s.dir, num)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+	// fsync the parent directory again so the unlinks themselves are durable;
+	// otherwise a crash could resurrect the old segments and a later GC could
+	// pick a colliding segment number.
+	if err := fsyncDir(s.dir); err != nil {
+		return err
 	}
 	return nil
 }
@@ -282,9 +307,36 @@ func (s *Store) rotateLocked() error {
 		_ = f.Close()
 		return err
 	}
+	// fsync the parent directory so the rotated segment's dirent is durable
+	// before any blob is appended to it (one dir-fsync per rotation).
+	if err := fsyncDir(s.dir); err != nil {
+		_ = f.Close()
+		return err
+	}
 	s.active = f
 	s.activeSz = headerLen
 	return nil
+}
+
+// fsyncDir fsyncs a directory so that newly created or removed directory
+// entries (filenames) are durable. This mirrors the snapshot/manifest writers'
+// temp->fsync(file)->rename->fsync(parent dir) pattern. On filesystems that do
+// not support directory fsync the syscall may return EINVAL/ENOTSUP; that is
+// treated as a non-fatal no-op since such filesystems provide no stronger
+// guarantee anyway.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+			return nil
+		}
+		return err
+	}
+	return d.Close()
 }
 
 // Close fsyncs and closes the active segment.

@@ -62,3 +62,39 @@ func TestWriterCreatesFile(t *testing.T) {
 		t.Fatalf("wal file not created: %v", err)
 	}
 }
+
+// TestWriterDirFsyncOnCreate verifies the create path (which now fsyncs the
+// parent directory so the new segment's dirent is durable) succeeds and that
+// reopening an existing segment does not error. We cannot observe the fsync
+// syscall directly, but exercising both branches guards against regressions.
+func TestWriterDirFsyncOnCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "000001.wal")
+	w, err := NewWriterWithSync(path, SyncEvery) // create branch: dir-fsynced
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w2, err := NewWriterWithSync(path, SyncEvery) // reopen branch: no dir-fsync
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFsyncDir exercises the directory-fsync helper directly; it must succeed
+// on a real directory and error on a missing one. EINVAL/ENOTSUP from
+// filesystems lacking dir-fsync are swallowed as a non-fatal no-op.
+func TestFsyncDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := fsyncDir(dir); err != nil {
+		t.Fatalf("fsyncDir on a real directory failed: %v", err)
+	}
+	if err := fsyncDir(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("fsyncDir on a missing directory should error")
+	}
+}

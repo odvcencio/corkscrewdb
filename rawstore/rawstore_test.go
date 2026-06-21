@@ -92,6 +92,101 @@ func TestGC(t *testing.T) {
 	}
 }
 
+// TestGCDurableCompactedSegmentReopen exercises the dir-fsync path in GC: it
+// forces multiple segments, GCs into a single compacted segment, and asserts
+// the live set round-trips after a reopen (index rebuilt from the segment scan).
+func TestGCDurableCompactedSegmentReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Put several blobs so that, with a rotation forced, we have >1 segment for
+	// GC to remove and compact.
+	keep := make([][]byte, 0, 4)
+	drop := make([][]byte, 0, 4)
+	for i := 0; i < 4; i++ {
+		k, err := s.Put(floatBytes(float32(i), float32(i+1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		keep = append(keep, k)
+		// Force a rotation between blobs so the live set spans multiple segments.
+		if err := s.rotateLocked(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		k, err := s.Put(floatBytes(float32(100+i), float32(200+i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drop = append(drop, k)
+		if err := s.rotateLocked(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preSegs, err := listSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preSegs) < 2 {
+		t.Fatalf("expected multiple segments before GC, got %d", len(preSegs))
+	}
+	reachable := make(map[string]struct{}, len(keep))
+	for _, k := range keep {
+		reachable[string(k)] = struct{}{}
+	}
+	if err := s.GC(reachable); err != nil {
+		t.Fatal(err)
+	}
+	// After GC the old segments must be gone and a single compacted segment left.
+	postSegs, err := listSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(postSegs) != 1 {
+		t.Fatalf("after GC want exactly 1 compacted segment, got %d: %v", len(postSegs), postSegs)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen and assert the live set survives (the compacted dirent is durable)
+	// and the dropped set is gone.
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	for i, k := range keep {
+		got, err := s2.Get(k)
+		if err != nil {
+			t.Fatalf("reachable blob %d lost after GC+reopen: %v", i, err)
+		}
+		if !bytes.Equal(got, floatBytes(float32(i), float32(i+1))) {
+			t.Fatalf("reachable blob %d mismatch after GC+reopen: %x", i, got)
+		}
+	}
+	for i, k := range drop {
+		if _, err := s2.Get(k); err == nil {
+			t.Fatalf("unreachable blob %d should be gone after GC, but Get succeeded", i)
+		}
+	}
+}
+
+// TestFsyncDir exercises the directory-fsync helper directly; on a normal
+// filesystem it must succeed, and on filesystems without dir-fsync support it
+// degrades to a non-fatal no-op (never returns EINVAL/ENOTSUP).
+func TestFsyncDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := fsyncDir(dir); err != nil {
+		t.Fatalf("fsyncDir on a real directory failed: %v", err)
+	}
+	if err := fsyncDir(filepath.Join(dir, "does-not-exist")); err == nil {
+		t.Fatal("fsyncDir on a missing directory should error")
+	}
+}
+
 func TestGetNotFoundIsTyped(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
