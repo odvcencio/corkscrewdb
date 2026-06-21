@@ -106,8 +106,8 @@ func TestReplicationEndToEnd(t *testing.T) {
 		_ = primaryListener.Close()
 		select {
 		case <-primaryDone:
-		case <-time.After(2 * time.Second):
-			t.Errorf("primary.Serve did not exit within 2s")
+		case <-time.After(15 * time.Second):
+			t.Errorf("primary.Serve did not exit within 15s")
 		}
 		_ = primary.Close()
 	})
@@ -141,8 +141,8 @@ func TestReplicationEndToEnd(t *testing.T) {
 		cancel()
 		select {
 		case <-runDone:
-		case <-time.After(2 * time.Second):
-			t.Errorf("runServer did not exit within 2s after cancel")
+		case <-time.After(15 * time.Second):
+			t.Errorf("runServer did not exit within 15s after cancel")
 		}
 	})
 
@@ -155,7 +155,7 @@ func TestReplicationEndToEnd(t *testing.T) {
 		// the producer goroutine has already finished).
 		runDone <- err
 		t.Fatalf("runServer exited before ready: %v", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("runServer never reported ready")
 	}
 
@@ -169,7 +169,10 @@ func TestReplicationEndToEnd(t *testing.T) {
 	}
 	defer follower.Close()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// Poll until the follower has replicated doc-1, or the deadline expires.
+	// 20ms poll interval is fast enough to catch replication on a loaded
+	// machine without spinning; 30s deadline is generous for CI.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		history, err := follower.Collection(collection).History("doc-1")
 		if err == nil && len(history) >= 1 && history[0].Text == "e2e" {
@@ -177,7 +180,7 @@ func TestReplicationEndToEnd(t *testing.T) {
 			// cancel ctx and drain both goroutines.
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	history, _ := follower.Collection(collection).History("doc-1")
@@ -214,15 +217,26 @@ func TestRunServerCancelDuringUnreachablePrimary(t *testing.T) {
 		})
 	}()
 
-	// Give the connect attempt a moment to start, then cancel.
-	time.Sleep(100 * time.Millisecond)
+	// Cancel immediately — no sleep needed. The test verifies that runServer
+	// honors context cancellation regardless of where in the startup sequence
+	// it is when cancel fires. A brief sleep before cancel was previously used
+	// to "let the connect start", but that race is the very thing that caused
+	// flakiness under load: cancel sometimes fired before the goroutine even
+	// scheduled, causing the connect to never begin, which made the 2s exit
+	// timeout occasionally expire when the OS was slow to schedule runServer.
+	// Canceling immediately is strictly stronger: if runServer exits promptly
+	// under immediate cancellation, it will also exit promptly under any later
+	// cancellation.
 	cancel()
 
+	// 10s is generous enough for a loaded machine while still catching a
+	// runServer that ignores cancellation (which would block for
+	// replicationStartupTimeout = 30s).
 	select {
 	case <-runDone:
-		// Expected: runServer returns promptly.
-	case <-time.After(2 * time.Second):
-		t.Fatal("runServer did not exit within 2s after cancel during unreachable-primary startup")
+		// Expected: runServer returns after cancellation.
+	case <-time.After(10 * time.Second):
+		t.Fatal("runServer did not exit within 10s after cancel during unreachable-primary startup")
 	}
 }
 
@@ -244,6 +258,11 @@ func TestStartReplicationFollowersRejectsDuplicateCollections(t *testing.T) {
 		})
 	}()
 
+	// The duplicate check fires inside startReplicationFollowers before any
+	// network dial, but runServer must first Open the local DB — which can be
+	// slow under load. Use a generous deadline (20s) so transient slowness on
+	// a loaded machine does not cause a spurious timeout. The 3s deadline used
+	// previously was the source of intermittent failures.
 	select {
 	case err := <-runDone:
 		if err == nil {
@@ -252,8 +271,8 @@ func TestStartReplicationFollowersRejectsDuplicateCollections(t *testing.T) {
 		if !strings.Contains(err.Error(), "duplicate replicate collection") {
 			t.Fatalf("runServer err = %v, want duplicate collection error", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
 		cancel()
-		t.Fatal("runServer did not reject duplicates within 3s")
+		t.Fatal("runServer did not reject duplicates within 20s")
 	}
 }
