@@ -186,7 +186,9 @@ type collectionConfig struct {
 	bitWidth      int
 	seed          int64
 	indexType     IndexType
+	indexTypeSet  bool // true iff WithIndexType was supplied (IndexFlat is the zero value)
 	hnsw          HNSWParams
+	hnswSet       bool // true iff WithHNSWParams was supplied
 	rawStore      bool // default true; cleared by WithoutRawStore
 	rawStoreSet   bool
 	sparseEnabled bool
@@ -231,12 +233,18 @@ func WithQuantizerSeed(seed int64) CollectionOption {
 
 // WithIndexType selects the vector index algorithm.
 func WithIndexType(t IndexType) CollectionOption {
-	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.indexType = t })
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.indexType = t
+		cfg.indexTypeSet = true
+	})
 }
 
 // WithHNSWParams configures and persists HNSW-specific parameters.
 func WithHNSWParams(p HNSWParams) CollectionOption {
-	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.hnsw = p })
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.hnsw = p
+		cfg.hnswSet = true
+	})
 }
 
 // WithoutRawStore opts out of the default content-addressed raw vector store.
@@ -253,8 +261,10 @@ func WithSparse() CollectionOption {
 }
 
 // WithScorer injects a custom Scorer into the collection (frozen API seam).
-// The flat search path uses defaultScorer when no scorer is provided.
-// Full WithScorer injection into the flat path is deferred to the Performance phase.
+// The injected scorer is active on the flat (non-HNSW) search path: it is
+// called for unfiltered queries and bypassed in favour of the default scorer
+// when filters are present (the CUDA kernel scores the whole corpus; per-row
+// accept cannot be pushed down). The scorer is runtime-only and not persisted.
 func WithScorer(s Scorer) CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.scorer = s })
 }

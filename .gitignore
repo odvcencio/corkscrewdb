@@ -12,6 +12,11 @@
 *.csb
 /bench
 
+# Built server binaries (produced by go build ./cmd/...) and orphan asset snapshots
+/corkscrewdb
+/memory
+/assets/tranquil-v0/
+
 # Private working notes
 .claude/
 docs/blog-outlines/

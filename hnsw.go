@@ -584,6 +584,12 @@ func (h *hnswIndex) selectNeighborsHeuristic(candidates []hnswCandidate, m int) 
 // with LEANN hub protection: an edge to a hub neighbor is exempt from the RNG
 // domination test and only dropped if the list still exceeds maxN after all non-hub
 // edges are considered. Callers do NOT hold h.flat.mu.
+//
+// Note: hub protection is applied here (overflow re-prune) but NOT in
+// selectNeighborsHeuristic (initial neighbor selection). This is a known
+// recall/quality limitation: a hub that would be dominated at insert time may
+// gain the edge only after the first overflow re-prune. Exact rescoring at
+// query time compensates; graph recall is not materially affected.
 func (h *hnswIndex) pruneNeighborsHeuristic(nodeIdx int, neighbors []int32, maxN int) []int32 {
 	if len(neighbors) <= maxN {
 		return neighbors

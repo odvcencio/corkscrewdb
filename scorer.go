@@ -15,6 +15,12 @@ type ScoredHit struct {
 // Scorer scores prepared query(ies) against a collection's quantized corpus.
 // accept(i) is the pushed-down filter predicate (§7.4); rows where accept==false
 // are skipped before scoring.
+//
+// Contract: an injected Scorer that returns zero hits for a non-empty corpus
+// with k > 0 is treated as a "decline" — the engine falls back to the default
+// pure-Go scorer for that query. Implementors must not return an empty slice
+// to signal "no matches"; they should return nil or let the engine fall back.
+// An empty result from the default scorer is the authoritative "no matches".
 type Scorer interface {
 	ScoreTopK(pq turboquant.PreparedQuery, k int, accept func(i int) bool) []ScoredHit
 	ScoreTopKMulti(pqs []turboquant.PreparedQuery, k int, accept func(i int) bool) [][]ScoredHit

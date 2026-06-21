@@ -44,9 +44,11 @@ var ErrStaleEpoch = errors.New("corkscrewdb: rebalance epoch is stale")
 // back).
 var ErrAlreadyCommitted = errors.New("corkscrewdb: rebalance already committed")
 
-// ErrPullTooOld is reserved for the v0.3.1 streamer retention-window path: a
-// pull whose since-clock predates the retained history floor.
-var ErrPullTooOld = errors.New("corkscrewdb: pull since-clock is older than retained history")
+// errPullTooOld is reserved for the v0.3.1 streamer retention-window path: a
+// pull whose since-clock predates the retained history floor. Unexported because
+// no code path returns it yet; exporting it would widen the public surface with
+// a sentinel callers can never match via errors.Is.
+var errPullTooOld = errors.New("corkscrewdb: pull since-clock is older than retained history")
 
 // ErrLegacyRebalanceUnsafe is returned when a fenced cluster rebalance's layout
 // diff cannot be expressed as explicit shard ranges (it falls through to legacy
