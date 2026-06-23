@@ -64,6 +64,11 @@ func (p *builtinProvider) ProviderID() string {
 	return "builtin-deterministic-v1"
 }
 
+// Deterministic reports that the builtin provider's EncodeBatch output is
+// deterministic: its EncodeBatch loops single Encode calls (builtin_provider.go:43-53),
+// so single==batch is exact by construction.
+func (p *builtinProvider) Deterministic() bool { return true }
+
 func normalizeText(text string) string {
 	text = strings.ToLower(text)
 	text = strings.Map(func(r rune) rune {
