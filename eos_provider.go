@@ -248,7 +248,7 @@ func (p *eosProvider) Deterministic() bool { return true }
 // For providers loaded via LoadEosProvider (not the embedded default), the SHA
 // fields are empty and the fingerprint reduces to "<backendKind>::".
 func (p *eosProvider) BackendFingerprint() string {
-	if p == nil {
+	if p == nil || p.model == nil {
 		return ""
 	}
 	kind := string(p.model.Backend())

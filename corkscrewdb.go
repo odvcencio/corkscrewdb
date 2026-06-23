@@ -1106,12 +1106,35 @@ func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string,
 	desired := describeEmbeddingProvider(provider)
 	// Decompose the comparison into explicit {ID, Dim} fields so that the new
 	// BackendFingerprint field (empty in v0.3.x manifests) cannot break reopen of
-	// existing collections. Task 5 will add fingerprint enforcement separately.
+	// existing collections.
 	switch {
 	case m.Embedding.ID == "":
 		m.Embedding = desired
 	case m.Embedding.ID != desired.ID || m.Embedding.Dim != desired.Dim:
 		return fmt.Errorf("corkscrewdb: embedding config mismatch: manifest=%s/%d runtime=%s/%d", m.Embedding.ID, m.Embedding.Dim, desired.ID, desired.Dim)
+	default:
+		// §9.4 backend-fingerprint fast-fail: enforce only when at least one
+		// collection is in recompute mode AND both fingerprints are non-empty.
+		// An empty persisted fingerprint (v0.3.x manifest) is "no stored
+		// fingerprint to check" — never mismatch. A raw/none-only manifest
+		// ignores fingerprint diffs entirely.
+		if m.Embedding.BackendFingerprint != "" && desired.BackendFingerprint != "" &&
+			m.Embedding.BackendFingerprint != desired.BackendFingerprint {
+			for _, meta := range m.Collections {
+				if meta.ColdTier == "recompute" {
+					return fmt.Errorf("%w: persisted=%q active=%q",
+						ErrRecomputeBackendMismatch,
+						m.Embedding.BackendFingerprint,
+						desired.BackendFingerprint)
+				}
+			}
+		}
+		// Backfill the fingerprint when the stored one is empty but the
+		// runtime provides one (e.g. upgrading from v0.3.x or a provider
+		// that gained BackendFingerprint() support after manifest creation).
+		if m.Embedding.BackendFingerprint == "" && desired.BackendFingerprint != "" {
+			m.Embedding.BackendFingerprint = desired.BackendFingerprint
+		}
 	}
 	if len(m.Shards) > 0 || len(shards) > 0 {
 		activeShards := m.Shards
