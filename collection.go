@@ -64,6 +64,8 @@ type CollectionView struct {
 	sparseEnabled bool
 	err           error
 	dim           int
+	bitWidth      int   // quantizer bit-width; copied from Collection in At() (Task 7)
+	seed          int64 // quantizer seed; copied from Collection in At() (Task 7)
 	remote        remoteClient
 	useAt         bool
 	atClock       uint64
@@ -740,6 +742,8 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		sparseEnabled: c.sparseEnabled,
 		coldTier:      c.coldTier,
 		rerankDepth:   c.rerankDepth,
+		bitWidth:      c.bitWidth,
+		seed:          c.seed,
 	}
 
 	c.mu.RLock()
@@ -835,6 +839,63 @@ func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterO
 	if len(query) != v.dim {
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), v.dim)
 	}
+
+	// Drift-check exact rerank for view (Task 7): when coldRecompute and rerankDepth > 1,
+	// overfetch kEff candidates from the flat index, copy storedCode BY VALUE under
+	// flat.mu.RLock(), release the lock, then call rerankExact via a viewRerankCtx.
+	// The view's history is an immutable snapshot copy (built in At()) — no additional
+	// lock is needed to read it inside viewRerankCtx.rerankFloats.
+	//
+	// We only support coldRecompute here; coldRaw views have no raw store (the raw
+	// store is on the Collection, not the view). coldRaw-with-raw rerank is a
+	// future extension; for now fall through to plain index.Search.
+	if v.rerankDepth > 1 && v.coldTier == coldRecompute {
+		flat, ok := v.index.(*index)
+		if ok {
+			kEff := k * v.rerankDepth
+			flat.mu.RLock()
+			if len(flat.entries) == 0 {
+				flat.mu.RUnlock()
+				return nil, nil
+			}
+			pq := flat.quantizer.PrepareQuery(query)
+			corpus := liveEntryCorpus{entries: flat.entries}
+			accept := func(row int) bool {
+				entry := &flat.entries[row]
+				if entry.child || entry.dead {
+					return false
+				}
+				return matchesFilters(entry.metadata, filters)
+			}
+			ds := newDefaultScorer(flat.quantizer)
+			hits := ds.scoreTopKOver(corpus, pq, kEff, accept)
+			cands := make([]candidate, 0, len(hits))
+			for _, h := range hits {
+				entry := &flat.entries[h.Index]
+				cands = append(cands, candidate{
+					id:             entry.id,
+					storedCode:     entry.qv, // by-value copy; self-contained after lock release
+					text:           entry.text,
+					quantizedScore: h.Score,
+					version:        entry.version,
+					metadata:       cloneMetadata(entry.metadata),
+				})
+			}
+			flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
+
+			ctx := &viewRerankCtx{
+				encoder:  v.encoder,
+				coldTier: v.coldTier,
+				dim:      v.dim,
+				bitWidth: v.bitWidth,
+				seed:     v.seed,
+				history:  v.history,
+			}
+			reranked := rerankExact(ctx, cands, query, k)
+			return candidatesToSearchResults(reranked), nil
+		}
+	}
+
 	return v.index.Search(query, k, filters), nil
 }
 

@@ -35,8 +35,77 @@ func byteEqualQuantized(a, b *turboquant.IPQuantized) bool {
 		math.Float32bits(a.ResNorm) == math.Float32bits(b.ResNorm)
 }
 
-// coldFloats derives raw float32 vectors for the given candidates, branching on
-// the collection's cold-tier mode:
+// rerankContext is the minimal context that coldFloats and rerankExact need.
+// Implemented by *Collection (live path) and viewRerankCtx (view path, Task 7).
+// All implementations must be safe for concurrent use — no lock may be held
+// during the coldTierRecomputeFloats call (it invokes EncodeBatch).
+type rerankContext interface {
+	// rerankColdTier returns the cold-tier mode for branching in coldFloats.
+	rerankColdTier() coldTierMode
+	// rerankDim / rerankBitWidth / rerankSeed are the quantizer parameters used
+	// to re-quantize recomputed raws inside rerankExact.
+	rerankDim() int
+	rerankBitWidth() int
+	rerankSeed() int64
+	// rerankFloats derives raw float32 vectors for the given candidates. Returns
+	// (nil, err) on whole-batch failure; rerankExact falls back to quantized scores.
+	rerankFloats(cands []candidate) ([][]float32, error)
+}
+
+// --- Collection satisfies rerankContext ---
+
+func (c *Collection) rerankColdTier() coldTierMode { return c.coldTier }
+func (c *Collection) rerankDim() int               { return c.dim }
+func (c *Collection) rerankBitWidth() int          { return c.bitWidth }
+func (c *Collection) rerankSeed() int64            { return c.seed }
+
+// rerankFloats dispatches to coldFloats with c as the context, preserving the
+// existing per-mode logic (coldRecompute / coldRaw / coldNone).
+func (c *Collection) rerankFloats(cands []candidate) ([][]float32, error) {
+	return coldFloatsCollection(c, cands)
+}
+
+// --- viewRerankCtx satisfies rerankContext for CollectionView ---
+
+// viewRerankCtx is a lightweight adapter that lets the view search path call
+// rerankExact without duplicating drift-check logic. The view history is a
+// point-in-time snapshot copy made in At() — no lock is needed to read it.
+type viewRerankCtx struct {
+	encoder  *encoder
+	coldTier coldTierMode
+	dim      int
+	bitWidth int
+	seed     int64
+	history  map[string][]Version // point-in-time snapshot; immutable after At()
+}
+
+func (v *viewRerankCtx) rerankColdTier() coldTierMode { return v.coldTier }
+func (v *viewRerankCtx) rerankDim() int               { return v.dim }
+func (v *viewRerankCtx) rerankBitWidth() int          { return v.bitWidth }
+func (v *viewRerankCtx) rerankSeed() int64            { return v.seed }
+
+// rerankFloats for a view supports only coldRecompute (the view has no raw store).
+// coldRaw and coldNone fall through to an error, triggering §5.4 codes-only fallback.
+func (v *viewRerankCtx) rerankFloats(cands []candidate) ([][]float32, error) {
+	if v.coldTier != coldRecompute {
+		return nil, errors.New("corkscrewdb: view cold-tier mode does not support raw floats")
+	}
+	texts := make([]string, len(cands))
+	for i, cand := range cands {
+		texts[i] = cand.text
+	}
+	encoded, err := v.encoder.EncodeBatch(texts)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) == 0 {
+		return nil, errors.New("corkscrewdb: EncodeBatch returned no vectors")
+	}
+	return encoded, nil
+}
+
+// coldFloatsCollection derives raw float32 vectors for the given candidates from a
+// live Collection, branching on the collection's cold-tier mode:
 //   - coldRecompute: one EncodeBatch call over all candidate texts (the SAME
 //     graph entry point as the recompute write path — Resolution 1 / §5.6a).
 //     No drift-check here; rerankExact does the per-candidate drift-check.
@@ -49,7 +118,7 @@ func byteEqualQuantized(a, b *turboquant.IPQuantized) bool {
 // Returns (nil, err) on whole-batch failure so rerankExact can apply §5.4.
 // The len(encoded)==0 guard is applied before indexing — a misbehaving provider
 // returning (nil, nil) is treated as a failure.
-func coldFloats(c *Collection, cands []candidate) ([][]float32, error) {
+func coldFloatsCollection(c *Collection, cands []candidate) ([][]float32, error) {
 	switch c.coldTier {
 	case coldRecompute:
 		texts := make([]string, len(cands))
@@ -112,6 +181,15 @@ func coldFloats(c *Collection, cands []candidate) ([][]float32, error) {
 	}
 }
 
+// coldFloats is the public-facing cold floats helper used by the live collection
+// search paths. It calls coldFloatsCollection.
+//
+// Deprecated alias retained so existing call sites (Collection.rerankFloats) compile
+// without change; new code should use the rerankContext interface.
+func coldFloats(c *Collection, cands []candidate) ([][]float32, error) {
+	return coldFloatsCollection(c, cands)
+}
+
 // decodeRawFloat32 decodes a little-endian byte slice back to a float32 slice.
 // Inverse of rawFloat32Bytes in vector_storage.go.
 func decodeRawFloat32(raw []byte) ([]float32, error) {
@@ -129,7 +207,7 @@ func decodeRawFloat32(raw []byte) ([]float32, error) {
 
 // rerankExact performs the drift-check exact rerank:
 //
-//  1. Call coldFloats once over ALL candidate texts (one EncodeBatch per query).
+//  1. Call ctx.rerankFloats once over ALL candidate texts (one EncodeBatch per query).
 //  2. Per candidate: requantize the recomputed raw with the collection's own
 //     quantizer and byteEqualQuantized against storedCode.
 //     - MATCH ⇒ score = plain float dot Σ qvec[i]*raw[i] (exact).
@@ -137,14 +215,14 @@ func decodeRawFloat32(raw []byte) ([]float32, error) {
 //     (fallback — the stored quantized score).
 //  3. Re-sort by score descending, truncate to k.
 //
-// On whole-batch coldFloats failure (§5.4): re-sort candidates by quantizedScore
+// On whole-batch rerankFloats failure (§5.4): re-sort candidates by quantizedScore
 // and return codes-only top-k. No error is surfaced to the caller.
-func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []candidate {
+func rerankExact(ctx rerankContext, cands []candidate, qvec []float32, k int) []candidate {
 	if len(cands) == 0 {
 		return nil
 	}
 
-	raws, err := coldFloats(c, cands)
+	raws, err := ctx.rerankFloats(cands)
 	if err != nil {
 		// §5.4 whole-batch failure: fall back to codes-only ranking.
 		sort.Slice(cands, func(i, j int) bool {
@@ -172,7 +250,7 @@ func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []cand
 		return cands
 	}
 
-	q := turboquant.NewIPWithSeed(c.dim, c.bitWidth, c.seed)
+	q := turboquant.NewIPWithSeed(ctx.rerankDim(), ctx.rerankBitWidth(), ctx.rerankSeed())
 
 	// Score each candidate.
 	scores := make([]float32, len(cands))
@@ -185,7 +263,7 @@ func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []cand
 		}
 		// Per-candidate wrong-length guard: a misbehaving provider could return a
 		// vector of the wrong dimension. Don't index raw[j] on a wrong-length vector.
-		if len(raw) != c.dim {
+		if len(raw) != ctx.rerankDim() {
 			scores[i] = cand.quantizedScore
 			continue
 		}
