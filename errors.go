@@ -6,7 +6,13 @@ import "errors"
 var ErrFormatTooOld = errors.New("corkscrewdb: on-disk format is older than the v0.3.0 floor")
 
 // ErrRawStoreRequired is returned when an operation needs the raw vector store
-// but the collection was created WithoutRawStore.
+// but none is available. This includes collections created WithoutRawStore and
+// collections in recompute mode (cold_tier:"recompute"), where raw floats are
+// re-derived from text rather than stored. Recompute mode makes exact rerank
+// succeed without a raw store, so this error is only returned for operations
+// that explicitly require stored raw bytes (e.g. getRaw by hash). A v0.3.x
+// reader opening a v0.4.0 recompute collection receives this error only at
+// the raw-needing call site — not at Open or Collection (§9.3, Fix 2).
 var ErrRawStoreRequired = errors.New("corkscrewdb: operation requires the raw vector store")
 
 // ErrInvalidSparseVector is returned when a SparseVector violates its invariants.
