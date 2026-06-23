@@ -103,13 +103,30 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		if text == "" {
 			return errors.New("corkscrewdb: entry requires text or vector")
 		}
-		encoded, err := c.encoder.Encode(text)
+		encoded, err := encodeWriteText(c, text)
 		if err != nil {
 			return err
 		}
 		vector = encoded
 	}
 	return c.putVector(id, vector, text, metadata, entry.Sparse, federated)
+}
+
+// encodeWriteText encodes text for storage, branching on the collection's
+// cold-tier mode (§5.6a / Resolution 1):
+//   - coldRecompute uses EncodeBatch([text])[0] — the SAME graph entry point
+//     the future rerank path uses, so the drift-check MATCHes by construction.
+//   - all other modes (coldRaw, coldNone) keep the existing single Encode call
+//     VERBATIM — this is a hard requirement; non-recompute codes must not change.
+func encodeWriteText(c *Collection, text string) ([]float32, error) {
+	if c.coldTier == coldRecompute {
+		encoded, err := c.encoder.EncodeBatch([]string{text})
+		if err != nil {
+			return nil, err
+		}
+		return encoded[0], nil
+	}
+	return c.encoder.Encode(text)
 }
 
 func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOption) error {
@@ -128,6 +145,9 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 	}
 	if c.db.shouldFederate() {
 		return errors.New("corkscrewdb: PutMultiVector is unsupported for federated collections in v1")
+	}
+	if c.coldTier == coldRecompute {
+		return ErrRecomputeMultiVectorUnsupported
 	}
 	if strings.TrimSpace(parentID) == "" {
 		return errors.New("corkscrewdb: parent id is required")
@@ -849,6 +869,12 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		}
 	}
 
+	// Recompute mode requires text on every dense write (O5 / §5.8): without text
+	// there is nothing to re-derive raw floats from.
+	if c.coldTier == coldRecompute && strings.TrimSpace(text) == "" {
+		return ErrRecomputeRequiresText
+	}
+
 	if err := c.validateRawVectorLocked(vector); err != nil {
 		return err
 	}
@@ -865,6 +891,7 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 	version.dim = len(vector)
 	version.Sparse = cloneSparseVector(sparse)
 	// Raw blob is fsynced BEFORE the WAL append below (cold tier).
+	// For coldRecompute, rawStoreEnabled is false and RawHash stays nil.
 	if c.rawStoreEnabled {
 		hash, err := c.rawStore.Put(rawFloat32Bytes(vector))
 		if err != nil {
