@@ -366,9 +366,17 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
+	// Snapshot all mutable fields under c.mu.RLock to avoid data races with
+	// ReQuantize (which mutates c.bitWidth/c.seed under c.mu.Lock). The snapshot
+	// is used to build a liveRerankCtx passed to rerankExact (B1b fix).
 	c.mu.RLock()
 	idx := c.index
 	dim := c.dim
+	snapBitWidth := c.bitWidth
+	snapSeed := c.seed
+	snapColdTier := c.coldTier
+	snapRerankDepth := c.rerankDepth
+	snapRawStoreEnabled := c.rawStoreEnabled
 	c.mu.RUnlock()
 	if idx == nil {
 		return nil, nil
@@ -376,22 +384,31 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	if len(query) != dim {
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), dim)
 	}
+	// Build the liveRerankCtx snapshot once; used by all rerank call sites below.
+	liveCtx := &liveRerankCtx{
+		c:           c,
+		coldTier:    snapColdTier,
+		dim:         dim,
+		bitWidth:    snapBitWidth,
+		seed:        snapSeed,
+		rerankDepth: snapRerankDepth,
+	}
 	// HNSW owns its own traversal (§10); only the flat path routes through Scorer.
 	flat, isFlat := idx.(*index)
 	if !isFlat {
 		// HNSW path: when coldRecompute or coldRaw (with raw store) and
 		// rerankDepth > 1, overfetch via searchCandidates then exact rerank (Task 4).
 		hnsw, isHNSW := idx.(*hnswIndex)
-		rerankEnabled := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+		rerankEnabled := snapRerankDepth > 1 && (snapColdTier == coldRecompute || (snapColdTier == coldRaw && snapRawStoreEnabled))
 		if isHNSW && rerankEnabled {
-			kEff := k * c.rerankDepth
+			kEff := k * snapRerankDepth
 			cands, qvec := hnsw.searchCandidates(query, kEff, filters)
-			reranked := rerankExact(c, cands, qvec, k)
+			reranked := rerankExact(liveCtx, cands, qvec, k)
 			return candidatesToSearchResults(reranked), nil
 		}
 		return idx.Search(query, k, filters), nil
 	}
-	return c.flatSearchViaScorer(flat, query, k, filters), nil
+	return c.flatSearchViaScorer(flat, query, k, filters, liveCtx), nil
 }
 
 // flatSearchViaScorer routes the flat search path through the active Scorer seam
@@ -405,15 +422,15 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 // while keeping the Scorer seam and byte-equivalence. Only an injected scorer
 // (e.g. GPU) pays for a corpusSnapshot, and a device scorer packs it once via
 // SetCorpus (lazy by cardinality), never per query.
-func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
 	if k <= 0 {
 		return nil
 	}
 	// No injected scorer: zero-copy live-entry scan (the hot, default path).
 	if c.scorer == nil {
-		return c.flatSearchLive(flat, query, k, filters)
+		return c.flatSearchLive(flat, query, k, filters, liveCtx)
 	}
-	return c.flatSearchInjected(flat, query, k, filters)
+	return c.flatSearchInjected(flat, query, k, filters, liveCtx)
 }
 
 // flatSearchLive scores the default scorer directly over the index's LIVE entries
@@ -421,7 +438,7 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 // filtered rows are excluded by liveAccept before scoring (§7.4 pushdown), exactly
 // reproducing the dense corpusSnapshot exclusion. Byte-identical to the inline
 // index.Search and to the snapshot-backed default scorer.
-func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
 	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
 	// overfetch kEff candidates and exact rerank.
 	// storedCode is copied BY VALUE under flat.mu.RLock(). The lock is released
@@ -429,9 +446,12 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 	// This avoids the AB-BA deadlock: putVector holds c.mu.Lock then takes
 	// flat.mu.Lock (via index.Add); the coldRaw branch takes c.mu.RLock inside
 	// rerankExact. Releasing flat.mu before rerankExact breaks the cycle.
-	rerankEnabled := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+	// liveCtx carries a snapshot of c.bitWidth/c.seed/c.coldTier taken under
+	// c.mu.RLock in searchVectorLocal — no unsynchronized reads of mutable fields
+	// occur here (B1b fix).
+	rerankEnabled := liveCtx.rerankDepth > 1 && (liveCtx.coldTier == coldRecompute || (liveCtx.coldTier == coldRaw && c.rawStoreEnabled))
 	if rerankEnabled {
-		kEff := k * c.rerankDepth
+		kEff := k * liveCtx.rerankDepth
 		flat.mu.RLock()
 		if len(flat.entries) == 0 {
 			flat.mu.RUnlock()
@@ -461,7 +481,7 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 			})
 		}
 		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
-		reranked := rerankExact(c, cands, query, k)
+		reranked := rerankExact(liveCtx, cands, query, k)
 		return candidatesToSearchResults(reranked)
 	}
 
@@ -503,15 +523,17 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 // via SetCorpus, lazily by cardinality), maps ScoredHit.Index back through
 // rowToEntry, and falls back to the certified default scorer if the injected
 // scorer declines the query (§6.2).
-func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
 	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
 	// overfetch kEff and exact rerank.
 	// storedCode is copied BY VALUE under flat.mu.RLock(); the lock is released
 	// before rerankExact so no lock is held during EncodeBatch / getRaw.
-	rerankEnabled2 := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+	// liveCtx carries a snapshot of mutable fields (bitWidth/seed/coldTier) taken
+	// under c.mu.RLock in searchVectorLocal — no unsynchronized reads here (B1b fix).
+	rerankEnabled2 := liveCtx.rerankDepth > 1 && (liveCtx.coldTier == coldRecompute || (liveCtx.coldTier == coldRaw && c.rawStoreEnabled))
 	kFetch := k
 	if rerankEnabled2 {
-		kFetch = k * c.rerankDepth
+		kFetch = k * liveCtx.rerankDepth
 	}
 
 	corpus, rowToEntry := flat.corpusSnapshot()
@@ -555,7 +577,7 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 			})
 		}
 		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
-		reranked := rerankExact(c, cands, query, k)
+		reranked := rerankExact(liveCtx, cands, query, k)
 		return candidatesToSearchResults(reranked)
 	}
 
@@ -740,10 +762,6 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		history:       make(map[string][]Version),
 		sparseSet:     make(map[string]*SparseVector),
 		sparseEnabled: c.sparseEnabled,
-		coldTier:      c.coldTier,
-		rerankDepth:   c.rerankDepth,
-		bitWidth:      c.bitWidth,
-		seed:          c.seed,
 	}
 
 	c.mu.RLock()
@@ -752,6 +770,12 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		view.err = c.err
 		return view
 	}
+	// Read mutable fields UNDER c.mu.RLock to avoid data race with ReQuantize,
+	// which mutates c.bitWidth/c.seed/c.coldTier under c.mu.Lock (B1a fix).
+	view.coldTier = c.coldTier
+	view.rerankDepth = c.rerankDepth
+	view.bitWidth = c.bitWidth
+	view.seed = c.seed
 	view.dim = c.dim
 
 	// Try the view-index cache. Historical view indices are immutable; the live

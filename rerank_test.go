@@ -613,7 +613,7 @@ func TestRerankConcurrentReadWriteNoDeadlock(t *testing.T) {
 	}
 	defer db.Close()
 
-	// coldRaw + WithRerank triggers the exact deadlock path: coldFloats coldRaw
+	// coldRaw + WithRerank triggers the exact deadlock path: coldFloatsCollection coldRaw
 	// branch takes c.mu.RLock inside rerankExact, while putVector holds c.mu.Lock
 	// and then takes flat.mu.Lock.
 	c := db.Collection("col", WithBitWidth(2), WithQuantizerSeed(42), WithRerank(rerankDepth))

@@ -9,7 +9,7 @@ type capableMockProvider struct {
 	*mockProvider
 }
 
-func (c *capableMockProvider) Deterministic() bool     { return true }
+func (c *capableMockProvider) Deterministic() bool        { return true }
 func (c *capableMockProvider) BackendFingerprint() string { return "fp" }
 
 // TestCapabilityProbeReachesThroughEncoder is a regression for Fix 5: the

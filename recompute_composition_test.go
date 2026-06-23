@@ -3,6 +3,7 @@ package corkscrewdb
 import (
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"testing"
 )
 
@@ -130,15 +131,22 @@ func TestRecomputeHNSWRerank(t *testing.T) {
 // TestRecomputeSearchMultiDenseOnly verifies that a hybrid (sparse+dense)
 // recompute collection's SearchMulti reranks the dense channel only, leaves the
 // sparse channel untouched, and fusion is correct (compare against codes-only).
+//
+// STRENGTHENED (M-A): asserts that EncodeBatch fires during SearchMulti (proving
+// the dense channel was exact-reranked, not codes-only), and that the fused order
+// matches the reranked SearchVector order on the dense-only query.
 func TestRecomputeSearchMultiDenseOnly(t *testing.T) {
 	const dim = 16
 	const bw = 2
 	const seed = int64(42)
 	const rerankDepth = 4
 
-	provider := newDeterministicFixedProvider(dim)
+	// Use a spy provider that counts EncodeBatch invocations to prove rerank fired.
+	base := newDeterministicFixedProvider(dim)
+	spy := &spyBatchProvider{deterministicFixedProvider: base}
+
 	dir := filepath.Join(t.TempDir(), "multi_rerank.csdb")
-	db, err := Open(dir, WithProvider(provider))
+	db, err := Open(dir, WithProvider(spy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,13 +180,16 @@ func TestRecomputeSearchMultiDenseOnly(t *testing.T) {
 		}
 	}
 
-	queryVec, err := provider.Encode("apple")
+	queryVec, err := spy.Encode("apple")
 	if err != nil {
 		t.Fatal(err)
 	}
 	querySparse := &SparseVector{Indices: []uint32{1, 5}, Values: []float32{1.0, 0.5}}
 
-	// Dense+sparse hybrid query.
+	// Snapshot the EncodeBatch call count after writes (writes call EncodeBatch).
+	batchCountBeforeMulti := atomic.LoadInt64(&spy.batchCount)
+
+	// Dense+sparse hybrid query — with rerank enabled, this MUST call EncodeBatch.
 	results, err := c.SearchMulti(MultiQuery{
 		Dense:  queryVec,
 		Sparse: querySparse,
@@ -190,7 +201,14 @@ func TestRecomputeSearchMultiDenseOnly(t *testing.T) {
 		t.Fatal("SearchMulti returned no results")
 	}
 
-	// Dense-only rerank.
+	// Assert that SearchMulti called EncodeBatch (proving the dense rerank path fired).
+	batchCountAfterMulti := atomic.LoadInt64(&spy.batchCount)
+	if batchCountAfterMulti <= batchCountBeforeMulti {
+		t.Errorf("SearchMulti did not call EncodeBatch (batchCount before=%d, after=%d): dense channel was NOT reranked",
+			batchCountBeforeMulti, batchCountAfterMulti)
+	}
+
+	// Dense-only rerank via SearchVector for comparison.
 	denseResults, err := c.SearchVector(queryVec, 3)
 	if err != nil {
 		t.Fatalf("SearchVector: %v", err)
@@ -215,11 +233,14 @@ func TestRecomputeSearchMultiDenseOnly(t *testing.T) {
 		t.Errorf("doc-a not found in hybrid results; got: %v", results)
 	}
 
-	// SearchMulti on a view also works without panic.
+	// SearchMulti on a view also works without panic; view path was already correct
+	// (Task 7) and should also call EncodeBatch.
 	c.mu.RLock()
 	clk := c.clock.Current()
 	c.mu.RUnlock()
 	view := c.At(clk)
+
+	batchCountBeforeViewMulti := atomic.LoadInt64(&spy.batchCount)
 	viewResults, err := view.SearchMulti(MultiQuery{
 		Dense:  queryVec,
 		Sparse: querySparse,
@@ -229,6 +250,11 @@ func TestRecomputeSearchMultiDenseOnly(t *testing.T) {
 	}
 	if len(viewResults) == 0 {
 		t.Fatal("view SearchMulti returned no results")
+	}
+	batchCountAfterViewMulti := atomic.LoadInt64(&spy.batchCount)
+	if batchCountAfterViewMulti <= batchCountBeforeViewMulti {
+		t.Errorf("view SearchMulti did not call EncodeBatch (batchCount before=%d, after=%d): dense channel was NOT reranked",
+			batchCountBeforeViewMulti, batchCountAfterViewMulti)
 	}
 }
 

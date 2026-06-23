@@ -35,12 +35,12 @@ func byteEqualQuantized(a, b *turboquant.IPQuantized) bool {
 		math.Float32bits(a.ResNorm) == math.Float32bits(b.ResNorm)
 }
 
-// rerankContext is the minimal context that coldFloats and rerankExact need.
-// Implemented by *Collection (live path) and viewRerankCtx (view path, Task 7).
+// rerankContext is the minimal context that coldFloatsCollection and rerankExact need.
+// Implemented by liveRerankCtx (live path) and viewRerankCtx (view path, Task 7).
 // All implementations must be safe for concurrent use — no lock may be held
 // during the coldTierRecomputeFloats call (it invokes EncodeBatch).
 type rerankContext interface {
-	// rerankColdTier returns the cold-tier mode for branching in coldFloats.
+	// rerankColdTier returns the cold-tier mode for branching in coldFloatsCollection.
 	rerankColdTier() coldTierMode
 	// rerankDim / rerankBitWidth / rerankSeed are the quantizer parameters used
 	// to re-quantize recomputed raws inside rerankExact.
@@ -52,17 +52,32 @@ type rerankContext interface {
 	rerankFloats(cands []candidate) ([][]float32, error)
 }
 
-// --- Collection satisfies rerankContext ---
+// --- liveRerankCtx satisfies rerankContext for live Collection search paths ---
 
-func (c *Collection) rerankColdTier() coldTierMode { return c.coldTier }
-func (c *Collection) rerankDim() int               { return c.dim }
-func (c *Collection) rerankBitWidth() int          { return c.bitWidth }
-func (c *Collection) rerankSeed() int64            { return c.seed }
+// liveRerankCtx is a value-snapshot of the mutable Collection parameters
+// (coldTier, dim, bitWidth, seed) captured under c.mu.RLock() before the lock
+// is released. Using a snapshot eliminates the data race with ReQuantize, which
+// mutates c.bitWidth/c.seed under c.mu.Lock (B1b fix).
+//
+// rerankFloats delegates back to coldFloatsCollection via the live *Collection,
+// which handles its own locking internally (the coldRaw branch takes c.mu.RLock
+// to read c.history; coldRecompute calls EncodeBatch with no lock held).
+// No c.mu lock may be held by the caller when liveRerankCtx is used (B1b / lock ordering).
+type liveRerankCtx struct {
+	c           *Collection
+	coldTier    coldTierMode
+	dim         int
+	bitWidth    int
+	seed        int64
+	rerankDepth int
+}
 
-// rerankFloats dispatches to coldFloats with c as the context, preserving the
-// existing per-mode logic (coldRecompute / coldRaw / coldNone).
-func (c *Collection) rerankFloats(cands []candidate) ([][]float32, error) {
-	return coldFloatsCollection(c, cands)
+func (l *liveRerankCtx) rerankColdTier() coldTierMode { return l.coldTier }
+func (l *liveRerankCtx) rerankDim() int               { return l.dim }
+func (l *liveRerankCtx) rerankBitWidth() int          { return l.bitWidth }
+func (l *liveRerankCtx) rerankSeed() int64            { return l.seed }
+func (l *liveRerankCtx) rerankFloats(cands []candidate) ([][]float32, error) {
+	return coldFloatsCollection(l.c, cands)
 }
 
 // --- viewRerankCtx satisfies rerankContext for CollectionView ---
@@ -179,15 +194,6 @@ func coldFloatsCollection(c *Collection, cands []candidate) ([][]float32, error)
 	default:
 		return nil, errors.New("corkscrewdb: cold-tier mode does not support raw floats")
 	}
-}
-
-// coldFloats is the public-facing cold floats helper used by the live collection
-// search paths. It calls coldFloatsCollection.
-//
-// Deprecated alias retained so existing call sites (Collection.rerankFloats) compile
-// without change; new code should use the rerankContext interface.
-func coldFloats(c *Collection, cands []candidate) ([][]float32, error) {
-	return coldFloatsCollection(c, cands)
 }
 
 // decodeRawFloat32 decodes a little-endian byte slice back to a float32 slice.

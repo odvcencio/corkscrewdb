@@ -3,8 +3,11 @@ package corkscrewdb
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	walpkg "m31labs.dev/corkscrewdb/wal"
 	"m31labs.dev/turboquant"
@@ -665,5 +668,181 @@ func TestReQuantizeViewConsistency(t *testing.T) {
 		if !byteEqualQuantized(&expected, v.Quantized) {
 			t.Errorf("view v%d: code is not at new params after ReQuantize+view rebuild", vi)
 		}
+	}
+}
+
+// TestReQuantizeConcurrentRaceClean is the spec §12 mandated concurrent race test.
+// It verifies that concurrent SearchVector, At()+view-search, PutVector, and
+// ReQuantize operations produce no data race (go test -race) and no deadlock.
+//
+// Correctness property: no panic, no data race reported by the race detector,
+// and the goroutines exit cleanly within the deadline (no deadlock).
+func TestReQuantizeConcurrentRaceClean(t *testing.T) {
+	const dim = 16
+	const bw1 = 2
+	const seed1 = int64(11)
+	const bw2 = 4
+	const seed2 = int64(22)
+	const numSearchers = 4
+	const numWriters = 2
+	const numReQuantizers = 1
+
+	provider := &recomputeTestProvider{dim: dim}
+	dir := filepath.Join(t.TempDir(), "race_clean.csdb")
+	db, err := Open(dir, WithProvider(provider))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	c := db.Collection("race",
+		WithBitWidth(bw1),
+		WithQuantizerSeed(seed1),
+		WithRecomputeRawFromText(),
+		WithRerank(4),
+	)
+	if c.err != nil {
+		t.Fatalf("collection: %v", c.err)
+	}
+
+	// Pre-populate the corpus so searches find real candidates.
+	corpus := []string{
+		"apple fruit", "banana yellow", "cherry red",
+		"database vector", "quantized index", "rerank depth",
+		"concurrent safe", "drift check",
+	}
+	for i, txt := range corpus {
+		if err := c.Put(fmt.Sprintf("seed%d", i), Entry{Text: txt}); err != nil {
+			t.Fatalf("seed Put %d: %v", i, err)
+		}
+	}
+
+	// Compute a run duration. Cap at 5s so the concurrent test does not dominate
+	// the full suite runtime. Use the test deadline minus a safety margin when it
+	// would give a shorter window (CI with a tight timeout).
+	const maxRun = 5 * time.Second
+	runFor := maxRun
+	if dl, ok := t.Deadline(); ok {
+		rem := time.Until(dl) * 3 / 4
+		if rem > 500*time.Millisecond && rem < runFor {
+			runFor = rem
+		}
+	}
+
+	ctx := make(chan struct{})
+	time.AfterFunc(runFor, func() { close(ctx) })
+
+	errs := make(chan error, numSearchers+numWriters+numReQuantizers)
+
+	queryVec, err := provider.Encode("vector database")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+
+	// Goroutines: concurrent SearchVector (live path, uses liveRerankCtx snapshot).
+	for i := 0; i < numSearchers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx:
+					return
+				default:
+				}
+				_, err := c.SearchVector(queryVec, 3)
+				if err != nil {
+					errs <- fmt.Errorf("SearchVector: %w", err)
+					return
+				}
+			}
+		}()
+	}
+
+	// Goroutines: At() + view SearchVector (point-in-time snapshot, reads
+	// bitWidth/seed under c.mu.RLock per B1a fix).
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx:
+					return
+				default:
+				}
+				c.mu.RLock()
+				clk := c.clock.Current()
+				c.mu.RUnlock()
+				view := c.At(clk)
+				_, err := view.SearchVector(queryVec, 3)
+				if err != nil {
+					errs <- fmt.Errorf("view.SearchVector: %w", err)
+					return
+				}
+			}
+		}()
+	}
+
+	// Goroutines: concurrent PutVector with text (triggers write path + index rebuild).
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		idx := i
+		go func() {
+			defer wg.Done()
+			n := 0
+			for {
+				select {
+				case <-ctx:
+					return
+				default:
+				}
+				id := fmt.Sprintf("live%d-%d", idx, n)
+				txt := fmt.Sprintf("live write %d %d", idx, n)
+				if err := c.Put(id, Entry{Text: txt}); err != nil {
+					errs <- fmt.Errorf("Put: %w", err)
+					return
+				}
+				n++
+			}
+		}()
+	}
+
+	// Goroutine: periodic ReQuantize alternating between two param sets.
+	// This is the writer that mutates c.bitWidth/c.seed under c.mu.Lock.
+	wg.Add(numReQuantizers)
+	go func() {
+		defer wg.Done()
+		flip := false
+		for {
+			select {
+			case <-ctx:
+				return
+			default:
+			}
+			bw := bw2
+			seed := seed2
+			if flip {
+				bw = bw1
+				seed = seed1
+			}
+			flip = !flip
+			// ReQuantize holds c.mu.Lock for the duration; readers must not race.
+			if err := c.ReQuantize(bw, seed); err != nil {
+				// Failures from concurrent writes (e.g. drift) are expected and ignored;
+				// only unexpected errors (panics etc.) matter for the race test.
+				_ = err
+			}
+			// Brief yield to let readers proceed between ReQuantize calls.
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }

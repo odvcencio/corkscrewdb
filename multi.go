@@ -83,6 +83,26 @@ func (c *Collection) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 	}
 	c.mu.RUnlock()
 
+	// When coldRecompute and rerankDepth > 1, compute the dense channel with exact
+	// rerank before fusion (spec §8/§12). This mirrors CollectionView.SearchMulti.
+	// c.SearchVector internally builds a liveRerankCtx snapshot under c.mu.RLock,
+	// so no unsynchronized reads of mutable fields occur here (M-A / B1b fix).
+	c.mu.RLock()
+	snapColdTier := c.coldTier
+	snapRerankDepth := c.rerankDepth
+	c.mu.RUnlock()
+	if snapRerankDepth > 1 && snapColdTier == coldRecompute && len(dense) > 0 && idx != nil {
+		depth := k
+		if depth < multiOverfetch {
+			depth = multiOverfetch
+		}
+		rerankedDense, err := c.SearchVector(dense, depth, q.Filters...)
+		if err != nil {
+			return nil, err
+		}
+		return fuseChannelsPrecomputed(rerankedDense, dim, sparseSet, hydrateByID, c.sparseEnabled, dense, q, k)
+	}
+
 	return fuseChannels(idx, dim, sparseSet, hydrateByID, c.sparseEnabled, dense, q, k)
 }
 
