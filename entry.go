@@ -182,6 +182,19 @@ const (
 	IndexHNSW
 )
 
+// coldTierMode describes how raw vectors are stored (or not) for a collection.
+type coldTierMode int
+
+const (
+	// coldRaw is the v0.3.x default: raw vectors are stored in the raw store (.rvs).
+	coldRaw coldTierMode = iota
+	// coldNone omits the raw store (WithoutRawStore). No raw vectors are available.
+	coldNone
+	// coldRecompute drops the raw store and re-derives raw floats from stored text
+	// on demand (WithRecomputeRawFromText). Requires a deterministic provider.
+	coldRecompute
+)
+
 type collectionConfig struct {
 	bitWidth      int
 	seed          int64
@@ -191,6 +204,10 @@ type collectionConfig struct {
 	hnswSet       bool // true iff WithHNSWParams was supplied
 	rawStore      bool // default true; cleared by WithoutRawStore
 	rawStoreSet   bool
+	coldTier      coldTierMode
+	coldTierSet   bool
+	recomputeSet  bool // set by WithRecomputeRawFromText; survives later option application
+	rerankDepth   int
 	sparseEnabled bool
 	scorer        Scorer // optional injected scorer; flat path uses defaultScorer when nil
 }
@@ -252,6 +269,33 @@ func WithoutRawStore() CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
 		cfg.rawStore = false
 		cfg.rawStoreSet = true
+		cfg.coldTier = coldNone
+		cfg.coldTierSet = true
+	})
+}
+
+// WithRecomputeRawFromText opts into cold-tier recompute mode: the raw vector
+// store is dropped and raw floats are re-derived from Version.Text on demand
+// for exact rerank. Requires a deterministic embedding provider. Mutually
+// exclusive with WithoutRawStore. (Plan Task 2 / Resolution 4.)
+func WithRecomputeRawFromText() CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.rawStore = false
+		// rawStoreSet is intentionally NOT set here (NIT N3): WithoutRawStore is the
+		// unique setter of rawStoreSet, preserving Fix-2 silent-open reasoning.
+		cfg.coldTier = coldRecompute
+		cfg.coldTierSet = true
+		cfg.recomputeSet = true // survives if WithoutRawStore is applied later
+	})
+}
+
+// WithRerank sets the rerank depth for a collection. When rerankDepth > 0 and
+// the collection is in coldRecompute mode, the search path overfetches
+// rerankDepth candidates and re-scores them with exact floats before returning
+// the top-k. (Resolution 2; read path wired in Task 4.)
+func WithRerank(depth int) CollectionOption {
+	return collectionOptionFunc(func(cfg *collectionConfig) {
+		cfg.rerankDepth = depth
 	})
 }
 

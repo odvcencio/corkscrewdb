@@ -31,6 +31,8 @@ type Collection struct {
 	sparseEnabled   bool
 	indexType       IndexType
 	hnsw            HNSWParams
+	coldTier        coldTierMode // raw/none/recompute (Cluster A, Task 2)
+	rerankDepth     int          // overfetch depth for exact rerank (Task 4 wires the read path)
 
 	scorer Scorer // optional injected scorer (runtime-only, not persisted in meta)
 
@@ -65,6 +67,8 @@ type CollectionView struct {
 	remote        remoteClient
 	useAt         bool
 	atClock       uint64
+	coldTier      coldTierMode
+	rerankDepth   int
 }
 
 func (c *Collection) Put(id string, entry Entry) error {
@@ -610,6 +614,8 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		history:       make(map[string][]Version),
 		sparseSet:     make(map[string]*SparseVector),
 		sparseEnabled: c.sparseEnabled,
+		coldTier:      c.coldTier,
+		rerankDepth:   c.rerankDepth,
 	}
 
 	c.mu.RLock()

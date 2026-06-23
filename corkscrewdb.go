@@ -85,6 +85,7 @@ type DB struct {
 	path           string
 	provider       EmbeddingProvider
 	encoder        *encoder
+	providerSet    bool // true iff WithProvider was explicitly passed to Open (M2)
 	walSegmentSize int64
 	peers          []string
 	token          string
@@ -144,8 +145,9 @@ type manifest struct {
 }
 
 type embeddingConfig struct {
-	ID  string `json:"id"`
-	Dim int    `json:"dim"`
+	ID                 string `json:"id"`
+	Dim                int    `json:"dim"`
+	BackendFingerprint string `json:"backend_fingerprint,omitempty"`
 }
 
 type collectionMeta struct {
@@ -156,6 +158,8 @@ type collectionMeta struct {
 	SparseEnabled bool        `json:"sparse_enabled"`
 	IndexType     string      `json:"index_type"` // "flat" | "hnsw"
 	HNSW          *HNSWParams `json:"hnsw,omitempty"`
+	ColdTier      string      `json:"cold_tier,omitempty"`    // "raw" | "none" | "recompute"; absent = v0.3.x compat
+	RerankDepth   int         `json:"rerank_depth,omitempty"` // 0 = no rerank (default)
 }
 
 type providerIdentifier interface {
@@ -195,6 +199,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 		path:           cleanPath,
 		provider:       cfg.provider,
 		encoder:        newEncoder(cfg.provider),
+		providerSet:    cfg.providerSet,
 		walSegmentSize: cfg.walSegmentSize,
 		peers:          append([]string(nil), manifestData.Peers...),
 		token:          cfg.token,
@@ -332,12 +337,64 @@ func (db *DB) Collection(name string, opts ...CollectionOption) *Collection {
 		return &Collection{db: db, name: name, encoder: db.encoder, err: errors.New("corkscrewdb: quantizer seed must be >= 0")}
 	}
 
+	// Mutual exclusion: WithRecomputeRawFromText + WithoutRawStore is invalid
+	// regardless of the order the options are applied. recomputeSet is a sticky
+	// flag that survives even if WithoutRawStore overrides cfg.coldTier afterward.
+	if cfg.recomputeSet && cfg.rawStoreSet {
+		return &Collection{
+			db:      db,
+			name:    name,
+			encoder: db.encoder,
+			err:     fmt.Errorf("corkscrewdb: WithRecomputeRawFromText and WithoutRawStore are mutually exclusive"),
+		}
+	}
+
+	// Recompute create gate (Resolution 4, plan ~:248-267).
+	if cfg.coldTier == coldRecompute {
+		// (a) Active provider must be deterministic.
+		if !providerDeterministic(db.encoder) {
+			return &Collection{
+				db:      db,
+				name:    name,
+				encoder: db.encoder,
+				err:     ErrRecomputeRequiresDeterministicProvider,
+			}
+		}
+		// (b) Reject the silent builtin fallback when no explicit WithProvider was given.
+		// If providerSet==false, the default config path was taken (intended=Eos).
+		// If the active provider is the builtin (ProviderID=="builtin-deterministic-v1"),
+		// it means newDefaultProvider() fell back silently — reject it.
+		if !db.providerSet {
+			if pid, ok := db.provider.(providerIdentifier); ok {
+				if pid.ProviderID() == "builtin-deterministic-v1" {
+					return &Collection{
+						db:      db,
+						name:    name,
+						encoder: db.encoder,
+						err:     ErrRecomputeRequiresDeterministicProvider,
+					}
+				}
+			}
+		}
+	}
+
 	meta := collectionMeta{
 		BitWidth:      cfg.bitWidth,
 		Seed:          cfg.seed,
 		RawStore:      cfg.rawStore,
 		SparseEnabled: cfg.sparseEnabled,
 		IndexType:     indexTypeString(cfg.indexType),
+		RerankDepth:   cfg.rerankDepth,
+	}
+	// Map cold-tier mode to manifest string.
+	switch cfg.coldTier {
+	case coldRecompute:
+		meta.ColdTier = "recompute"
+		meta.RawStore = false // recompute never uses the raw store
+	case coldNone:
+		meta.ColdTier = "none"
+	default: // coldRaw
+		meta.ColdTier = "raw"
 	}
 	// Persist HNSW params whenever the index is HNSW OR WithHNSWParams was
 	// explicitly supplied. A flat collection created WithHNSWParams must retain
@@ -622,6 +679,17 @@ func (db *DB) persistCollectionMeta(name string, c *Collection) error {
 	meta.RawStore = c.rawStoreEnabled
 	meta.SparseEnabled = c.sparseEnabled
 	meta.IndexType = indexTypeString(c.indexType)
+	meta.RerankDepth = c.rerankDepth
+	// Persist cold-tier mode.
+	switch c.coldTier {
+	case coldRecompute:
+		meta.ColdTier = "recompute"
+		meta.RawStore = false
+	case coldNone:
+		meta.ColdTier = "none"
+	default: // coldRaw
+		meta.ColdTier = "raw"
+	}
 	// Persist HNSW params for an HNSW collection, OR for a flat collection that
 	// carries non-default params (created WithHNSWParams). Erasing them here would
 	// make a later RebuildIndex(IndexHNSW) silently fall back to defaults (Bug 6).
@@ -924,6 +992,24 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 	if meta.HNSW != nil {
 		hnsw = *meta.HNSW
 	}
+	// Derive coldTier from the manifest field (back-compat: absent = derive from RawStore).
+	var tier coldTierMode
+	switch meta.ColdTier {
+	case "recompute":
+		tier = coldRecompute
+	case "none":
+		tier = coldNone
+	case "raw":
+		tier = coldRaw
+	default:
+		// v0.3.x manifest has no ColdTier field. Derive from RawStore.
+		if meta.RawStore {
+			tier = coldRaw
+		} else {
+			tier = coldNone
+		}
+	}
+
 	coll := &Collection{
 		db:              db,
 		name:            name,
@@ -940,8 +1026,11 @@ func (db *DB) newCollection(name string, meta collectionMeta) (*Collection, erro
 		wal:             manager,
 		dim:             meta.Dim,
 		viewCache:       newViewLRU(viewCacheSize),
+		coldTier:        tier,
+		rerankDepth:     meta.RerankDepth,
 	}
-	if meta.RawStore {
+	// Open the raw store only for coldRaw mode. Skip for coldNone and coldRecompute.
+	if tier == coldRaw {
 		store, err := rawstore.Open(db.rawStoreDir(name))
 		if err != nil {
 			_ = manager.Close()
@@ -1015,10 +1104,13 @@ func applyRuntimeConfig(m *manifest, provider EmbeddingProvider, peers []string,
 		m.Collections = make(map[string]collectionMeta)
 	}
 	desired := describeEmbeddingProvider(provider)
+	// Decompose the comparison into explicit {ID, Dim} fields so that the new
+	// BackendFingerprint field (empty in v0.3.x manifests) cannot break reopen of
+	// existing collections. Task 5 will add fingerprint enforcement separately.
 	switch {
 	case m.Embedding.ID == "":
 		m.Embedding = desired
-	case m.Embedding != desired:
+	case m.Embedding.ID != desired.ID || m.Embedding.Dim != desired.Dim:
 		return fmt.Errorf("corkscrewdb: embedding config mismatch: manifest=%s/%d runtime=%s/%d", m.Embedding.ID, m.Embedding.Dim, desired.ID, desired.Dim)
 	}
 	if len(m.Shards) > 0 || len(shards) > 0 {
@@ -1047,10 +1139,16 @@ func describeEmbeddingProvider(provider EmbeddingProvider) embeddingConfig {
 	if provider == nil {
 		return embeddingConfig{ID: "none", Dim: 0}
 	}
+	cfg := embeddingConfig{Dim: provider.Dim()}
 	if named, ok := provider.(providerIdentifier); ok {
-		return embeddingConfig{ID: named.ProviderID(), Dim: provider.Dim()}
+		cfg.ID = named.ProviderID()
+	} else {
+		cfg.ID = reflect.TypeOf(provider).String()
 	}
-	return embeddingConfig{ID: reflect.TypeOf(provider).String(), Dim: provider.Dim()}
+	if fp, ok := provider.(backendFingerprintProvider); ok {
+		cfg.BackendFingerprint = fp.BackendFingerprint()
+	}
+	return cfg
 }
 
 func sanitizePeers(peers []string) []string {
