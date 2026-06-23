@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -195,26 +196,42 @@ func TestRecomputeManifestRoundTrip(t *testing.T) {
 }
 
 // TestRecomputeMutualExclusion verifies that combining WithRecomputeRawFromText
-// and WithoutRawStore produces a typed config error on first use.
+// and WithoutRawStore produces a config error regardless of option order.
 func TestRecomputeMutualExclusion(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "mutex.csdb")
 	provider := &deterministicMockProvider{&mockProvider{dim: 8}}
-	db, err := Open(dir, WithProvider(provider))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
 
-	c := db.Collection("x", WithRecomputeRawFromText(), WithoutRawStore())
-	if c.err == nil {
-		t.Fatal("expected error for WithRecomputeRawFromText+WithoutRawStore, got nil")
+	cases := []struct {
+		name string
+		opts []CollectionOption
+	}{
+		{
+			name: "recompute_then_without_raw",
+			opts: []CollectionOption{WithRecomputeRawFromText(), WithoutRawStore()},
+		},
+		{
+			name: "without_raw_then_recompute",
+			opts: []CollectionOption{WithoutRawStore(), WithRecomputeRawFromText()},
+		},
 	}
-	if !errors.Is(c.err, ErrRecomputeMultiVectorUnsupported) {
-		// check it's some config error mentioning the conflict
-		if c.err == nil {
-			t.Fatal("err is nil")
-		}
-		// Any error is acceptable — it must not be nil
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "mutex.csdb")
+			db, err := Open(dir, WithProvider(provider))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			opts := append([]CollectionOption{WithBitWidth(2)}, tc.opts...)
+			c := db.Collection("x", opts...)
+			if c.err == nil {
+				t.Fatal("expected error for WithRecomputeRawFromText+WithoutRawStore, got nil")
+			}
+			if !strings.Contains(c.err.Error(), "mutually exclusive") {
+				t.Fatalf("err = %q does not mention mutual exclusion", c.err)
+			}
+		})
 	}
 }
 
