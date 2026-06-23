@@ -289,10 +289,11 @@ func WithRecomputeRawFromText() CollectionOption {
 	})
 }
 
-// WithRerank sets the rerank depth for a collection. When rerankDepth > 0 and
-// the collection is in coldRecompute mode, the search path overfetches
-// rerankDepth candidates and re-scores them with exact floats before returning
-// the top-k. (Resolution 2; read path wired in Task 4.)
+// WithRerank sets the rerank depth for a collection. When rerankDepth > 1 and
+// the collection is in coldRecompute or coldRaw (with raw store) mode, the
+// search path overfetches k*rerankDepth candidates and re-scores them with
+// exact float dot products before returning the top-k. Depth ≤ 1 is a no-op
+// (codes-only scoring). (Resolution 2; read path wired in Task 4.)
 func WithRerank(depth int) CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) {
 		cfg.rerankDepth = depth

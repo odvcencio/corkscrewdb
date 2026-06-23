@@ -422,19 +422,17 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
 	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
 	// overfetch kEff candidates and exact rerank.
-	// storedCode = &flat.entries[h.Index].qv is a pointer into the live slice.
-	// NOTE (review N2 — intentional): rerankExact (which calls EncodeBatch, a
-	// potentially slow model forward pass) runs WHILE flat.mu.RLock() is held.
-	// This is the CHOSEN design: RLock is reader-shared so it only blocks
-	// concurrent index WRITERs (flat.mu.Lock()), not other readers. The pointer
-	// storedCode = &flat.entries[h.Index].qv is valid only under this RLock;
-	// releasing early would require copying the code by value into candidate.
+	// storedCode is copied BY VALUE under flat.mu.RLock(). The lock is released
+	// BEFORE calling rerankExact so no lock is held during EncodeBatch / getRaw.
+	// This avoids the AB-BA deadlock: putVector holds c.mu.Lock then takes
+	// flat.mu.Lock (via index.Add); the coldRaw branch takes c.mu.RLock inside
+	// rerankExact. Releasing flat.mu before rerankExact breaks the cycle.
 	rerankEnabled := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
 	if rerankEnabled {
 		kEff := k * c.rerankDepth
 		flat.mu.RLock()
-		defer flat.mu.RUnlock()
 		if len(flat.entries) == 0 {
+			flat.mu.RUnlock()
 			return nil
 		}
 		pq := flat.quantizer.PrepareQuery(query)
@@ -453,14 +451,14 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 			entry := &flat.entries[h.Index] // identity mapping
 			cands = append(cands, candidate{
 				id:             entry.id,
-				storedCode:     &entry.qv, // pointer valid under RLock (N2)
+				storedCode:     entry.qv, // by-value copy; self-contained after lock release
 				text:           entry.text,
 				quantizedScore: h.Score,
 				version:        entry.version,
 				metadata:       cloneMetadata(entry.metadata),
 			})
 		}
-		// rerankExact runs under RLock (pointer validity; see N2 above).
+		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
 		reranked := rerankExact(c, cands, query, k)
 		return candidatesToSearchResults(reranked)
 	}
@@ -506,9 +504,8 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
 	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
 	// overfetch kEff and exact rerank.
-	// NOTE (review N2): storedCode = &flat.entries[rowToEntry[h.Index]].qv is a
-	// pointer into the live slice. rerankExact runs UNDER flat.mu.RLock() so the
-	// pointer remains valid through the forward pass (RLock is reader-shared).
+	// storedCode is copied BY VALUE under flat.mu.RLock(); the lock is released
+	// before rerankExact so no lock is held during EncodeBatch / getRaw.
 	rerankEnabled2 := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
 	kFetch := k
 	if rerankEnabled2 {
@@ -541,7 +538,6 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 		flat.mu.RUnlock()
 	}
 	flat.mu.RLock()
-	defer flat.mu.RUnlock()
 
 	if rerankEnabled2 {
 		cands := make([]candidate, 0, len(hits))
@@ -549,14 +545,14 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 			entry := flat.entries[rowToEntry[h.Index]]
 			cands = append(cands, candidate{
 				id:             entry.id,
-				storedCode:     &entry.qv, // pointer valid under RLock (N2)
+				storedCode:     entry.qv, // by-value copy; self-contained after lock release
 				text:           entry.text,
 				quantizedScore: h.Score,
 				version:        entry.version,
 				metadata:       cloneMetadata(entry.metadata),
 			})
 		}
-		// rerankExact runs under RLock (pointer validity; see N2 above).
+		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
 		reranked := rerankExact(c, cands, query, k)
 		return candidatesToSearchResults(reranked)
 	}
@@ -572,6 +568,7 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 			Version:  entry.version,
 		})
 	}
+	flat.mu.RUnlock()
 	sortSearchResults(results)
 	return results
 }

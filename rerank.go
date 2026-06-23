@@ -11,9 +11,14 @@ import (
 
 // candidate is a prospective search result carrying the stored quantized code
 // and source text needed for the drift-check exact rerank (§5, Task 4).
+// storedCode is a BY-VALUE copy of the IPQuantized struct. Copying the struct
+// copies the MSE/Signs slice headers, which reference immutable byte arrays
+// (re-quantize always makes NEW slices, never mutates in place). A by-value
+// candidate is therefore self-contained and safe to use after all locks are
+// released — no lock must be held during rerankExact.
 type candidate struct {
 	id             string
-	storedCode     *turboquant.IPQuantized // pointer into live flat slice; valid under RLock
+	storedCode     turboquant.IPQuantized // by-value copy; self-contained after construction
 	text           string
 	quantizedScore float32
 	version        uint64
@@ -65,22 +70,28 @@ func coldFloats(c *Collection, cands []candidate) ([][]float32, error) {
 		// Read raw blobs for each candidate by looking up their version's RawHash
 		// from the collection history (by ID+lamport clock). Best-effort per-candidate;
 		// missing blobs result in nil entries (caller treats as quantized-score fallback).
-		out := make([][]float32, len(cands))
+		//
+		// All c.history map reads are done UNDER c.mu.RLock() to avoid a data race
+		// with writers that do c.history[id]=... under c.mu.Lock(). We collect all
+		// hashes first, then release the lock before doing any I/O.
+		hashes := make([][]byte, len(cands))
 		c.mu.RLock()
-		hist := c.history
-		c.mu.RUnlock()
 		for i, cand := range cands {
-			versions := hist[cand.id]
-			var hash []byte
+			versions := c.history[cand.id]
 			for _, v := range versions {
 				if v.Tombstone {
 					continue
 				}
 				if v.LamportClock == cand.version && len(v.RawHash) > 0 {
-					hash = v.RawHash
+					hashes[i] = v.RawHash
 					break
 				}
 			}
+		}
+		c.mu.RUnlock()
+
+		out := make([][]float32, len(cands))
+		for i, hash := range hashes {
 			if len(hash) == 0 {
 				continue
 			}
@@ -147,6 +158,19 @@ func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []cand
 		}
 		return cands
 	}
+	// Whole-batch length mismatch from a misbehaving provider — treat as failure.
+	if len(raws) != len(cands) {
+		sort.Slice(cands, func(i, j int) bool {
+			if cands[i].quantizedScore != cands[j].quantizedScore {
+				return cands[i].quantizedScore > cands[j].quantizedScore
+			}
+			return cands[i].id < cands[j].id
+		})
+		if len(cands) > k {
+			cands = cands[:k]
+		}
+		return cands
+	}
 
 	q := turboquant.NewIPWithSeed(c.dim, c.bitWidth, c.seed)
 
@@ -156,6 +180,12 @@ func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []cand
 		raw := raws[i]
 		if len(raw) == 0 {
 			// Empty text, zero vector, or missing raw — fallback.
+			scores[i] = cand.quantizedScore
+			continue
+		}
+		// Per-candidate wrong-length guard: a misbehaving provider could return a
+		// vector of the wrong dimension. Don't index raw[j] on a wrong-length vector.
+		if len(raw) != c.dim {
 			scores[i] = cand.quantizedScore
 			continue
 		}
@@ -172,8 +202,10 @@ func rerankExact(c *Collection, cands []candidate, qvec []float32, k int) []cand
 			continue
 		}
 		// Drift-check: requantize the recomputed raw and compare byte-for-byte.
+		// Guard: an empty storedCode (zero MSE/Signs) means no stored code is
+		// available — treat as MISMATCH / fallback, not a spurious MATCH.
 		recomputed := q.Quantize(raw)
-		if cand.storedCode == nil || !byteEqualQuantized(&recomputed, cand.storedCode) {
+		if len(cand.storedCode.MSE) == 0 || !byteEqualQuantized(&recomputed, &cand.storedCode) {
 			// MISMATCH — fallback.
 			scores[i] = cand.quantizedScore
 			continue

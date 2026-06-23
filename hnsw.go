@@ -823,18 +823,18 @@ func removeOneFromSlice(s []int32, val int32) []int32 {
 }
 
 // searchCandidates runs the same HNSW traversal as Search but emits []candidate
-// carrying each surviving hit's stored qv (as a pointer into the live flat slice),
-// text, and quantizedScore (the InnerProductPrepared it computes anyway), along
-// with the prepared query source vector so rerankExact does not re-encode it.
+// carrying each surviving hit's stored qv (BY-VALUE copy), text, and
+// quantizedScore (the InnerProductPrepared it computes anyway), along with the
+// prepared query source vector so rerankExact does not re-encode it.
 //
 // This helper exists because the public Search discards qv and text, which are
 // needed for the drift-check exact rerank (Task 4 / §5). Keep Search itself
 // UNCHANGED for the non-rerank path.
 //
-// N1 (review guard): the returned []candidate slice carries storedCode pointers
-// into h.flat.entries, which are valid as long as h.flat.mu.RLock() is held.
-// The caller (collection.go flatSearchLive / searchVectorLocal HNSW branch) is
-// responsible for holding RLock through rerankExact — see N2 in flatSearchLive.
+// The returned []candidate slice is self-contained: storedCode is copied by
+// value under h.flat.mu.RLock() before the lock is released. The caller
+// (collection.go searchVectorLocal HNSW branch) calls rerankExact with NO lock
+// held — this is correct and safe.
 func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOption) ([]candidate, []float32) {
 	if k <= 0 {
 		return nil, query
@@ -912,8 +912,9 @@ func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOpt
 		}
 	}
 
-	// Build candidates from the surviving results, resolving storedCode pointers
-	// now while h.flat.mu.RLock() is held.
+	// Build candidates from the surviving results, copying storedCode BY VALUE
+	// while h.flat.mu.RLock() is held. After this loop the lock will be released
+	// (via defer) and candidates are fully self-contained.
 	cands := make([]candidate, 0, resultHeap.Len())
 	for _, r := range *resultHeap {
 		pos, ok := h.flat.idIndex[r.ID]
@@ -923,7 +924,7 @@ func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOpt
 		entry := &h.flat.entries[pos]
 		cands = append(cands, candidate{
 			id:             entry.id,
-			storedCode:     &entry.qv,
+			storedCode:     entry.qv, // by-value copy; safe after lock release
 			text:           entry.text,
 			quantizedScore: r.Score,
 			version:        entry.version,
@@ -934,8 +935,10 @@ func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOpt
 }
 
 // searchResultsToCandidates converts a []SearchResult (from flat scan fallback)
-// into []candidate by looking up qv pointers in the flat index.
-// Caller must hold h.flat.mu.RLock().
+// into []candidate by copying qv BY VALUE from the flat index under its own
+// RLock. It acquires h.flat.mu.RLock() internally, so it must be called WITHOUT
+// h.flat.mu held (reentrant RLock can deadlock vs a pending writer). The
+// returned candidates are self-contained; no lock needs to be held after return.
 func searchResultsToCandidates(h *hnswIndex, results []SearchResult) []candidate {
 	h.flat.mu.RLock()
 	defer h.flat.mu.RUnlock()
@@ -948,7 +951,7 @@ func searchResultsToCandidates(h *hnswIndex, results []SearchResult) []candidate
 		entry := &h.flat.entries[pos]
 		cands = append(cands, candidate{
 			id:             entry.id,
-			storedCode:     &entry.qv,
+			storedCode:     entry.qv, // by-value copy; safe after lock release
 			text:           entry.text,
 			quantizedScore: r.Score,
 			version:        entry.version,

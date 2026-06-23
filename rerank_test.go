@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"m31labs.dev/turboquant"
 )
@@ -424,12 +425,13 @@ func TestRerankScaleMix(t *testing.T) {
 }
 
 // TestRerankRecallMonotonicAndSuperset verifies recall monotonicity:
-//   - reranked results ≥ codes-only recall
-//   - reranked set ⊇ codes-only top-k (the reranked set is a superset of
-//     codes-only when both are from the same corpus and same query)
+//   - reranked recall ≥ codes-only recall (depth 4 ≥ base, depth 10 ≥ depth 4)
+//   - reranked top-k ⊇ codes-only top-k (superset of base IDs)
 //   - recall is non-decreasing with increasing rerankDepth
 //
-// Uses a corpus of 30 vectors and a query, checking top-5 recall.
+// Uses a labeled corpus of 30 vectors with a known best-match query (the text
+// of id7 itself must be in ground-truth top-k). The test FAILS if rerank ever
+// regresses recall.
 func TestRerankRecallMonotonicAndSuperset(t *testing.T) {
 	const dim = 16
 	const n = 30
@@ -437,7 +439,7 @@ func TestRerankRecallMonotonicAndSuperset(t *testing.T) {
 
 	provider := newDeterministicFixedProvider(dim)
 
-	// Build a recompute collection with no rerank (codes-only baseline).
+	// Build a recompute collection with no rerank (codes-only baseline, depth=1).
 	dirBase := filepath.Join(t.TempDir(), "base.csdb")
 	dbBase, err := Open(dirBase, WithProvider(provider))
 	if err != nil {
@@ -471,6 +473,8 @@ func TestRerankRecallMonotonicAndSuperset(t *testing.T) {
 		t.Fatalf("d10: %v", cD10.err)
 	}
 
+	// Labeled corpus: each document text is distinct; ground truth is all docs
+	// since we can compute exact scores via the deterministic provider.
 	texts := make([]string, n)
 	for i := range texts {
 		texts[i] = fmt.Sprintf("document number %d with some content", i)
@@ -491,11 +495,36 @@ func TestRerankRecallMonotonicAndSuperset(t *testing.T) {
 
 	query, _ := provider.Encode("document number 7 content")
 
-	resBase, _ := cBase.SearchVector(query, k)
-	resD4, _ := cD4.SearchVector(query, k)
-	resD10, _ := cD10.SearchVector(query, k)
+	// Build ground-truth top-k by scoring all vectors with plain float dot.
+	allVecs := make([][]float32, n)
+	for i, txt := range texts {
+		v, _ := provider.Encode(txt)
+		allVecs[i] = v
+	}
+	type scoredID struct {
+		id    string
+		score float32
+	}
+	allScored := make([]scoredID, n)
+	for i, v := range allVecs {
+		allScored[i] = scoredID{id: fmt.Sprintf("id%d", i), score: plainDot(query, v)}
+	}
+	sort.Slice(allScored, func(i, j int) bool { return allScored[i].score > allScored[j].score })
+	groundTruth := make(map[string]bool, k)
+	for i := 0; i < k && i < len(allScored); i++ {
+		groundTruth[allScored[i].id] = true
+	}
 
-	idsFor := func(results []SearchResult) map[string]bool {
+	recallOf := func(results []SearchResult) int {
+		hits := 0
+		for _, r := range results {
+			if groundTruth[r.ID] {
+				hits++
+			}
+		}
+		return hits
+	}
+	idsOf := func(results []SearchResult) map[string]bool {
 		m := make(map[string]bool)
 		for _, r := range results {
 			m[r.ID] = true
@@ -503,34 +532,176 @@ func TestRerankRecallMonotonicAndSuperset(t *testing.T) {
 		return m
 	}
 
-	baseIDs := idsFor(resBase)
-	d4IDs := idsFor(resD4)
-	d10IDs := idsFor(resD10)
+	resBase, err2 := cBase.SearchVector(query, k)
+	if err2 != nil {
+		t.Fatalf("base SearchVector: %v", err2)
+	}
+	resD4, err2 := cD4.SearchVector(query, k)
+	if err2 != nil {
+		t.Fatalf("d4 SearchVector: %v", err2)
+	}
+	resD10, err2 := cD10.SearchVector(query, k)
+	if err2 != nil {
+		t.Fatalf("d10 SearchVector: %v", err2)
+	}
 
-	// Reranked sets must be supersets of or equal to codes-only
-	// (up to k results — both return the same k).
-	// Formally: the set returned by rerank search is drawn from a WIDER candidate
-	// pool (k*depth candidates) so recall can only improve or stay equal.
-	// Here we just verify the returned sets have the same size k and scores are valid.
 	if len(resBase) == 0 || len(resD4) == 0 || len(resD10) == 0 {
 		t.Fatal("expected non-empty results for all depths")
 	}
 
-	// Count overlap: d4 ⊇ base is not guaranteed per-se (rerank can reorder),
-	// but the recall (true positives among top-k) must be non-decreasing.
-	// Since we don't have ground-truth labels here, we verify that d10 never
-	// has FEWER unique IDs overlapping with d4 than base does with d4.
-	// (Pragmatic: we verify the sets are valid and non-empty.)
-	_ = baseIDs
-	_ = d4IDs
-	_ = d10IDs
+	recBase := recallOf(resBase)
+	recD4 := recallOf(resD4)
+	recD10 := recallOf(resD10)
 
-	// Verify that scores are sorted descending.
+	// Recall must be non-decreasing with depth.
+	if recD4 < recBase {
+		t.Errorf("recall regression: depth=4 recall %d < codes-only recall %d (ground truth k=%d)", recD4, recBase, k)
+	}
+	if recD10 < recD4 {
+		t.Errorf("recall regression: depth=10 recall %d < depth=4 recall %d", recD10, recD4)
+	}
+
+	// Ground-truth overlap: ids in codes-only that are also in ground truth must
+	// also appear in reranked results (since reranked draws from a strictly wider
+	// candidate pool and then scores them exactly — a ground-truth item present
+	// in the codes-only top-k was retrieved in the overfetch pool, so exact
+	// scoring can only keep or elevate it).
+	baseIDs := idsOf(resBase)
+	d4IDs := idsOf(resD4)
+	d10IDs := idsOf(resD10)
+	for id := range baseIDs {
+		if !groundTruth[id] {
+			continue // not a ground-truth item; reranking may legitimately drop it
+		}
+		if !d4IDs[id] {
+			t.Errorf("ground-truth superset violation: id %q is a ground-truth item in codes-only top-%d but not in depth-4 top-%d", id, k, k)
+		}
+		if !d10IDs[id] {
+			t.Errorf("ground-truth superset violation: id %q is a ground-truth item in codes-only top-%d but not in depth-10 top-%d", id, k, k)
+		}
+	}
+
+	// Scores must be sorted descending.
 	for name, res := range map[string][]SearchResult{"base": resBase, "d4": resD4, "d10": resD10} {
 		for i := 1; i < len(res); i++ {
 			if res[i].Score > res[i-1].Score+1e-6 {
 				t.Errorf("%s: results not sorted descending at index %d: %f > %f", name, i, res[i].Score, res[i-1].Score)
 			}
+		}
+	}
+}
+
+// TestRerankConcurrentReadWriteNoDeadlock is a permanent regression guard for
+// the BLOCKING AB-BA deadlock (flat.mu→c.mu lock order in coldRaw + concurrent
+// putVector that takes c.mu→flat.mu). It also guards the MAJOR data race on
+// c.history reads outside the lock.
+//
+// A coldRaw+WithRerank(8) collection is exercised under concurrent Search and
+// PutVector goroutines for a bounded duration. The test must complete (no
+// deadlock) and pass under -race (no map race). A timeout derived from
+// t.Deadline() ensures a regression FAILS loudly instead of hanging forever.
+func TestRerankConcurrentReadWriteNoDeadlock(t *testing.T) {
+	const dim = 16
+	const rerankDepth = 8
+
+	provider := newDeterministicFixedProvider(dim)
+
+	dir := filepath.Join(t.TempDir(), "conc.csdb")
+	db, err := Open(dir, WithProvider(provider))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// coldRaw + WithRerank triggers the exact deadlock path: coldFloats coldRaw
+	// branch takes c.mu.RLock inside rerankExact, while putVector holds c.mu.Lock
+	// and then takes flat.mu.Lock.
+	c := db.Collection("col", WithBitWidth(2), WithQuantizerSeed(42), WithRerank(rerankDepth))
+	if c.err != nil {
+		t.Fatalf("collection: %v", c.err)
+	}
+
+	// Pre-populate so searches actually find candidates.
+	texts := []string{
+		"the quick brown fox", "jumps over the lazy dog",
+		"hello world", "search result candidate",
+		"vector database embedded", "quantized index",
+		"rerank depth test", "concurrent read write",
+	}
+	for i, txt := range texts {
+		if err := c.Put(fmt.Sprintf("seed%d", i), Entry{Text: txt}); err != nil {
+			t.Fatalf("seed Put: %v", err)
+		}
+	}
+
+	query, _ := provider.Encode("search result candidate")
+
+	// Compute a deadline: use t.Deadline if available (minus a safety margin);
+	// otherwise run for 3 seconds.
+	done := make(chan struct{})
+	deadline, hasDeadline := t.Deadline()
+	go func() {
+		if hasDeadline {
+			remaining := time.Until(deadline)
+			runFor := remaining * 3 / 4
+			if runFor < 500*time.Millisecond {
+				runFor = 500 * time.Millisecond
+			}
+			time.Sleep(runFor)
+		} else {
+			time.Sleep(3 * time.Second)
+		}
+		close(done)
+	}()
+
+	const numReaders = 4
+	const numWriters = 2
+	errs := make(chan error, numReaders+numWriters)
+
+	// Readers: continuously search.
+	for i := 0; i < numReaders; i++ {
+		go func(id int) {
+			for {
+				select {
+				case <-done:
+					errs <- nil
+					return
+				default:
+				}
+				_, err := c.SearchVector(query, 3)
+				if err != nil {
+					errs <- fmt.Errorf("reader %d SearchVector: %w", id, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	// Writers: continuously upsert entries with text (triggers raw store + c.history update).
+	for i := 0; i < numWriters; i++ {
+		go func(id int) {
+			j := 0
+			for {
+				select {
+				case <-done:
+					errs <- nil
+					return
+				default:
+				}
+				txt := fmt.Sprintf("writer %d item %d concurrent", id, j)
+				if err := c.Put(fmt.Sprintf("w%d_%d", id, j%4), Entry{Text: txt}); err != nil {
+					errs <- fmt.Errorf("writer %d Put: %w", id, err)
+					return
+				}
+				j++
+			}
+		}(i)
+	}
+
+	// Collect results from all goroutines.
+	for i := 0; i < numReaders+numWriters; i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
 		}
 	}
 }
