@@ -124,9 +124,31 @@ func encodeWriteText(c *Collection, text string) ([]float32, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Guard against a misbehaving provider returning (nil, nil).
+		if len(encoded) == 0 {
+			return nil, errors.New("corkscrewdb: EncodeBatch returned no vectors")
+		}
 		return encoded[0], nil
 	}
 	return c.encoder.Encode(text)
+}
+
+// candidatesToSearchResults converts a reranked []candidate into []SearchResult.
+// The candidate's quantizedScore field carries the final (possibly exact) score
+// after rerankExact.
+func candidatesToSearchResults(cands []candidate) []SearchResult {
+	results := make([]SearchResult, 0, len(cands))
+	for _, cand := range cands {
+		results = append(results, SearchResult{
+			ID:       cand.id,
+			Score:    cand.quantizedScore,
+			Text:     cand.text,
+			Metadata: cloneMetadata(cand.metadata),
+			Version:  cand.version,
+		})
+	}
+	sortSearchResults(results)
+	return results
 }
 
 func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOption) error {
@@ -355,6 +377,16 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	// HNSW owns its own traversal (§10); only the flat path routes through Scorer.
 	flat, isFlat := idx.(*index)
 	if !isFlat {
+		// HNSW path: when coldRecompute or coldRaw (with raw store) and
+		// rerankDepth > 1, overfetch via searchCandidates then exact rerank (Task 4).
+		hnsw, isHNSW := idx.(*hnswIndex)
+		rerankEnabled := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+		if isHNSW && rerankEnabled {
+			kEff := k * c.rerankDepth
+			cands, qvec := hnsw.searchCandidates(query, kEff, filters)
+			reranked := rerankExact(c, cands, qvec, k)
+			return candidatesToSearchResults(reranked), nil
+		}
 		return idx.Search(query, k, filters), nil
 	}
 	return c.flatSearchViaScorer(flat, query, k, filters), nil
@@ -388,6 +420,51 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 // reproducing the dense corpusSnapshot exclusion. Byte-identical to the inline
 // index.Search and to the snapshot-backed default scorer.
 func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
+	// overfetch kEff candidates and exact rerank.
+	// storedCode = &flat.entries[h.Index].qv is a pointer into the live slice.
+	// NOTE (review N2 — intentional): rerankExact (which calls EncodeBatch, a
+	// potentially slow model forward pass) runs WHILE flat.mu.RLock() is held.
+	// This is the CHOSEN design: RLock is reader-shared so it only blocks
+	// concurrent index WRITERs (flat.mu.Lock()), not other readers. The pointer
+	// storedCode = &flat.entries[h.Index].qv is valid only under this RLock;
+	// releasing early would require copying the code by value into candidate.
+	rerankEnabled := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+	if rerankEnabled {
+		kEff := k * c.rerankDepth
+		flat.mu.RLock()
+		defer flat.mu.RUnlock()
+		if len(flat.entries) == 0 {
+			return nil
+		}
+		pq := flat.quantizer.PrepareQuery(query)
+		corpus := liveEntryCorpus{entries: flat.entries}
+		accept := func(row int) bool {
+			entry := &flat.entries[row]
+			if entry.child || entry.dead {
+				return false
+			}
+			return matchesFilters(entry.metadata, filters)
+		}
+		ds := newDefaultScorer(flat.quantizer)
+		hits := ds.scoreTopKOver(corpus, pq, kEff, accept)
+		cands := make([]candidate, 0, len(hits))
+		for _, h := range hits {
+			entry := &flat.entries[h.Index] // identity mapping
+			cands = append(cands, candidate{
+				id:             entry.id,
+				storedCode:     &entry.qv, // pointer valid under RLock (N2)
+				text:           entry.text,
+				quantizedScore: h.Score,
+				version:        entry.version,
+				metadata:       cloneMetadata(entry.metadata),
+			})
+		}
+		// rerankExact runs under RLock (pointer validity; see N2 above).
+		reranked := rerankExact(c, cands, query, k)
+		return candidatesToSearchResults(reranked)
+	}
+
 	flat.mu.RLock()
 	defer flat.mu.RUnlock()
 	if len(flat.entries) == 0 {
@@ -427,6 +504,17 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 // rowToEntry, and falls back to the certified default scorer if the injected
 // scorer declines the query (§6.2).
 func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
+	// overfetch kEff and exact rerank.
+	// NOTE (review N2): storedCode = &flat.entries[rowToEntry[h.Index]].qv is a
+	// pointer into the live slice. rerankExact runs UNDER flat.mu.RLock() so the
+	// pointer remains valid through the forward pass (RLock is reader-shared).
+	rerankEnabled2 := c.rerankDepth > 1 && (c.coldTier == coldRecompute || (c.coldTier == coldRaw && c.rawStoreEnabled))
+	kFetch := k
+	if rerankEnabled2 {
+		kFetch = k * c.rerankDepth
+	}
+
 	corpus, rowToEntry := flat.corpusSnapshot()
 	if len(corpus) == 0 {
 		return nil
@@ -440,19 +528,39 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 		entry := flat.entries[rowToEntry[row]]
 		return matchesFilters(entry.metadata, filters)
 	}
-	hits := scorer.ScoreTopK(pq, k, accept)
+	hits := scorer.ScoreTopK(pq, kFetch, accept)
 	flat.mu.RUnlock()
 	// An injected scorer (e.g. GPU) may decline a query (k-bounds, re-pack failure)
 	// by returning empty when results were expected — fall back to the default
 	// certified scorer so the query is never silently truncated (§6.2).
-	if len(hits) == 0 && k > 0 && len(corpus) > 0 {
+	if len(hits) == 0 && kFetch > 0 && len(corpus) > 0 {
 		ds := newDefaultScorer(flat.quantizer)
 		ds.SetCorpus(corpus)
 		flat.mu.RLock()
-		hits = ds.ScoreTopK(pq, k, accept)
+		hits = ds.ScoreTopK(pq, kFetch, accept)
 		flat.mu.RUnlock()
 	}
 	flat.mu.RLock()
+	defer flat.mu.RUnlock()
+
+	if rerankEnabled2 {
+		cands := make([]candidate, 0, len(hits))
+		for _, h := range hits {
+			entry := flat.entries[rowToEntry[h.Index]]
+			cands = append(cands, candidate{
+				id:             entry.id,
+				storedCode:     &entry.qv, // pointer valid under RLock (N2)
+				text:           entry.text,
+				quantizedScore: h.Score,
+				version:        entry.version,
+				metadata:       cloneMetadata(entry.metadata),
+			})
+		}
+		// rerankExact runs under RLock (pointer validity; see N2 above).
+		reranked := rerankExact(c, cands, query, k)
+		return candidatesToSearchResults(reranked)
+	}
+
 	results := make([]SearchResult, 0, len(hits))
 	for _, h := range hits {
 		entry := flat.entries[rowToEntry[h.Index]]
@@ -464,7 +572,6 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 			Version:  entry.version,
 		})
 	}
-	flat.mu.RUnlock()
 	sortSearchResults(results)
 	return results
 }

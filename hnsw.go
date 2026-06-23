@@ -822,6 +822,142 @@ func removeOneFromSlice(s []int32, val int32) []int32 {
 	return s
 }
 
+// searchCandidates runs the same HNSW traversal as Search but emits []candidate
+// carrying each surviving hit's stored qv (as a pointer into the live flat slice),
+// text, and quantizedScore (the InnerProductPrepared it computes anyway), along
+// with the prepared query source vector so rerankExact does not re-encode it.
+//
+// This helper exists because the public Search discards qv and text, which are
+// needed for the drift-check exact rerank (Task 4 / §5). Keep Search itself
+// UNCHANGED for the non-rerank path.
+//
+// N1 (review guard): the returned []candidate slice carries storedCode pointers
+// into h.flat.entries, which are valid as long as h.flat.mu.RLock() is held.
+// The caller (collection.go flatSearchLive / searchVectorLocal HNSW branch) is
+// responsible for holding RLock through rerankExact — see N2 in flatSearchLive.
+func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOption) ([]candidate, []float32) {
+	if k <= 0 {
+		return nil, query
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	n := h.flat.Len()
+	if n == 0 || h.entryNode < 0 {
+		return nil, query
+	}
+
+	// For very small datasets, fall back to flat scan and build candidates from it.
+	if n <= h.params.EfSearch {
+		results := h.flat.Search(query, k, filters)
+		return searchResultsToCandidates(h, results), query
+	}
+
+	pq := h.flat.quantizer.PrepareQuery(query)
+
+	current := h.entryNode
+	if h.isTombstoned(current) {
+		current = h.pickLiveEntry()
+		if current < 0 {
+			return nil, query
+		}
+	}
+	for level := h.maxLevel; level >= 1; level-- {
+		current = h.greedyClosest(current, pq, level)
+	}
+
+	ef := h.params.EfSearch
+	if len(filters) > 0 {
+		ef *= 4
+	}
+	if ef < k {
+		ef = k
+	}
+
+	rawCandidates := h.searchLayer(current, pq, ef, 0)
+
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+
+	resultHeap := &searchHeap{}
+	for _, ci := range rawCandidates {
+		idx := int(ci)
+		if idx >= len(h.flat.entries) || h.isTombstoned(idx) {
+			continue
+		}
+		entry := h.flat.entries[idx]
+		if entry.child {
+			continue
+		}
+		if !matchesFilters(entry.metadata, filters) {
+			continue
+		}
+		if resultHeap.Len() == k {
+			bound, prunable := pq.ScoreUpperBound(entry.qv.ResNorm)
+			if prunable && bound <= (*resultHeap)[0].Score {
+				continue
+			}
+		}
+		score := h.flat.quantizer.InnerProductPrepared(entry.qv, pq)
+		r := SearchResult{
+			ID:      entry.id,
+			Score:   score,
+			Version: entry.version,
+		}
+		if resultHeap.Len() < k {
+			heap.Push(resultHeap, r)
+		} else if score > (*resultHeap)[0].Score {
+			(*resultHeap)[0] = r
+			heap.Fix(resultHeap, 0)
+		}
+	}
+
+	// Build candidates from the surviving results, resolving storedCode pointers
+	// now while h.flat.mu.RLock() is held.
+	cands := make([]candidate, 0, resultHeap.Len())
+	for _, r := range *resultHeap {
+		pos, ok := h.flat.idIndex[r.ID]
+		if !ok {
+			continue
+		}
+		entry := &h.flat.entries[pos]
+		cands = append(cands, candidate{
+			id:             entry.id,
+			storedCode:     &entry.qv,
+			text:           entry.text,
+			quantizedScore: r.Score,
+			version:        entry.version,
+			metadata:       cloneMetadata(entry.metadata),
+		})
+	}
+	return cands, query
+}
+
+// searchResultsToCandidates converts a []SearchResult (from flat scan fallback)
+// into []candidate by looking up qv pointers in the flat index.
+// Caller must hold h.flat.mu.RLock().
+func searchResultsToCandidates(h *hnswIndex, results []SearchResult) []candidate {
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+	cands := make([]candidate, 0, len(results))
+	for _, r := range results {
+		pos, ok := h.flat.idIndex[r.ID]
+		if !ok {
+			continue
+		}
+		entry := &h.flat.entries[pos]
+		cands = append(cands, candidate{
+			id:             entry.id,
+			storedCode:     &entry.qv,
+			text:           entry.text,
+			quantizedScore: r.Score,
+			version:        entry.version,
+			metadata:       cloneMetadata(entry.metadata),
+		})
+	}
+	return cands
+}
+
 func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []SearchResult {
 	if k <= 0 {
 		return nil
