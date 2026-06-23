@@ -305,6 +305,41 @@ func WithSparse() CollectionOption {
 	return collectionOptionFunc(func(cfg *collectionConfig) { cfg.sparseEnabled = true })
 }
 
+// ReQuantizeOption configures ReQuantize calls.
+type ReQuantizeOption interface {
+	applyReQuantize(*reQuantizeConfig)
+}
+
+type reQuantizeConfig struct {
+	allowDrift bool
+}
+
+type reQuantizeOptionFunc func(*reQuantizeConfig)
+
+func (f reQuantizeOptionFunc) applyReQuantize(cfg *reQuantizeConfig) {
+	f(cfg)
+}
+
+// WithAllowReQuantizeDrift permits ReQuantize to proceed even when the
+// per-version OLD-param drift-detect fires (the re-quantized code at the
+// current (bitWidth,seed) does not byte-match the stored code). Without this
+// option, any drift mismatch aborts with ErrEmbedderDriftDetected.
+func WithAllowReQuantizeDrift() ReQuantizeOption {
+	return reQuantizeOptionFunc(func(cfg *reQuantizeConfig) {
+		cfg.allowDrift = true
+	})
+}
+
+func collectReQuantizeOptions(opts []ReQuantizeOption) reQuantizeConfig {
+	var cfg reQuantizeConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyReQuantize(&cfg)
+		}
+	}
+	return cfg
+}
+
 // WithScorer injects a custom Scorer into the collection (frozen API seam).
 // The injected scorer is active on the flat (non-HNSW) search path: it is
 // called for unfiltered queries and bypassed in favour of the default scorer

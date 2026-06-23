@@ -944,6 +944,221 @@ func (c *Collection) RebuildIndex(target IndexType) error {
 	return nil
 }
 
+// ReQuantize recomputes and re-quantizes the FULL per-id history at new
+// (bitWidth, seed) parameters. It requires the collection to be in
+// coldRecompute mode (which stores per-version text needed for recomputation).
+//
+// Algorithm:
+//  1. Reject unless coldTier == coldRecompute.
+//  2. Acquire c.mu.Lock().
+//  3. Iterate every id's history; for each non-tombstone dense version, batch
+//     the version.Text values and call EncodeBatch in fixed-size batches.
+//  4. Per version: OLD-param drift-detect — requantize the recomputed raw at
+//     the CURRENT (c.bitWidth, c.seed) and byteEqualQuantized against the
+//     stored Quantized. Mismatch aborts with ErrEmbedderDriftDetected (NO
+//     partial write — staging map guarantees in-memory atomicity) unless
+//     WithAllowReQuantizeDrift() was passed.
+//  5. After all versions pass (or drift override): requantize at NEW params,
+//     install into the staging map.
+//  6. Install staging into c.history, update c.bitWidth/c.seed.
+//  7. Rebuild the live index at new params (re-add live codes).
+//  8. Invalidate the view cache (historical views held OLD-param codes).
+//
+// Lock ordering (CRITICAL — persistSnapshot acquires c.mu internally and
+// sync.RWMutex is NON-reentrant): do all in-memory work under c.mu, then
+// RELEASE c.mu BEFORE calling persistSnapshot and persistCollectionMeta.
+// The in-memory install is atomic under the lock; the snapshot is the
+// durable commit.
+//
+// Durability is via a fresh SNAPSHOT (Resolution 5), NOT new WAL entries.
+// A re-appended EntryPut with the same (LamportClock, ActorID) is DEDUPED
+// by applyVersionLocked on replay, silently reloading the OLD code. The
+// snapshot writes every version's new Quantized and resets the WAL via
+// pruneWALLocked, so no pre-requant EntryPut survives to be replayed.
+func (c *Collection) ReQuantize(bitWidth int, seed int64, opts ...ReQuantizeOption) error {
+	if err := c.usable(); err != nil {
+		return err
+	}
+	cfg := collectReQuantizeOptions(opts)
+
+	// Step 1: reject unless coldRecompute.
+	if c.coldTier != coldRecompute {
+		return fmt.Errorf("corkscrewdb: ReQuantize requires a recompute-mode collection (WithRecomputeRawFromText); current mode is not recompute")
+	}
+
+	const batchSize = 256
+
+	// Step 2-8: hold c.mu for the entire in-memory phase; release before persist.
+	c.mu.Lock()
+
+	oldBitWidth := c.bitWidth
+	oldSeed := c.seed
+	oldQ := turboquant.NewIPWithSeed(c.dim, oldBitWidth, oldSeed)
+	newQ := turboquant.NewIPWithSeed(c.dim, bitWidth, seed)
+
+	// Collect all (id, versionIndex) that have non-tombstone dense versions
+	// with text. We process in id-sorted order for determinism.
+	type versionRef struct {
+		id  string
+		idx int
+	}
+	ids := make([]string, 0, len(c.history))
+	for id := range c.history {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	// Build the flat list of references we need to process.
+	var refs []versionRef
+	for _, id := range ids {
+		versions := c.history[id]
+		for vi, v := range versions {
+			if v.Tombstone || v.Quantized == nil || v.Text == "" {
+				continue
+			}
+			refs = append(refs, versionRef{id: id, idx: vi})
+		}
+	}
+
+	// staging maps (id, versionIndex) -> new *turboquant.IPQuantized
+	type stageKey struct {
+		id  string
+		idx int
+	}
+	staging := make(map[stageKey]*turboquant.IPQuantized, len(refs))
+
+	// Process in batches of batchSize; one batch resident at a time.
+	for start := 0; start < len(refs); start += batchSize {
+		end := start + batchSize
+		if end > len(refs) {
+			end = len(refs)
+		}
+		batch := refs[start:end]
+
+		texts := make([]string, len(batch))
+		for i, ref := range batch {
+			texts[i] = c.history[ref.id][ref.idx].Text
+		}
+
+		encoded, err := c.encoder.EncodeBatch(texts)
+		if err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("corkscrewdb: ReQuantize EncodeBatch failed: %w", err)
+		}
+		if len(encoded) == 0 {
+			c.mu.Unlock()
+			return errors.New("corkscrewdb: ReQuantize EncodeBatch returned no vectors")
+		}
+		if len(encoded) != len(batch) {
+			c.mu.Unlock()
+			return fmt.Errorf("corkscrewdb: ReQuantize EncodeBatch returned %d vectors for %d texts", len(encoded), len(batch))
+		}
+
+		for i, ref := range batch {
+			raw := encoded[i]
+			if len(raw) == 0 {
+				c.mu.Unlock()
+				return fmt.Errorf("corkscrewdb: ReQuantize: EncodeBatch returned empty vector for id %q version %d", ref.id, ref.idx)
+			}
+			if len(raw) != c.dim {
+				c.mu.Unlock()
+				return fmt.Errorf("corkscrewdb: ReQuantize: EncodeBatch returned dimension %d for id %q, want %d", len(raw), ref.id, c.dim)
+			}
+
+			stored := c.history[ref.id][ref.idx].Quantized
+
+			// OLD-param drift-detect: requantize at current (old) params and compare.
+			if !cfg.allowDrift {
+				recompAtOld := oldQ.Quantize(raw)
+				if len(stored.MSE) == 0 || !byteEqualQuantized(&recompAtOld, stored) {
+					c.mu.Unlock()
+					return fmt.Errorf("%w: id %q version %d codes do not match recomputed old-param codes",
+						ErrEmbedderDriftDetected, ref.id, ref.idx)
+				}
+			}
+
+			// Requantize at NEW params.
+			newCode := newQ.Quantize(raw)
+			staging[stageKey{ref.id, ref.idx}] = &newCode
+		}
+	}
+
+	// All versions passed (or drift allowed). Install staging into c.history.
+	for key, newCode := range staging {
+		c.history[key.id][key.idx].Quantized = newCode
+	}
+
+	// Update collection params.
+	c.bitWidth = bitWidth
+	c.seed = seed
+
+	// Rebuild the live index at new params — mirror RebuildIndex's re-add loop
+	// but using the new (bitWidth, seed) quantizer embedded in a fresh index.
+	if c.index != nil && c.dim > 0 {
+		newIdx := newIndex(c.dim, bitWidth, seed)
+		for _, id := range ids {
+			versions := c.history[id]
+			if len(versions) == 0 {
+				continue
+			}
+			latest := versions[len(versions)-1]
+			if latest.Tombstone || latest.Quantized == nil {
+				continue
+			}
+			newIdx.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
+		}
+		// If the current index is HNSW, replace the flat underlying index but
+		// keep the outer HNSW type so indexType is preserved; however since HNSW
+		// graph arcs are keyed to old codes, we need to rebuild the HNSW too.
+		switch idx := c.index.(type) {
+		case *hnswIndex:
+			params := c.hnsw
+			if params.M == 0 && params.EfConstruction == 0 && params.EfSearch == 0 {
+				params = defaultHNSWParams()
+			}
+			hw := newHNSWIndex(c.dim, bitWidth, seed, params)
+			for _, id := range ids {
+				versions := c.history[id]
+				if len(versions) == 0 {
+					continue
+				}
+				latest := versions[len(versions)-1]
+				if latest.Tombstone || latest.Quantized == nil {
+					continue
+				}
+				hw.AddQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
+			}
+			_ = idx
+			c.index = hw
+		default:
+			c.index = newIdx
+		}
+	}
+
+	// Invalidate the view cache: all historical views are at the OLD params.
+	if c.viewCache != nil {
+		c.viewCache.invalidateHead(0)
+	}
+
+	c.dirty = true
+
+	// CRITICAL: release c.mu BEFORE calling persistSnapshot and persistCollectionMeta.
+	// Both acquire c.mu / db.mu internally; sync.RWMutex is NON-reentrant and
+	// holding c.mu across these calls would self-deadlock.
+	c.mu.Unlock()
+
+	// Durability via SNAPSHOT (Resolution 5): persistSnapshot writes every
+	// version's new Quantized and resets the WAL (pruneWALLocked), so no
+	// pre-requant EntryPut survives to be replayed on reopen.
+	if err := c.persistSnapshot(); err != nil {
+		return fmt.Errorf("corkscrewdb: ReQuantize persistSnapshot failed: %w", err)
+	}
+	if err := c.db.persistCollectionMeta(c.name, c); err != nil {
+		return fmt.Errorf("corkscrewdb: ReQuantize persistCollectionMeta failed: %w", err)
+	}
+	return nil
+}
+
 func (c *Collection) usable() error {
 	if c == nil {
 		return errors.New("corkscrewdb: nil collection")
