@@ -1,3 +1,3 @@
 package corkscrewdb
 
-const PackageVersion = "v0.3.0"
+const PackageVersion = "v0.4.0"
