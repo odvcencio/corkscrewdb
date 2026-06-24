@@ -636,21 +636,21 @@ func TestRerankConcurrentReadWriteNoDeadlock(t *testing.T) {
 
 	query, _ := provider.Encode("search result candidate")
 
-	// Compute a deadline: use t.Deadline if available (minus a safety margin);
-	// otherwise run for 3 seconds.
-	done := make(chan struct{})
-	deadline, hasDeadline := t.Deadline()
-	go func() {
-		if hasDeadline {
-			remaining := time.Until(deadline)
-			runFor := remaining * 3 / 4
-			if runFor < 500*time.Millisecond {
-				runFor = 500 * time.Millisecond
-			}
-			time.Sleep(runFor)
-		} else {
-			time.Sleep(3 * time.Second)
+	// Run for a small fixed duration (the deadlock/race surfaces within a few
+	// hundred ms of concurrent traffic). Only SHORTEN the window if the test
+	// deadline is tighter than the cap — never scale UP to fill the timeout
+	// (a -timeout 1800s run must not make this test sleep ~22 minutes).
+	const maxRun = 3 * time.Second
+	runFor := maxRun
+	if deadline, ok := t.Deadline(); ok {
+		rem := time.Until(deadline) * 3 / 4
+		if rem > 500*time.Millisecond && rem < runFor {
+			runFor = rem
 		}
+	}
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(runFor)
 		close(done)
 	}()
 
