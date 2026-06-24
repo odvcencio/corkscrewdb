@@ -300,6 +300,8 @@ go build ./cmd/corkscrewdb/
 
 Standard ANN-benchmarks dataset runs. Hardware: Intel Core Ultra 9 285, 20 threads, Go 1.26, WSL2. Recall@10 is measured against exact ground-truth neighbors. These are subset runs; reproduce with `cmd/bench` (see `cmd/bench/README.md`).
 
+For how CorkScrewDB stacks up against the field — footprint (where it leads), recall, and the comparability caveats — see [BENCHMARKS.md](BENCHMARKS.md).
+
 ### glove-25-angular (25-dim, 100K subset)
 
 | Bit width | Recall@10 | Serial QPS | Parallel QPS | Code bytes/vec |
