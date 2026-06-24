@@ -1,0 +1,25 @@
+{
+  "format_version": 2,
+  "format_floor": "v0.3.0",
+  "module_version": "v0.4.0",
+  "actor_id": "testactor-0001",
+  "default_bit_width": 2,
+  "embedding": {
+    "id": "mock-provider",
+    "dim": 8
+  },
+  "collections": {
+    "r": {
+      "bit_width": 2,
+      "seed": 12345,
+      "dim": 0,
+      "raw_store": false,
+      "sparse_enabled": false,
+      "index_type": "flat",
+      "cold_tier": "recompute",
+      "rerank_depth": 4
+    }
+  },
+  "created_at": "2026-06-17T00:00:00Z",
+  "updated_at": "2026-06-17T00:00:00Z"
+}

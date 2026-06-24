@@ -822,6 +822,145 @@ func removeOneFromSlice(s []int32, val int32) []int32 {
 	return s
 }
 
+// searchCandidates runs the same HNSW traversal as Search but emits []candidate
+// carrying each surviving hit's stored qv (BY-VALUE copy), text, and
+// quantizedScore (the InnerProductPrepared it computes anyway), along with the
+// prepared query source vector so rerankExact does not re-encode it.
+//
+// This helper exists because the public Search discards qv and text, which are
+// needed for the drift-check exact rerank (Task 4 / §5). Keep Search itself
+// UNCHANGED for the non-rerank path.
+//
+// The returned []candidate slice is self-contained: storedCode is copied by
+// value under h.flat.mu.RLock() before the lock is released. The caller
+// (collection.go searchVectorLocal HNSW branch) calls rerankExact with NO lock
+// held — this is correct and safe.
+func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOption) ([]candidate, []float32) {
+	if k <= 0 {
+		return nil, query
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	n := h.flat.Len()
+	if n == 0 || h.entryNode < 0 {
+		return nil, query
+	}
+
+	// For very small datasets, fall back to flat scan and build candidates from it.
+	if n <= h.params.EfSearch {
+		results := h.flat.Search(query, k, filters)
+		return searchResultsToCandidates(h, results), query
+	}
+
+	pq := h.flat.quantizer.PrepareQuery(query)
+
+	current := h.entryNode
+	if h.isTombstoned(current) {
+		current = h.pickLiveEntry()
+		if current < 0 {
+			return nil, query
+		}
+	}
+	for level := h.maxLevel; level >= 1; level-- {
+		current = h.greedyClosest(current, pq, level)
+	}
+
+	ef := h.params.EfSearch
+	if len(filters) > 0 {
+		ef *= 4
+	}
+	if ef < k {
+		ef = k
+	}
+
+	rawCandidates := h.searchLayer(current, pq, ef, 0)
+
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+
+	resultHeap := &searchHeap{}
+	for _, ci := range rawCandidates {
+		idx := int(ci)
+		if idx >= len(h.flat.entries) || h.isTombstoned(idx) {
+			continue
+		}
+		entry := h.flat.entries[idx]
+		if entry.child {
+			continue
+		}
+		if !matchesFilters(entry.metadata, filters) {
+			continue
+		}
+		if resultHeap.Len() == k {
+			bound, prunable := pq.ScoreUpperBound(entry.qv.ResNorm)
+			if prunable && bound <= (*resultHeap)[0].Score {
+				continue
+			}
+		}
+		score := h.flat.quantizer.InnerProductPrepared(entry.qv, pq)
+		r := SearchResult{
+			ID:      entry.id,
+			Score:   score,
+			Version: entry.version,
+		}
+		if resultHeap.Len() < k {
+			heap.Push(resultHeap, r)
+		} else if score > (*resultHeap)[0].Score {
+			(*resultHeap)[0] = r
+			heap.Fix(resultHeap, 0)
+		}
+	}
+
+	// Build candidates from the surviving results, copying storedCode BY VALUE
+	// while h.flat.mu.RLock() is held. After this loop the lock will be released
+	// (via defer) and candidates are fully self-contained.
+	cands := make([]candidate, 0, resultHeap.Len())
+	for _, r := range *resultHeap {
+		pos, ok := h.flat.idIndex[r.ID]
+		if !ok {
+			continue
+		}
+		entry := &h.flat.entries[pos]
+		cands = append(cands, candidate{
+			id:             entry.id,
+			storedCode:     entry.qv, // by-value copy; safe after lock release
+			text:           entry.text,
+			quantizedScore: r.Score,
+			version:        entry.version,
+			metadata:       cloneMetadata(entry.metadata),
+		})
+	}
+	return cands, query
+}
+
+// searchResultsToCandidates converts a []SearchResult (from flat scan fallback)
+// into []candidate by copying qv BY VALUE from the flat index under its own
+// RLock. It acquires h.flat.mu.RLock() internally, so it must be called WITHOUT
+// h.flat.mu held (reentrant RLock can deadlock vs a pending writer). The
+// returned candidates are self-contained; no lock needs to be held after return.
+func searchResultsToCandidates(h *hnswIndex, results []SearchResult) []candidate {
+	h.flat.mu.RLock()
+	defer h.flat.mu.RUnlock()
+	cands := make([]candidate, 0, len(results))
+	for _, r := range results {
+		pos, ok := h.flat.idIndex[r.ID]
+		if !ok {
+			continue
+		}
+		entry := &h.flat.entries[pos]
+		cands = append(cands, candidate{
+			id:             entry.id,
+			storedCode:     entry.qv, // by-value copy; safe after lock release
+			text:           entry.text,
+			quantizedScore: r.Score,
+			version:        entry.version,
+			metadata:       cloneMetadata(entry.metadata),
+		})
+	}
+	return cands
+}
+
 func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []SearchResult {
 	if k <= 0 {
 		return nil

@@ -83,12 +83,36 @@ func (c *Collection) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 	}
 	c.mu.RUnlock()
 
+	// When coldRecompute and rerankDepth > 1, compute the dense channel with exact
+	// rerank before fusion (spec §8/§12). This mirrors CollectionView.SearchMulti.
+	// c.SearchVector internally builds a liveRerankCtx snapshot under c.mu.RLock,
+	// so no unsynchronized reads of mutable fields occur here (M-A / B1b fix).
+	c.mu.RLock()
+	snapColdTier := c.coldTier
+	snapRerankDepth := c.rerankDepth
+	c.mu.RUnlock()
+	if snapRerankDepth > 1 && snapColdTier == coldRecompute && len(dense) > 0 && idx != nil {
+		depth := k
+		if depth < multiOverfetch {
+			depth = multiOverfetch
+		}
+		rerankedDense, err := c.SearchVector(dense, depth, q.Filters...)
+		if err != nil {
+			return nil, err
+		}
+		return fuseChannelsPrecomputed(rerankedDense, dim, sparseSet, hydrateByID, c.sparseEnabled, dense, q, k)
+	}
+
 	return fuseChannels(idx, dim, sparseSet, hydrateByID, c.sparseEnabled, dense, q, k)
 }
 
 // SearchMulti runs a hybrid (dense + sparse) retrieval against the point-in-time
 // view and ALWAYS returns the fused ranking; SearchResult.Score is always the
 // fused score. This is an additive sibling of Collection.SearchMulti.
+//
+// When the view is a coldRecompute collection with rerankDepth > 1 the dense
+// channel is reranked (drift-check exact rerank) before fusion; the sparse channel
+// is untouched (Task 7). Remote views fall back to errMultiVectorRemoteUnsupported.
 func (v *CollectionView) SearchMulti(q MultiQuery, k int) ([]SearchResult, error) {
 	if v.err != nil {
 		return nil, v.err
@@ -126,7 +150,89 @@ func (v *CollectionView) SearchMulti(q MultiQuery, k int) ([]SearchResult, error
 		}
 	}
 
+	// When coldRecompute and rerankDepth > 1, compute the dense channel with rerank
+	// before fusion (sparse channel is untouched). fuseChannels is bypassed for the
+	// dense step; the reranked result is passed to fuseChannelsPrecomputed.
+	if v.rerankDepth > 1 && v.coldTier == coldRecompute && len(dense) > 0 && v.index != nil {
+		depth := k
+		if depth < multiOverfetch {
+			depth = multiOverfetch
+		}
+		rerankedDense, err := v.SearchVector(dense, depth, q.Filters...)
+		if err != nil {
+			return nil, err
+		}
+		// Truncate to depth after rerank (SearchVector already returns ≤ depth).
+		return fuseChannelsPrecomputed(rerankedDense, v.dim, v.sparseSet, hydrateByID, v.sparseEnabled, dense, q, k)
+	}
+
 	return fuseChannels(v.index, v.dim, v.sparseSet, hydrateByID, v.sparseEnabled, dense, q, k)
+}
+
+// fuseChannelsPrecomputed fuses a pre-computed dense ranking with a sparse
+// ranking. It is used by CollectionView.SearchMulti when the dense channel has
+// already been reranked; the pre-computed denseRanking replaces the idx.Search
+// call inside fuseChannels. Validation and sparse scoring are identical to
+// fuseChannels.
+func fuseChannelsPrecomputed(
+	denseRanking []SearchResult,
+	dim int,
+	sparseSet map[string]*SparseVector,
+	hydrateByID map[string]hydrateMeta,
+	sparseEnabled bool,
+	dense []float32,
+	q MultiQuery,
+	k int,
+) ([]SearchResult, error) {
+	densePresent := len(dense) > 0
+
+	if q.Sparse != nil {
+		if err := validateSparseVector(q.Sparse); err != nil {
+			return nil, err
+		}
+		if !sparseEnabled {
+			return nil, errors.New("corkscrewdb: sparse query supplied but collection was not created WithSparse")
+		}
+	}
+	sparsePresent := q.Sparse != nil && len(q.Sparse.Indices) > 0
+
+	if !densePresent && !sparsePresent {
+		return nil, errors.New("corkscrewdb: SearchMulti requires at least one of Dense, Sparse, or Text")
+	}
+	if k <= 0 {
+		return nil, nil
+	}
+
+	depth := k
+	if depth < multiOverfetch {
+		depth = multiOverfetch
+	}
+
+	var sparseRanking []SearchResult
+	if sparsePresent {
+		accept := func(id string) bool {
+			meta, ok := hydrateByID[id]
+			if !ok {
+				return false
+			}
+			return matchesFilters(meta.metadata, q.Filters)
+		}
+		hydrate := func(id string) (string, map[string]string, uint64) {
+			meta := hydrateByID[id]
+			return meta.text, meta.metadata, meta.version
+		}
+		sparseRanking = sparseSearch(sparseSet, q.Sparse, depth, accept, hydrate)
+	}
+
+	policy := q.Fusion
+	if policy == nil {
+		policy = RRFFusion{K: 60}
+	}
+	fused := policy.fuse(denseRanking, sparseRanking)
+	if len(fused) > k {
+		fused = fused[:k]
+	}
+	return fused, nil
 }
 
 // fuseChannels is the shared resolve/score/fuse core used by both

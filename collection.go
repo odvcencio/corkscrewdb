@@ -31,6 +31,8 @@ type Collection struct {
 	sparseEnabled   bool
 	indexType       IndexType
 	hnsw            HNSWParams
+	coldTier        coldTierMode // raw/none/recompute (Cluster A, Task 2)
+	rerankDepth     int          // overfetch depth for exact rerank (Task 4 wires the read path)
 
 	scorer Scorer // optional injected scorer (runtime-only, not persisted in meta)
 
@@ -62,9 +64,13 @@ type CollectionView struct {
 	sparseEnabled bool
 	err           error
 	dim           int
+	bitWidth      int   // quantizer bit-width; copied from Collection in At() (Task 7)
+	seed          int64 // quantizer seed; copied from Collection in At() (Task 7)
 	remote        remoteClient
 	useAt         bool
 	atClock       uint64
+	coldTier      coldTierMode
+	rerankDepth   int
 }
 
 func (c *Collection) Put(id string, entry Entry) error {
@@ -99,13 +105,52 @@ func (c *Collection) put(id string, entry Entry, federated bool) error {
 		if text == "" {
 			return errors.New("corkscrewdb: entry requires text or vector")
 		}
-		encoded, err := c.encoder.Encode(text)
+		encoded, err := encodeWriteText(c, text)
 		if err != nil {
 			return err
 		}
 		vector = encoded
 	}
 	return c.putVector(id, vector, text, metadata, entry.Sparse, federated)
+}
+
+// encodeWriteText encodes text for storage, branching on the collection's
+// cold-tier mode (§5.6a / Resolution 1):
+//   - coldRecompute uses EncodeBatch([text])[0] — the SAME graph entry point
+//     the future rerank path uses, so the drift-check MATCHes by construction.
+//   - all other modes (coldRaw, coldNone) keep the existing single Encode call
+//     VERBATIM — this is a hard requirement; non-recompute codes must not change.
+func encodeWriteText(c *Collection, text string) ([]float32, error) {
+	if c.coldTier == coldRecompute {
+		encoded, err := c.encoder.EncodeBatch([]string{text})
+		if err != nil {
+			return nil, err
+		}
+		// Guard against a misbehaving provider returning (nil, nil).
+		if len(encoded) == 0 {
+			return nil, errors.New("corkscrewdb: EncodeBatch returned no vectors")
+		}
+		return encoded[0], nil
+	}
+	return c.encoder.Encode(text)
+}
+
+// candidatesToSearchResults converts a reranked []candidate into []SearchResult.
+// The candidate's quantizedScore field carries the final (possibly exact) score
+// after rerankExact.
+func candidatesToSearchResults(cands []candidate) []SearchResult {
+	results := make([]SearchResult, 0, len(cands))
+	for _, cand := range cands {
+		results = append(results, SearchResult{
+			ID:       cand.id,
+			Score:    cand.quantizedScore,
+			Text:     cand.text,
+			Metadata: cloneMetadata(cand.metadata),
+			Version:  cand.version,
+		})
+	}
+	sortSearchResults(results)
+	return results
 }
 
 func (c *Collection) PutVector(id string, vector []float32, opts ...PutVectorOption) error {
@@ -124,6 +169,9 @@ func (c *Collection) PutMultiVector(parentID string, entry MultiVectorEntry) err
 	}
 	if c.db.shouldFederate() {
 		return errors.New("corkscrewdb: PutMultiVector is unsupported for federated collections in v1")
+	}
+	if c.coldTier == coldRecompute {
+		return ErrRecomputeMultiVectorUnsupported
 	}
 	if strings.TrimSpace(parentID) == "" {
 		return errors.New("corkscrewdb: parent id is required")
@@ -318,9 +366,17 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	if err := c.usable(); err != nil {
 		return nil, err
 	}
+	// Snapshot all mutable fields under c.mu.RLock to avoid data races with
+	// ReQuantize (which mutates c.bitWidth/c.seed under c.mu.Lock). The snapshot
+	// is used to build a liveRerankCtx passed to rerankExact (B1b fix).
 	c.mu.RLock()
 	idx := c.index
 	dim := c.dim
+	snapBitWidth := c.bitWidth
+	snapSeed := c.seed
+	snapColdTier := c.coldTier
+	snapRerankDepth := c.rerankDepth
+	snapRawStoreEnabled := c.rawStoreEnabled
 	c.mu.RUnlock()
 	if idx == nil {
 		return nil, nil
@@ -328,12 +384,31 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 	if len(query) != dim {
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), dim)
 	}
+	// Build the liveRerankCtx snapshot once; used by all rerank call sites below.
+	liveCtx := &liveRerankCtx{
+		c:           c,
+		coldTier:    snapColdTier,
+		dim:         dim,
+		bitWidth:    snapBitWidth,
+		seed:        snapSeed,
+		rerankDepth: snapRerankDepth,
+	}
 	// HNSW owns its own traversal (§10); only the flat path routes through Scorer.
 	flat, isFlat := idx.(*index)
 	if !isFlat {
+		// HNSW path: when coldRecompute or coldRaw (with raw store) and
+		// rerankDepth > 1, overfetch via searchCandidates then exact rerank (Task 4).
+		hnsw, isHNSW := idx.(*hnswIndex)
+		rerankEnabled := snapRerankDepth > 1 && (snapColdTier == coldRecompute || (snapColdTier == coldRaw && snapRawStoreEnabled))
+		if isHNSW && rerankEnabled {
+			kEff := k * snapRerankDepth
+			cands, qvec := hnsw.searchCandidates(query, kEff, filters)
+			reranked := rerankExact(liveCtx, cands, qvec, k)
+			return candidatesToSearchResults(reranked), nil
+		}
 		return idx.Search(query, k, filters), nil
 	}
-	return c.flatSearchViaScorer(flat, query, k, filters), nil
+	return c.flatSearchViaScorer(flat, query, k, filters, liveCtx), nil
 }
 
 // flatSearchViaScorer routes the flat search path through the active Scorer seam
@@ -347,15 +422,15 @@ func (c *Collection) searchVectorLocal(query []float32, k int, filters []FilterO
 // while keeping the Scorer seam and byte-equivalence. Only an injected scorer
 // (e.g. GPU) pays for a corpusSnapshot, and a device scorer packs it once via
 // SetCorpus (lazy by cardinality), never per query.
-func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
 	if k <= 0 {
 		return nil
 	}
 	// No injected scorer: zero-copy live-entry scan (the hot, default path).
 	if c.scorer == nil {
-		return c.flatSearchLive(flat, query, k, filters)
+		return c.flatSearchLive(flat, query, k, filters, liveCtx)
 	}
-	return c.flatSearchInjected(flat, query, k, filters)
+	return c.flatSearchInjected(flat, query, k, filters, liveCtx)
 }
 
 // flatSearchLive scores the default scorer directly over the index's LIVE entries
@@ -363,7 +438,53 @@ func (c *Collection) flatSearchViaScorer(flat *index, query []float32, k int, fi
 // filtered rows are excluded by liveAccept before scoring (§7.4 pushdown), exactly
 // reproducing the dense corpusSnapshot exclusion. Byte-identical to the inline
 // index.Search and to the snapshot-backed default scorer.
-func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
+	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
+	// overfetch kEff candidates and exact rerank.
+	// storedCode is copied BY VALUE under flat.mu.RLock(). The lock is released
+	// BEFORE calling rerankExact so no lock is held during EncodeBatch / getRaw.
+	// This avoids the AB-BA deadlock: putVector holds c.mu.Lock then takes
+	// flat.mu.Lock (via index.Add); the coldRaw branch takes c.mu.RLock inside
+	// rerankExact. Releasing flat.mu before rerankExact breaks the cycle.
+	// liveCtx carries a snapshot of c.bitWidth/c.seed/c.coldTier taken under
+	// c.mu.RLock in searchVectorLocal — no unsynchronized reads of mutable fields
+	// occur here (B1b fix).
+	rerankEnabled := liveCtx.rerankDepth > 1 && (liveCtx.coldTier == coldRecompute || (liveCtx.coldTier == coldRaw && c.rawStoreEnabled))
+	if rerankEnabled {
+		kEff := k * liveCtx.rerankDepth
+		flat.mu.RLock()
+		if len(flat.entries) == 0 {
+			flat.mu.RUnlock()
+			return nil
+		}
+		pq := flat.quantizer.PrepareQuery(query)
+		corpus := liveEntryCorpus{entries: flat.entries}
+		accept := func(row int) bool {
+			entry := &flat.entries[row]
+			if entry.child || entry.dead {
+				return false
+			}
+			return matchesFilters(entry.metadata, filters)
+		}
+		ds := newDefaultScorer(flat.quantizer)
+		hits := ds.scoreTopKOver(corpus, pq, kEff, accept)
+		cands := make([]candidate, 0, len(hits))
+		for _, h := range hits {
+			entry := &flat.entries[h.Index] // identity mapping
+			cands = append(cands, candidate{
+				id:             entry.id,
+				storedCode:     entry.qv, // by-value copy; self-contained after lock release
+				text:           entry.text,
+				quantizedScore: h.Score,
+				version:        entry.version,
+				metadata:       cloneMetadata(entry.metadata),
+			})
+		}
+		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
+		reranked := rerankExact(liveCtx, cands, query, k)
+		return candidatesToSearchResults(reranked)
+	}
+
 	flat.mu.RLock()
 	defer flat.mu.RUnlock()
 	if len(flat.entries) == 0 {
@@ -402,7 +523,19 @@ func (c *Collection) flatSearchLive(flat *index, query []float32, k int, filters
 // via SetCorpus, lazily by cardinality), maps ScoredHit.Index back through
 // rowToEntry, and falls back to the certified default scorer if the injected
 // scorer declines the query (§6.2).
-func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption) []SearchResult {
+func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, filters []FilterOption, liveCtx *liveRerankCtx) []SearchResult {
+	// When coldRecompute or coldRaw (with raw store) and rerankDepth > 1,
+	// overfetch kEff and exact rerank.
+	// storedCode is copied BY VALUE under flat.mu.RLock(); the lock is released
+	// before rerankExact so no lock is held during EncodeBatch / getRaw.
+	// liveCtx carries a snapshot of mutable fields (bitWidth/seed/coldTier) taken
+	// under c.mu.RLock in searchVectorLocal — no unsynchronized reads here (B1b fix).
+	rerankEnabled2 := liveCtx.rerankDepth > 1 && (liveCtx.coldTier == coldRecompute || (liveCtx.coldTier == coldRaw && c.rawStoreEnabled))
+	kFetch := k
+	if rerankEnabled2 {
+		kFetch = k * liveCtx.rerankDepth
+	}
+
 	corpus, rowToEntry := flat.corpusSnapshot()
 	if len(corpus) == 0 {
 		return nil
@@ -416,19 +549,38 @@ func (c *Collection) flatSearchInjected(flat *index, query []float32, k int, fil
 		entry := flat.entries[rowToEntry[row]]
 		return matchesFilters(entry.metadata, filters)
 	}
-	hits := scorer.ScoreTopK(pq, k, accept)
+	hits := scorer.ScoreTopK(pq, kFetch, accept)
 	flat.mu.RUnlock()
 	// An injected scorer (e.g. GPU) may decline a query (k-bounds, re-pack failure)
 	// by returning empty when results were expected — fall back to the default
 	// certified scorer so the query is never silently truncated (§6.2).
-	if len(hits) == 0 && k > 0 && len(corpus) > 0 {
+	if len(hits) == 0 && kFetch > 0 && len(corpus) > 0 {
 		ds := newDefaultScorer(flat.quantizer)
 		ds.SetCorpus(corpus)
 		flat.mu.RLock()
-		hits = ds.ScoreTopK(pq, k, accept)
+		hits = ds.ScoreTopK(pq, kFetch, accept)
 		flat.mu.RUnlock()
 	}
 	flat.mu.RLock()
+
+	if rerankEnabled2 {
+		cands := make([]candidate, 0, len(hits))
+		for _, h := range hits {
+			entry := flat.entries[rowToEntry[h.Index]]
+			cands = append(cands, candidate{
+				id:             entry.id,
+				storedCode:     entry.qv, // by-value copy; self-contained after lock release
+				text:           entry.text,
+				quantizedScore: h.Score,
+				version:        entry.version,
+				metadata:       cloneMetadata(entry.metadata),
+			})
+		}
+		flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
+		reranked := rerankExact(liveCtx, cands, query, k)
+		return candidatesToSearchResults(reranked)
+	}
+
 	results := make([]SearchResult, 0, len(hits))
 	for _, h := range hits {
 		entry := flat.entries[rowToEntry[h.Index]]
@@ -618,6 +770,12 @@ func (c *Collection) At(maxLamport uint64) *CollectionView {
 		view.err = c.err
 		return view
 	}
+	// Read mutable fields UNDER c.mu.RLock to avoid data race with ReQuantize,
+	// which mutates c.bitWidth/c.seed/c.coldTier under c.mu.Lock (B1a fix).
+	view.coldTier = c.coldTier
+	view.rerankDepth = c.rerankDepth
+	view.bitWidth = c.bitWidth
+	view.seed = c.seed
 	view.dim = c.dim
 
 	// Try the view-index cache. Historical view indices are immutable; the live
@@ -705,6 +863,63 @@ func (v *CollectionView) SearchVector(query []float32, k int, filters ...FilterO
 	if len(query) != v.dim {
 		return nil, fmt.Errorf("corkscrewdb: query dimension %d does not match collection dimension %d", len(query), v.dim)
 	}
+
+	// Drift-check exact rerank for view (Task 7): when coldRecompute and rerankDepth > 1,
+	// overfetch kEff candidates from the flat index, copy storedCode BY VALUE under
+	// flat.mu.RLock(), release the lock, then call rerankExact via a viewRerankCtx.
+	// The view's history is an immutable snapshot copy (built in At()) — no additional
+	// lock is needed to read it inside viewRerankCtx.rerankFloats.
+	//
+	// We only support coldRecompute here; coldRaw views have no raw store (the raw
+	// store is on the Collection, not the view). coldRaw-with-raw rerank is a
+	// future extension; for now fall through to plain index.Search.
+	if v.rerankDepth > 1 && v.coldTier == coldRecompute {
+		flat, ok := v.index.(*index)
+		if ok {
+			kEff := k * v.rerankDepth
+			flat.mu.RLock()
+			if len(flat.entries) == 0 {
+				flat.mu.RUnlock()
+				return nil, nil
+			}
+			pq := flat.quantizer.PrepareQuery(query)
+			corpus := liveEntryCorpus{entries: flat.entries}
+			accept := func(row int) bool {
+				entry := &flat.entries[row]
+				if entry.child || entry.dead {
+					return false
+				}
+				return matchesFilters(entry.metadata, filters)
+			}
+			ds := newDefaultScorer(flat.quantizer)
+			hits := ds.scoreTopKOver(corpus, pq, kEff, accept)
+			cands := make([]candidate, 0, len(hits))
+			for _, h := range hits {
+				entry := &flat.entries[h.Index]
+				cands = append(cands, candidate{
+					id:             entry.id,
+					storedCode:     entry.qv, // by-value copy; self-contained after lock release
+					text:           entry.text,
+					quantizedScore: h.Score,
+					version:        entry.version,
+					metadata:       cloneMetadata(entry.metadata),
+				})
+			}
+			flat.mu.RUnlock() // release before rerankExact (no lock held during forward pass)
+
+			ctx := &viewRerankCtx{
+				encoder:  v.encoder,
+				coldTier: v.coldTier,
+				dim:      v.dim,
+				bitWidth: v.bitWidth,
+				seed:     v.seed,
+				history:  v.history,
+			}
+			reranked := rerankExact(ctx, cands, query, k)
+			return candidatesToSearchResults(reranked), nil
+		}
+	}
+
 	return v.index.Search(query, k, filters), nil
 }
 
@@ -814,6 +1029,221 @@ func (c *Collection) RebuildIndex(target IndexType) error {
 	return nil
 }
 
+// ReQuantize recomputes and re-quantizes the FULL per-id history at new
+// (bitWidth, seed) parameters. It requires the collection to be in
+// coldRecompute mode (which stores per-version text needed for recomputation).
+//
+// Algorithm:
+//  1. Reject unless coldTier == coldRecompute.
+//  2. Acquire c.mu.Lock().
+//  3. Iterate every id's history; for each non-tombstone dense version, batch
+//     the version.Text values and call EncodeBatch in fixed-size batches.
+//  4. Per version: OLD-param drift-detect — requantize the recomputed raw at
+//     the CURRENT (c.bitWidth, c.seed) and byteEqualQuantized against the
+//     stored Quantized. Mismatch aborts with ErrEmbedderDriftDetected (NO
+//     partial write — staging map guarantees in-memory atomicity) unless
+//     WithAllowReQuantizeDrift() was passed.
+//  5. After all versions pass (or drift override): requantize at NEW params,
+//     install into the staging map.
+//  6. Install staging into c.history, update c.bitWidth/c.seed.
+//  7. Rebuild the live index at new params (re-add live codes).
+//  8. Invalidate the view cache (historical views held OLD-param codes).
+//
+// Lock ordering (CRITICAL — persistSnapshot acquires c.mu internally and
+// sync.RWMutex is NON-reentrant): do all in-memory work under c.mu, then
+// RELEASE c.mu BEFORE calling persistSnapshot and persistCollectionMeta.
+// The in-memory install is atomic under the lock; the snapshot is the
+// durable commit.
+//
+// Durability is via a fresh SNAPSHOT (Resolution 5), NOT new WAL entries.
+// A re-appended EntryPut with the same (LamportClock, ActorID) is DEDUPED
+// by applyVersionLocked on replay, silently reloading the OLD code. The
+// snapshot writes every version's new Quantized and resets the WAL via
+// pruneWALLocked, so no pre-requant EntryPut survives to be replayed.
+func (c *Collection) ReQuantize(bitWidth int, seed int64, opts ...ReQuantizeOption) error {
+	if err := c.usable(); err != nil {
+		return err
+	}
+	cfg := collectReQuantizeOptions(opts)
+
+	// Step 1: reject unless coldRecompute.
+	if c.coldTier != coldRecompute {
+		return fmt.Errorf("corkscrewdb: ReQuantize requires a recompute-mode collection (WithRecomputeRawFromText); current mode is not recompute")
+	}
+
+	const batchSize = 256
+
+	// Step 2-8: hold c.mu for the entire in-memory phase; release before persist.
+	c.mu.Lock()
+
+	oldBitWidth := c.bitWidth
+	oldSeed := c.seed
+	oldQ := turboquant.NewIPWithSeed(c.dim, oldBitWidth, oldSeed)
+	newQ := turboquant.NewIPWithSeed(c.dim, bitWidth, seed)
+
+	// Collect all (id, versionIndex) that have non-tombstone dense versions
+	// with text. We process in id-sorted order for determinism.
+	type versionRef struct {
+		id  string
+		idx int
+	}
+	ids := make([]string, 0, len(c.history))
+	for id := range c.history {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	// Build the flat list of references we need to process.
+	var refs []versionRef
+	for _, id := range ids {
+		versions := c.history[id]
+		for vi, v := range versions {
+			if v.Tombstone || v.Quantized == nil || v.Text == "" {
+				continue
+			}
+			refs = append(refs, versionRef{id: id, idx: vi})
+		}
+	}
+
+	// staging maps (id, versionIndex) -> new *turboquant.IPQuantized
+	type stageKey struct {
+		id  string
+		idx int
+	}
+	staging := make(map[stageKey]*turboquant.IPQuantized, len(refs))
+
+	// Process in batches of batchSize; one batch resident at a time.
+	for start := 0; start < len(refs); start += batchSize {
+		end := start + batchSize
+		if end > len(refs) {
+			end = len(refs)
+		}
+		batch := refs[start:end]
+
+		texts := make([]string, len(batch))
+		for i, ref := range batch {
+			texts[i] = c.history[ref.id][ref.idx].Text
+		}
+
+		encoded, err := c.encoder.EncodeBatch(texts)
+		if err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("corkscrewdb: ReQuantize EncodeBatch failed: %w", err)
+		}
+		if len(encoded) == 0 {
+			c.mu.Unlock()
+			return errors.New("corkscrewdb: ReQuantize EncodeBatch returned no vectors")
+		}
+		if len(encoded) != len(batch) {
+			c.mu.Unlock()
+			return fmt.Errorf("corkscrewdb: ReQuantize EncodeBatch returned %d vectors for %d texts", len(encoded), len(batch))
+		}
+
+		for i, ref := range batch {
+			raw := encoded[i]
+			if len(raw) == 0 {
+				c.mu.Unlock()
+				return fmt.Errorf("corkscrewdb: ReQuantize: EncodeBatch returned empty vector for id %q version %d", ref.id, ref.idx)
+			}
+			if len(raw) != c.dim {
+				c.mu.Unlock()
+				return fmt.Errorf("corkscrewdb: ReQuantize: EncodeBatch returned dimension %d for id %q, want %d", len(raw), ref.id, c.dim)
+			}
+
+			stored := c.history[ref.id][ref.idx].Quantized
+
+			// OLD-param drift-detect: requantize at current (old) params and compare.
+			if !cfg.allowDrift {
+				recompAtOld := oldQ.Quantize(raw)
+				if len(stored.MSE) == 0 || !byteEqualQuantized(&recompAtOld, stored) {
+					c.mu.Unlock()
+					return fmt.Errorf("%w: id %q version %d codes do not match recomputed old-param codes",
+						ErrEmbedderDriftDetected, ref.id, ref.idx)
+				}
+			}
+
+			// Requantize at NEW params.
+			newCode := newQ.Quantize(raw)
+			staging[stageKey{ref.id, ref.idx}] = &newCode
+		}
+	}
+
+	// All versions passed (or drift allowed). Install staging into c.history.
+	for key, newCode := range staging {
+		c.history[key.id][key.idx].Quantized = newCode
+	}
+
+	// Update collection params.
+	c.bitWidth = bitWidth
+	c.seed = seed
+
+	// Rebuild the live index at new params — mirror RebuildIndex's re-add loop
+	// but using the new (bitWidth, seed) quantizer embedded in a fresh index.
+	if c.index != nil && c.dim > 0 {
+		newIdx := newIndex(c.dim, bitWidth, seed)
+		for _, id := range ids {
+			versions := c.history[id]
+			if len(versions) == 0 {
+				continue
+			}
+			latest := versions[len(versions)-1]
+			if latest.Tombstone || latest.Quantized == nil {
+				continue
+			}
+			newIdx.addQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
+		}
+		// If the current index is HNSW, replace the flat underlying index but
+		// keep the outer HNSW type so indexType is preserved; however since HNSW
+		// graph arcs are keyed to old codes, we need to rebuild the HNSW too.
+		switch idx := c.index.(type) {
+		case *hnswIndex:
+			params := c.hnsw
+			if params.M == 0 && params.EfConstruction == 0 && params.EfSearch == 0 {
+				params = defaultHNSWParams()
+			}
+			hw := newHNSWIndex(c.dim, bitWidth, seed, params)
+			for _, id := range ids {
+				versions := c.history[id]
+				if len(versions) == 0 {
+					continue
+				}
+				latest := versions[len(versions)-1]
+				if latest.Tombstone || latest.Quantized == nil {
+					continue
+				}
+				hw.AddQuantized(id, *latest.Quantized, latest.Text, latest.Metadata, latest.LamportClock)
+			}
+			_ = idx
+			c.index = hw
+		default:
+			c.index = newIdx
+		}
+	}
+
+	// Invalidate the view cache: all historical views are at the OLD params.
+	if c.viewCache != nil {
+		c.viewCache.invalidateHead(0)
+	}
+
+	c.dirty = true
+
+	// CRITICAL: release c.mu BEFORE calling persistSnapshot and persistCollectionMeta.
+	// Both acquire c.mu / db.mu internally; sync.RWMutex is NON-reentrant and
+	// holding c.mu across these calls would self-deadlock.
+	c.mu.Unlock()
+
+	// Durability via SNAPSHOT (Resolution 5): persistSnapshot writes every
+	// version's new Quantized and resets the WAL (pruneWALLocked), so no
+	// pre-requant EntryPut survives to be replayed on reopen.
+	if err := c.persistSnapshot(); err != nil {
+		return fmt.Errorf("corkscrewdb: ReQuantize persistSnapshot failed: %w", err)
+	}
+	if err := c.db.persistCollectionMeta(c.name, c); err != nil {
+		return fmt.Errorf("corkscrewdb: ReQuantize persistCollectionMeta failed: %w", err)
+	}
+	return nil
+}
+
 func (c *Collection) usable() error {
 	if c == nil {
 		return errors.New("corkscrewdb: nil collection")
@@ -843,6 +1273,12 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 		}
 	}
 
+	// Recompute mode requires text on every dense write (O5 / §5.8): without text
+	// there is nothing to re-derive raw floats from.
+	if c.coldTier == coldRecompute && strings.TrimSpace(text) == "" {
+		return ErrRecomputeRequiresText
+	}
+
 	if err := c.validateRawVectorLocked(vector); err != nil {
 		return err
 	}
@@ -859,6 +1295,7 @@ func (c *Collection) putVector(id string, vector []float32, text string, metadat
 	version.dim = len(vector)
 	version.Sparse = cloneSparseVector(sparse)
 	// Raw blob is fsynced BEFORE the WAL append below (cold tier).
+	// For coldRecompute, rawStoreEnabled is false and RawHash stays nil.
 	if c.rawStoreEnabled {
 		hash, err := c.rawStore.Put(rawFloat32Bytes(vector))
 		if err != nil {

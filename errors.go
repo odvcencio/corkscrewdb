@@ -6,7 +6,13 @@ import "errors"
 var ErrFormatTooOld = errors.New("corkscrewdb: on-disk format is older than the v0.3.0 floor")
 
 // ErrRawStoreRequired is returned when an operation needs the raw vector store
-// but the collection was created WithoutRawStore.
+// but none is available. This includes collections created WithoutRawStore and
+// collections in recompute mode (cold_tier:"recompute"), where raw floats are
+// re-derived from text rather than stored. Recompute mode makes exact rerank
+// succeed without a raw store, so this error is only returned for operations
+// that explicitly require stored raw bytes (e.g. getRaw by hash). A v0.3.x
+// reader opening a v0.4.0 recompute collection receives this error only at
+// the raw-needing call site — not at Open or Collection (§9.3, Fix 2).
 var ErrRawStoreRequired = errors.New("corkscrewdb: operation requires the raw vector store")
 
 // ErrInvalidSparseVector is returned when a SparseVector violates its invariants.
@@ -54,3 +60,28 @@ var errPullTooOld = errors.New("corkscrewdb: pull since-clock is older than reta
 // diff cannot be expressed as explicit shard ranges (it falls through to legacy
 // peer-hash-mod for a moving key). A safe rebalance requires explicit WithShards.
 var ErrLegacyRebalanceUnsafe = errors.New("corkscrewdb: fenced cluster rebalance requires explicit shard ranges")
+
+// ErrRecomputeRequiresDeterministicProvider is returned when a collection is
+// created with WithRecomputeRawFromText() but the active embedding provider is
+// not deterministic (does not implement deterministicProvider and return true),
+// or when the provider is the silent builtin fallback when Eos was the intended
+// (default) provider.
+var ErrRecomputeRequiresDeterministicProvider = errors.New("corkscrewdb: recompute requires a deterministic embedding provider")
+
+// ErrRecomputeMultiVectorUnsupported is returned when WithRecomputeRawFromText()
+// is used together with multi-vector operations, which are excluded in v0.4.0.
+var ErrRecomputeMultiVectorUnsupported = errors.New("corkscrewdb: recompute is unsupported for multi-vector collections in v0.4.0")
+
+// ErrRecomputeRequiresText is returned when a put reaches a recompute-mode
+// collection without the text field set (raw float fallback is unavailable).
+var ErrRecomputeRequiresText = errors.New("corkscrewdb: recompute collection requires text on every write")
+
+// ErrRecomputeBackendMismatch is returned when a recompute collection is opened
+// on a host whose embedding backend fingerprint differs from the one pinned at
+// create time (§9.4 backend-fingerprint fast-fail gate).
+var ErrRecomputeBackendMismatch = errors.New("corkscrewdb: recompute collection backend fingerprint mismatch")
+
+// ErrEmbedderDriftDetected is returned when the drift-check on a recomputed raw
+// vector detects that the re-quantized codes do not byte-match the stored codes,
+// indicating that the embedding backend has drifted since the codes were written.
+var ErrEmbedderDriftDetected = errors.New("corkscrewdb: embedder drift detected; recomputed codes do not match stored codes")

@@ -9,6 +9,7 @@ CorkScrewDB is a distributed, versioned vector database in pure Go.
 - Append-only WAL persistence with snapshot recovery
 - Quantized index persistence (`.tqi`) and HNSW graph persistence (`graph.hnsw`)
 - Content-addressed raw vector store (blake3-keyed `.rvs` segments)
+- Recompute cold tier: drop the raw store and re-derive vectors from text for exact rerank (LEANN-style), with a per-candidate drift-check
 - Embedding-space config enforcement
 - Metadata filters and point-in-time collection views with LRU view cache
 - gRPC transport with `Connect(...)` and `Serve(...)`
@@ -26,7 +27,7 @@ Agents working with CorkScrewDB should use the [using-corkscrewdb](https://githu
 
 ## Status
 
-`v0.3.0` — sparse vectors, hybrid SearchMulti with RRF/weighted fusion, real HNSW (RNG/hub-protected pruning, O(degree) tombstone delete, build-from-codes), content-addressed raw vector store, 2PC cluster rebalance, pluggable Scorer seam (optional CUDA GPU scorer), and LRU point-in-time view cache have shipped.
+`v0.4.0` — the recompute cold tier has shipped: `WithRecomputeRawFromText()` drops the raw store and re-derives vectors from stored text for exact rerank with a per-candidate drift-check, `WithRerank(c)` controls overfetch depth, `ReQuantize` re-quantizes a collection's full history at new parameters, and backend-fingerprint enforcement guards against silently-degraded rerank on reopen. This builds on v0.3.0: sparse vectors, hybrid SearchMulti with RRF/weighted fusion, real HNSW (RNG/hub-protected pruning, O(degree) tombstone delete, build-from-codes), content-addressed raw vector store, 2PC cluster rebalance, pluggable Scorer seam (optional CUDA GPU scorer), and LRU point-in-time view cache.
 
 ## Install
 
@@ -160,6 +161,42 @@ coll := db.Collection("compact",
 ```
 
 `WithoutRawStore()` replaces the old `WithQuantizedOnlyPersistence()` / `WithVectorStorage(VectorStorageQuantizedOnly)` options, which are no longer present.
+
+## Recompute Cold Tier (exact rerank without the raw store)
+
+For corpora where storing raw float vectors is too expensive but exact-rerank accuracy still matters, `WithRecomputeRawFromText()` drops the raw store entirely and re-derives raw vectors from each entry's stored text on demand. Searches overfetch quantized candidates and exact-rerank them against the recomputed vectors, with a per-candidate drift-check: if a recomputed vector does not reproduce the stored quantized code, that candidate falls back to its quantized score. A ranking is therefore never wrong — at worst it degrades to codes-only.
+
+This mode requires a deterministic embedding provider (collection creation is rejected otherwise, and the silent built-in fallback is refused when a real provider was intended). Set the rerank depth with `WithRerank(c)`: searches overfetch `c × k` candidates before reranking; depth ≤ 1 is plain codes-only. Recompute mode is mutually exclusive with `WithoutRawStore()`, and `PutVector` / `PutMultiVector` without text are rejected (text is the source of truth).
+
+```go
+coll := db.Collection("notes",
+    corkscrewdb.WithBitWidth(2),
+    corkscrewdb.WithRecomputeRawFromText(),
+    corkscrewdb.WithRerank(8),
+    corkscrewdb.WithProvider(myDeterministicProvider), // required: must be deterministic
+)
+
+// Every entry carries text — recompute re-derives the vector from it.
+if err := coll.Put("n-1", corkscrewdb.Entry{Text: "WebAuthn passkeys replace passwords"}); err != nil {
+    log.Fatal(err)
+}
+
+// Search overfetches 8×k candidates and exact-reranks them.
+results, _ := coll.Search("passkeys", 5)
+```
+
+Point-in-time views and `SearchMulti` rerank the dense channel the same way. On reopen, a recompute collection refuses to open if the embedding backend fingerprint changed (`ErrRecomputeBackendMismatch`), preventing a silently-degraded rerank.
+
+To re-quantize an entire collection's history at new parameters (for example, raising the bit width for better recall), call `ReQuantize`. It recomputes and re-quantizes every version from text and makes the new codes durable via a fresh snapshot:
+
+```go
+// Re-derive every version's vector from text and re-quantize at 8-bit.
+if err := coll.ReQuantize(8, newSeed); err != nil {
+    log.Fatal(err)
+}
+```
+
+`ReQuantize` aborts with `ErrEmbedderDriftDetected` if the provider no longer reproduces the stored codes (the embedder has drifted); pass `WithAllowReQuantizeDrift()` to re-quantize anyway.
 
 ## Choosing Bit Width
 
