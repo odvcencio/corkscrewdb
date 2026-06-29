@@ -3,7 +3,9 @@ package corkscrewdb
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -11,6 +13,92 @@ import (
 	eosruntime "m31labs.dev/eos/runtime"
 	"m31labs.dev/eos/runtime/backend"
 )
+
+func TestLoadImportedBGECandidateProviderRequiresPackagePath(t *testing.T) {
+	provider, err := LoadImportedBGECandidateProvider(" \t ")
+	if err == nil {
+		t.Fatal("expected empty package path error, got nil")
+	}
+	if provider != nil {
+		t.Fatalf("provider = %#v, want nil", provider)
+	}
+	if !strings.Contains(err.Error(), "imported BGE candidate package path is required") {
+		t.Fatalf("error = %q, want package path requirement", err.Error())
+	}
+}
+
+func TestImportedBGECandidateProviderMetadataConstants(t *testing.T) {
+	if ImportedBGECandidateProviderID != "corkscrewdb-imported-bge-eos-embed-v1-candidate" {
+		t.Fatalf("provider id = %q", ImportedBGECandidateProviderID)
+	}
+	wantFingerprint := "eos-imported-bge:" +
+		eosruntime.ImportedBERTEmbedderCandidatePackageSHA256 + ":" +
+		eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256
+	if got := importedBGECandidateBackendFingerprint(); got != wantFingerprint {
+		t.Fatalf("backend fingerprint = %q, want %q", got, wantFingerprint)
+	}
+}
+
+func TestLoadImportedBGECandidateProviderIntegration(t *testing.T) {
+	path := strings.TrimSpace(os.Getenv("CORKSCREWDB_IMPORTED_BGE_CANDIDATE_PACKAGE"))
+	if path == "" {
+		t.Skip("set CORKSCREWDB_IMPORTED_BGE_CANDIDATE_PACKAGE to run imported-BGE candidate integration")
+	}
+	provider, err := LoadImportedBGECandidateProvider(path)
+	if err != nil {
+		t.Fatalf("load imported BGE candidate provider: %v", err)
+	}
+	defer provider.Close()
+
+	if got := provider.Dim(); got != 384 {
+		t.Fatalf("dim = %d, want 384", got)
+	}
+	named, ok := provider.(interface{ ProviderID() string })
+	if !ok {
+		t.Fatal("provider does not expose ProviderID")
+	}
+	if got := named.ProviderID(); got != ImportedBGECandidateProviderID {
+		t.Fatalf("provider id = %q, want %q", got, ImportedBGECandidateProviderID)
+	}
+	deterministic, ok := provider.(interface{ Deterministic() bool })
+	if !ok || !deterministic.Deterministic() {
+		t.Fatalf("deterministic capability = %v/%v, want true/true", ok, ok && deterministic.Deterministic())
+	}
+	fingerprinted, ok := provider.(interface{ BackendFingerprint() string })
+	if !ok {
+		t.Fatal("provider does not expose BackendFingerprint")
+	}
+	if got, want := fingerprinted.BackendFingerprint(), importedBGECandidateBackendFingerprint(); got != want {
+		t.Fatalf("backend fingerprint = %q, want %q", got, want)
+	}
+
+	blank, err := provider.Encode(" \n ")
+	if err != nil {
+		t.Fatalf("encode blank: %v", err)
+	}
+	assertZeroVector(t, blank, 384)
+
+	query, err := provider.Encode("Which document discusses LDL cholesterol treatment with statins?")
+	if err != nil {
+		t.Fatalf("encode query: %v", err)
+	}
+	assertNonZeroVector(t, query, 384)
+
+	batch, err := provider.EncodeBatch([]string{
+		"Statins reduce LDL cholesterol and cardiovascular risk.",
+		"",
+		"Kafka consumers track offsets and retry failed messages.",
+	})
+	if err != nil {
+		t.Fatalf("encode batch documents: %v", err)
+	}
+	if len(batch) != 3 {
+		t.Fatalf("batch rows = %d, want 3", len(batch))
+	}
+	assertNonZeroVector(t, batch[0], 384)
+	assertZeroVector(t, batch[1], 384)
+	assertNonZeroVector(t, batch[2], 384)
+}
 
 func TestEmbeddedDefaultEosProviderAssetHashes(t *testing.T) {
 	tests := []struct {
@@ -239,4 +327,29 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> f16[B, E] {
 		t.Fatalf("write memory plan: %v", err)
 	}
 	return artifactPath
+}
+
+func assertZeroVector(t *testing.T, vec []float32, wantDim int) {
+	t.Helper()
+	if len(vec) != wantDim {
+		t.Fatalf("vector len = %d, want %d", len(vec), wantDim)
+	}
+	for _, value := range vec {
+		if value != 0 {
+			t.Fatalf("expected zero vector, got %v", vec)
+		}
+	}
+}
+
+func assertNonZeroVector(t *testing.T, vec []float32, wantDim int) {
+	t.Helper()
+	if len(vec) != wantDim {
+		t.Fatalf("vector len = %d, want %d", len(vec), wantDim)
+	}
+	for _, value := range vec {
+		if value != 0 {
+			return
+		}
+	}
+	t.Fatalf("expected non-zero vector, got %v", vec)
 }
