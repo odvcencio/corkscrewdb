@@ -16,7 +16,11 @@ import (
 
 const (
 	indexMagic   = uint32(0x54514931) // TQI1
-	indexVersion = uint8(3)
+	indexVersion = uint8(4)           // v4 adds IPQuantized.Norm (true-MIPS migration)
+
+	// indexMinVersion is the oldest .tqi wire version loadIndexFileV3 still
+	// accepts. Versions below this floor are rejected outright.
+	indexMinVersion = uint8(3)
 
 	// maxIndexFieldBytes caps any single length-prefixed field read from a .tqi
 	// file.  No legitimate field can exceed a generous 64 MiB ceiling (matching
@@ -108,6 +112,9 @@ func marshalIndexFile(idx *index, maxLamport uint64, rawStore, sparse bool) ([]b
 		if err := write(math.Float32bits(entry.qv.ResNorm)); err != nil {
 			return nil, err
 		}
+		if err := write(math.Float32bits(entry.qv.Norm)); err != nil {
+			return nil, err
+		}
 		if err := writeString(entry.text); err != nil {
 			return nil, err
 		}
@@ -179,9 +186,15 @@ func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 	if err := read(&version); err != nil {
 		return nil, 0, false, false, err
 	}
-	if version != 3 {
+	if version < indexMinVersion {
 		return nil, 0, false, false, fmt.Errorf("%w: tqi version %d", ErrFormatTooOld, version)
 	}
+	if version > indexVersion {
+		return nil, 0, false, false, fmt.Errorf("corkscrewdb: unsupported tqi version %d (max known %d)", version, indexVersion)
+	}
+	// v3 predates IPQuantized.Norm; decoded v3 payloads default Norm to 1,
+	// preserving their old unit-space (cosine) scoring until re-quantized.
+	hasNorm := version >= 4
 	var dim uint32
 	if err := read(&dim); err != nil {
 		return nil, 0, false, false, err
@@ -241,6 +254,20 @@ func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 		if err := read(&resNormBits); err != nil {
 			return nil, 0, false, false, err
 		}
+		norm := float32(1) // v3 default: unit norm (legacy cosine semantics)
+		if hasNorm {
+			var normBits uint32
+			if err := read(&normBits); err != nil {
+				return nil, 0, false, false, err
+			}
+			norm = math.Float32frombits(normBits)
+			// m1: reject NaN/Inf/negative, matching turboquant's own wire codec
+			// (wire.go:144). A negative norm silently inverts ScoreUpperBound into
+			// a lower bound and drops real top-k members.
+			if math.IsNaN(float64(norm)) || math.IsInf(float64(norm), 0) || norm < 0 {
+				return nil, 0, false, false, fmt.Errorf("corkscrewdb: invalid index norm %v", norm)
+			}
+		}
 		text, err := readString()
 		if err != nil {
 			return nil, 0, false, false, err
@@ -263,6 +290,7 @@ func loadIndexFileV3(path string) (*index, uint64, bool, bool, error) {
 			MSE:     append([]byte(nil), mse...),
 			Signs:   append([]byte(nil), signs...),
 			ResNorm: math.Float32frombits(resNormBits),
+			Norm:    norm,
 		}
 		idx.addQuantized(id, qv, text, meta, version)
 	}

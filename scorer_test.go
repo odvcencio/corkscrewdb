@@ -184,7 +184,7 @@ func TestScoreUpperBoundPrunableContract(t *testing.T) {
 	for bits, wantPrunable := range prunableWidths {
 		qz := turboquant.NewIPWithSeed(dim, bits, int64(1000+bits))
 		pq := qz.PrepareQuery(make([]float32, dim))
-		_, prunable := pq.ScoreUpperBound(1.0)
+		_, prunable := pq.ScoreUpperBound(1.0, 1.0)
 		if prunable != wantPrunable {
 			t.Fatalf("ipBitWidth=%d: prunable=%v want %v", bits, prunable, wantPrunable)
 		}
@@ -263,7 +263,7 @@ func TestScorePruneBoundAndEffectiveness(t *testing.T) {
 			pq := qz.PrepareQuery(q)
 			for i := range corpus {
 				exact := qz.InnerProductPrepared(corpus[i], pq)
-				bound, prunable := pq.ScoreUpperBound(corpus[i].ResNorm)
+				bound, prunable := pq.ScoreUpperBound(corpus[i].Norm, corpus[i].ResNorm)
 				if !prunable {
 					t.Fatalf("bits=%d: expected prunable for LUT width", bits)
 				}

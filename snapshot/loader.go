@@ -112,9 +112,15 @@ func read(r io.Reader) (Data, error) {
 	if err := read(&formatVersion); err != nil {
 		return data, err
 	}
-	if formatVersion != 6 {
+	if formatVersion < snapshotMinVersion {
 		return data, fmt.Errorf("snapshot: %w: version %d", ErrFormatTooOld, formatVersion)
 	}
+	if formatVersion > snapshotVersion {
+		return data, fmt.Errorf("snapshot: unsupported version %d (max known %d)", formatVersion, snapshotVersion)
+	}
+	// v6 predates QuantizedVector.Norm; decoded v6 payloads default Norm to 1,
+	// preserving their old unit-space (cosine) scoring until re-quantized.
+	hasNorm := formatVersion >= 7
 
 	var err error
 	data.Collection, err = readString()
@@ -186,10 +192,25 @@ func read(r io.Reader) (Data, error) {
 				if err := read(&resNormBits); err != nil {
 					return data, err
 				}
+				norm := float32(1) // v6 default: unit norm (legacy cosine semantics)
+				if hasNorm {
+					var normBits uint32
+					if err := read(&normBits); err != nil {
+						return data, err
+					}
+					norm = math.Float32frombits(normBits)
+					// m1: reject NaN/Inf/negative, matching turboquant's own wire codec
+					// (wire.go:144). A negative norm silently inverts ScoreUpperBound
+					// into a lower bound and drops real top-k members.
+					if math.IsNaN(float64(norm)) || math.IsInf(float64(norm), 0) || norm < 0 {
+						return data, fmt.Errorf("snapshot: invalid norm %v", norm)
+					}
+				}
 				version.Quantized = &QuantizedVector{
 					MSE:     append([]byte(nil), mse...),
 					Signs:   append([]byte(nil), signs...),
 					ResNorm: math.Float32frombits(resNormBits),
+					Norm:    norm,
 				}
 			}
 			// RawHash block.
@@ -267,10 +288,25 @@ func read(r io.Reader) (Data, error) {
 							if err := read(&resNormBits); err != nil {
 								return data, err
 							}
+							childNorm := float32(1) // v6 default: unit norm (legacy cosine semantics)
+							if hasNorm {
+								var normBits uint32
+								if err := read(&normBits); err != nil {
+									return data, err
+								}
+								childNorm = math.Float32frombits(normBits)
+								// m1: reject NaN/Inf/negative, matching turboquant's own wire
+								// codec (wire.go:144). A negative norm silently inverts
+								// ScoreUpperBound into a lower bound and drops real top-k members.
+								if math.IsNaN(float64(childNorm)) || math.IsInf(float64(childNorm), 0) || childNorm < 0 {
+									return data, fmt.Errorf("snapshot: invalid child norm %v", childNorm)
+								}
+							}
 							child.Quantized = &QuantizedVector{
 								MSE:     append([]byte(nil), mse...),
 								Signs:   append([]byte(nil), signs...),
 								ResNorm: math.Float32frombits(resNormBits),
+								Norm:    childNorm,
 							}
 						}
 						var childDim uint32
@@ -304,7 +340,7 @@ func read(r io.Reader) (Data, error) {
 					if err := read(&signsLen); err != nil {
 						return data, err
 					}
-					mseBlockLen, signsBlockLen, resNormBlockLen, err := validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen)
+					mseBlockLen, signsBlockLen, resNormBlockLen, normBlockLen, err := validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen, hasNorm)
 					if err != nil {
 						return data, err
 					}
@@ -318,6 +354,9 @@ func read(r io.Reader) (Data, error) {
 					}
 					if resNormBlockLen > maxReadableBytes() {
 						return data, fmt.Errorf("snapshot: compact child resnorm block too large %d", resNormBlockLen)
+					}
+					if normBlockLen > maxReadableBytes() {
+						return data, fmt.Errorf("snapshot: compact child norm block too large %d", normBlockLen)
 					}
 					version.Children = make([]ChildVector, 0, childCount)
 					for i := range childCount {
@@ -334,9 +373,29 @@ func read(r io.Reader) (Data, error) {
 								MSE:     append([]byte(nil), mseBlock[mseStart:mseStart+int(mseLen)]...),
 								Signs:   append([]byte(nil), signsBlock[signsStart:signsStart+int(signsLen)]...),
 								ResNorm: math.Float32frombits(resNormBits),
+								Norm:    1, // v6 default; overwritten below when hasNorm
 							},
 						}
 						version.Children = append(version.Children, child)
+					}
+					// The Norm column follows the entire ResNorm column (column-major
+					// layout), so it can only be read after every child's ResNorm has
+					// been consumed above.
+					if hasNorm {
+						for i := range version.Children {
+							var normBits uint32
+							if err := read(&normBits); err != nil {
+								return data, err
+							}
+							compactNorm := math.Float32frombits(normBits)
+							// m1: reject NaN/Inf/negative, matching turboquant's own wire
+							// codec (wire.go:144). A negative norm silently inverts
+							// ScoreUpperBound into a lower bound and drops real top-k members.
+							if math.IsNaN(float64(compactNorm)) || math.IsInf(float64(compactNorm), 0) || compactNorm < 0 {
+								return data, fmt.Errorf("snapshot: invalid compact child norm %v", compactNorm)
+							}
+							version.Children[i].Quantized.Norm = compactNorm
+						}
 					}
 				default:
 					return data, fmt.Errorf("snapshot: unsupported child encoding %d", childEncoding)
@@ -388,45 +447,56 @@ func read(r io.Reader) (Data, error) {
 	return data, nil
 }
 
-func validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen uint32) (uint64, uint64, uint64, error) {
+// validateCompactQuantizedOrdinalLengths validates and returns the byte
+// lengths of the MSE, Signs, ResNorm, and (when hasNorm) Norm columns of a
+// compact-ordinal child block. normBlockLen is 0 when hasNorm is false (v6
+// payloads carry no Norm column).
+func validateCompactQuantizedOrdinalLengths(childCount, childDim, mseLen, signsLen uint32, hasNorm bool) (uint64, uint64, uint64, uint64, error) {
 	if childCount == 0 {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child count is zero")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child count is zero")
 	}
 	if childCount > maxCompactOrdinalChildren {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child count too large %d", childCount)
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child count too large %d", childCount)
 	}
 	if childDim == 0 {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child dim is zero")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child dim is zero")
 	}
 	if mseLen == 0 {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE length is zero")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child MSE length is zero")
 	}
 	if signsLen == 0 {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs length is zero")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child signs length is zero")
 	}
 	mseBlockLen, ok := checkedMulUint32(childCount, mseLen)
 	if !ok {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block size overflows")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block size overflows")
 	}
 	signsBlockLen, ok := checkedMulUint32(childCount, signsLen)
 	if !ok {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs block size overflows")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child signs block size overflows")
 	}
 	resNormBlockLen, ok := checkedMulUint32(childCount, 4)
 	if !ok {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child resnorm block size overflows")
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child resnorm block size overflows")
+	}
+	var normBlockLen uint64
+	if hasNorm {
+		normBlockLen, ok = checkedMulUint32(childCount, 4)
+		if !ok {
+			return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child norm block size overflows")
+		}
 	}
 	if mseBlockLen > maxCompactChildBlockBytes {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block too large %d", mseBlockLen)
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child MSE block too large %d", mseBlockLen)
 	}
 	if signsBlockLen > maxCompactChildBlockBytes {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child signs block too large %d", signsBlockLen)
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child signs block too large %d", signsBlockLen)
 	}
-	totalBlockLen := mseBlockLen + signsBlockLen + resNormBlockLen
+	totalBlockLen := mseBlockLen + signsBlockLen + resNormBlockLen + normBlockLen
 	if totalBlockLen < mseBlockLen || totalBlockLen > maxCompactChildBlockBytes {
-		return 0, 0, 0, fmt.Errorf("snapshot: compact child block too large %d", totalBlockLen)
+		return 0, 0, 0, 0, fmt.Errorf("snapshot: compact child block too large %d", totalBlockLen)
 	}
-	return mseBlockLen, signsBlockLen, resNormBlockLen, nil
+	return mseBlockLen, signsBlockLen, resNormBlockLen, normBlockLen, nil
 }
 
 func checkedMulUint32(a, b uint32) (uint64, bool) {

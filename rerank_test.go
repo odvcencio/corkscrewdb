@@ -383,6 +383,56 @@ func TestDriftCheckResNormBitwise(t *testing.T) {
 	}
 }
 
+// TestDriftCheckNormBitwise verifies that byteEqualQuantized also compares
+// Norm bitwise (via math.Float32bits), mirroring TestDriftCheckResNormBitwise.
+// This is the true-MIPS migration's load-bearing case: a legacy stored code
+// (Norm defaulted to 1 on load) must compare unequal to a freshly re-quantized
+// code carrying a different real norm, even when MSE+Signs+ResNorm all match.
+func TestDriftCheckNormBitwise(t *testing.T) {
+	makeCode := func(normBits uint32) *turboquant.IPQuantized {
+		return &turboquant.IPQuantized{
+			MSE:     []byte{0x01, 0x02},
+			Signs:   []byte{0xAB},
+			ResNorm: 1.0,
+			Norm:    math.Float32frombits(normBits),
+		}
+	}
+
+	a := makeCode(0x40000000) // 2.0
+	b := makeCode(0x40000000) // 2.0 exact same bits
+	if !byteEqualQuantized(a, b) {
+		t.Error("byteEqualQuantized: same Norm bits should return true")
+	}
+
+	// Legacy default (Norm=1) vs a real non-unit norm: MSE/Signs/ResNorm match,
+	// but Norm differs — must return false (the load-bearing case).
+	legacyDefault := makeCode(0x3F800000) // 1.0 (wal/snapshot/index-file legacy default)
+	realNorm := makeCode(0x40000000)      // 2.0 (a genuine non-unit vector's norm)
+	if byteEqualQuantized(legacyDefault, realNorm) {
+		t.Error("byteEqualQuantized: legacy Norm=1 default vs real Norm=2 should return false")
+	}
+
+	// -0.0 vs +0.0: different bit patterns, must return false.
+	negZero := makeCode(0x80000000)
+	posZero := makeCode(0x00000000)
+	if byteEqualQuantized(negZero, posZero) {
+		t.Error("byteEqualQuantized: Norm -0.0 vs +0.0 should return false (bitwise comparison)")
+	}
+
+	// NaN with different payloads must return false.
+	nanA := makeCode(0x7FC00000)
+	nanB := makeCode(0x7F800001)
+	if byteEqualQuantized(nanA, nanB) {
+		t.Error("byteEqualQuantized: different Norm NaN bits should return false")
+	}
+
+	// Same MSE/Signs/ResNorm but different Norm must return false.
+	e := &turboquant.IPQuantized{MSE: []byte{0x01, 0x02}, Signs: []byte{0xAB}, ResNorm: 1.0, Norm: 3.0}
+	if byteEqualQuantized(a, e) {
+		t.Error("byteEqualQuantized: different Norm should return false")
+	}
+}
+
 // TestRerankScaleMix verifies that MATCH (exact dot) and FALLBACK
 // (quantized score from InnerProductPrepared) are on the same ⟨q,x⟩ scale.
 // We do this by using a deterministic provider (all MATCH) and verifying

@@ -228,7 +228,10 @@ func TestTransportProtoBridge(t *testing.T) {
 		ActorID:      "actor-1",
 	}
 	in := RPCPullEntriesResponse{Entries: []RPCReplicaEntry{entry}, LatestClock: 42}
-	roundEntries := fromProtoPullEntriesResponse(toProtoPullEntriesResponse(in))
+	roundEntries, err := fromProtoPullEntriesResponse(toProtoPullEntriesResponse(in))
+	if err != nil {
+		t.Fatalf("fromProtoPullEntriesResponse: %v", err)
+	}
 	if len(roundEntries.Entries) != 1 {
 		t.Fatalf("entries len = %d", len(roundEntries.Entries))
 	}
@@ -267,7 +270,10 @@ func TestTransportProtoBridge(t *testing.T) {
 		SparseEnabled: true,
 		Records:       []RPCSnapshotRecord{{ID: "vec-1", Versions: []RPCSnapshotVersion{sv}}},
 	}
-	snapOut := fromProtoPullSnapshotResponse(toProtoPullSnapshotResponse(snapIn))
+	snapOut, err := fromProtoPullSnapshotResponse(toProtoPullSnapshotResponse(snapIn))
+	if err != nil {
+		t.Fatalf("fromProtoPullSnapshotResponse: %v", err)
+	}
 	if !snapOut.RawStore || !snapOut.SparseEnabled || snapOut.Seed != 7 {
 		t.Fatalf("snapshot config not preserved: %+v", snapOut)
 	}

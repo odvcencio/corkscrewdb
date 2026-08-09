@@ -96,7 +96,7 @@ func (s *defaultScorer) scoreTopKOver(corpus rowCorpus, pq turboquant.PreparedQu
 		}
 		code := corpus.codeAt(i)
 		if h.Len() == k { // heap full: try the proven upper-bound early-out (D3)
-			bound, prunable := pq.ScoreUpperBound(code.ResNorm)
+			bound, prunable := pq.ScoreUpperBound(code.Norm, code.ResNorm)
 			if prunable && bound <= (*h)[0].Score {
 				// exact <= bound <= kthBest: cannot displace the k-th member, and
 				// kthBest only rises, so it can never qualify later. Safe to skip.
@@ -142,7 +142,7 @@ func (s *defaultScorer) ScoreTopKMulti(pqs []turboquant.PreparedQuery, k int, ac
 				skipRow = false
 				break
 			}
-			b, prunable := pqs[qi].ScoreUpperBound(s.corpus[i].ResNorm)
+			b, prunable := pqs[qi].ScoreUpperBound(s.corpus[i].Norm, s.corpus[i].ResNorm)
 			if !prunable || b > (*heaps[qi])[0].Score {
 				skipRow = false
 				break

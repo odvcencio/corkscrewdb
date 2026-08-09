@@ -285,6 +285,7 @@ type QuantizedVector struct {
 	Mse           []byte                 `protobuf:"bytes,1,opt,name=mse,proto3" json:"mse,omitempty"`                          // packed MSE indices ((b-1) bits/coord)
 	Signs         []byte                 `protobuf:"bytes,2,opt,name=signs,proto3" json:"signs,omitempty"`                      // packed QJL sign bits (1 bit/coord)
 	ResNorm       float32                `protobuf:"fixed32,3,opt,name=res_norm,json=resNorm,proto3" json:"res_norm,omitempty"` // L2 norm of residual
+	Norm          *float32               `protobuf:"fixed32,4,opt,name=norm,proto3,oneof" json:"norm,omitempty"`                // L2 norm of the original input vector; presence-aware so a rolling
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -336,6 +337,13 @@ func (x *QuantizedVector) GetSigns() []byte {
 func (x *QuantizedVector) GetResNorm() float32 {
 	if x != nil {
 		return x.ResNorm
+	}
+	return 0
+}
+
+func (x *QuantizedVector) GetNorm() float32 {
+	if x != nil && x.Norm != nil {
+		return *x.Norm
 	}
 	return 0
 }
@@ -2634,11 +2642,13 @@ const file_corkscrewdb_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x14\n" +
 	"\x05start\x18\x03 \x01(\x04R\x05start\x12\x10\n" +
-	"\x03end\x18\x04 \x01(\x04R\x03end\"T\n" +
+	"\x03end\x18\x04 \x01(\x04R\x03end\"v\n" +
 	"\x0fQuantizedVector\x12\x10\n" +
 	"\x03mse\x18\x01 \x01(\fR\x03mse\x12\x14\n" +
 	"\x05signs\x18\x02 \x01(\fR\x05signs\x12\x19\n" +
-	"\bres_norm\x18\x03 \x01(\x02R\aresNorm\"?\n" +
+	"\bres_norm\x18\x03 \x01(\x02R\aresNorm\x12\x17\n" +
+	"\x04norm\x18\x04 \x01(\x02H\x00R\x04norm\x88\x01\x01B\a\n" +
+	"\x05_norm\"?\n" +
 	"\vSparseBlock\x12\x18\n" +
 	"\aindices\x18\x01 \x03(\rR\aindices\x12\x16\n" +
 	"\x06values\x18\x02 \x03(\x02R\x06values\"\x9a\x02\n" +
@@ -3036,6 +3046,7 @@ func file_corkscrewdb_proto_init() {
 	if File_corkscrewdb_proto != nil {
 		return
 	}
+	file_corkscrewdb_proto_msgTypes[4].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

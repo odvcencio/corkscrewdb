@@ -177,7 +177,7 @@ func (c *grpcClient) History(collection, id string, useAt bool, atLamport uint64
 	if err != nil {
 		return nil, normalizeTransportError(err)
 	}
-	return fromProtoVersions(resp.GetVersions()), nil
+	return fromProtoVersions(resp.GetVersions())
 }
 
 func (c *grpcClient) Delete(collection, id string, internal bool) error {
@@ -204,7 +204,7 @@ func (c *grpcClient) PullEntries(req RPCPullEntriesRequest) (RPCPullEntriesRespo
 	if err != nil {
 		return RPCPullEntriesResponse{}, normalizeTransportError(err)
 	}
-	return fromProtoPullEntriesResponse(resp), nil
+	return fromProtoPullEntriesResponse(resp)
 }
 
 func (c *grpcClient) StreamEntries(ctx context.Context, req RPCPullEntriesRequest, onResponse func(RPCPullEntriesResponse) error) error {
@@ -227,7 +227,11 @@ func (c *grpcClient) StreamEntries(ctx context.Context, req RPCPullEntriesReques
 			if onResponse == nil {
 				continue
 			}
-			if callErr := onResponse(fromProtoPullEntriesResponse(resp)); callErr != nil {
+			converted, convErr := fromProtoPullEntriesResponse(resp)
+			if convErr != nil {
+				return convErr
+			}
+			if callErr := onResponse(converted); callErr != nil {
 				return callErr
 			}
 			continue
@@ -247,7 +251,7 @@ func (c *grpcClient) PullSnapshot(req RPCPullSnapshotRequest) (RPCPullSnapshotRe
 	if err != nil {
 		return RPCPullSnapshotResponse{}, normalizeTransportError(err)
 	}
-	return fromProtoPullSnapshotResponse(resp), nil
+	return fromProtoPullSnapshotResponse(resp)
 }
 
 func (c *grpcClient) PrepareRebalance(shards []ShardAssignment, epoch uint64, coordinator string) error {
@@ -895,27 +899,49 @@ func fromProtoSearchResults(results []*grpcapi.SearchResult) []SearchResult {
 	return out
 }
 
-// toProtoQuantized maps a wal.QuantizedVector onto the wire message.
+// toProtoQuantized maps a wal.QuantizedVector onto the wire message. Norm is
+// always sent as a present pointer (B1): the field is `optional float` so a
+// genuine zero vector transmits presence=true, value 0, distinguishable on
+// the wire from an old peer that predates this field entirely.
 func toProtoQuantized(qv *walpkg.QuantizedVector) *grpcapi.QuantizedVector {
 	if qv == nil {
 		return nil
 	}
+	norm := qv.Norm
 	return &grpcapi.QuantizedVector{
 		Mse:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    &norm,
 	}
 }
 
-func fromProtoQuantized(qv *grpcapi.QuantizedVector) *walpkg.QuantizedVector {
+// fromProtoQuantized maps the wire message onto a wal.QuantizedVector.
+//
+// Norm is presence-aware (B1): a nil pointer means the peer predates the
+// norm field entirely (a rolling upgrade from an old binary), and defaults
+// to 1 (unit-space), matching every at-rest reader's legacy default. A
+// present value is validated (m1): NaN, Inf, or negative is rejected,
+// mirroring turboquant's own wire codec (wire.go:144) — a negative norm
+// silently inverts ScoreUpperBound into a lower bound and drops real top-k
+// members, so this must never be constructed from untrusted wire input.
+func fromProtoQuantized(qv *grpcapi.QuantizedVector) (*walpkg.QuantizedVector, error) {
 	if qv == nil {
-		return nil
+		return nil, nil
+	}
+	norm := float32(1) // absent: peer predates norm presence, default to unit-space
+	if qv.Norm != nil {
+		norm = *qv.Norm
+		if math.IsNaN(float64(norm)) || math.IsInf(float64(norm), 0) || norm < 0 {
+			return nil, fmt.Errorf("corkscrewdb: invalid quantized vector norm %v", norm)
+		}
 	}
 	return &walpkg.QuantizedVector{
 		MSE:     append([]byte(nil), qv.GetMse()...),
 		Signs:   append([]byte(nil), qv.GetSigns()...),
 		ResNorm: qv.GetResNorm(),
-	}
+		Norm:    norm,
+	}, nil
 }
 
 func toProtoSparseBlock(sb *walpkg.SparseBlock) *grpcapi.SparseBlock {
@@ -955,21 +981,25 @@ func toProtoChildVectors(children []walpkg.ChildVector) []*grpcapi.ChildVector {
 	return out
 }
 
-func fromProtoChildVectors(children []*grpcapi.ChildVector) []walpkg.ChildVector {
+func fromProtoChildVectors(children []*grpcapi.ChildVector) ([]walpkg.ChildVector, error) {
 	if len(children) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]walpkg.ChildVector, len(children))
 	for i, child := range children {
+		qv, err := fromProtoQuantized(child.GetQuantized())
+		if err != nil {
+			return nil, fmt.Errorf("corkscrewdb: child %q: %w", child.GetId(), err)
+		}
 		out[i] = walpkg.ChildVector{
 			ID:        child.GetId(),
-			Quantized: fromProtoQuantized(child.GetQuantized()),
+			Quantized: qv,
 			Dim:       int(child.GetDim()),
 			Text:      child.GetText(),
 			Metadata:  cloneMetadata(child.GetMetadata()),
 		}
 	}
-	return out
+	return out, nil
 }
 
 func toProtoVersions(versions []Version) []*grpcapi.Version {
@@ -994,17 +1024,25 @@ func toProtoVersions(versions []Version) []*grpcapi.Version {
 	return out
 }
 
-func fromProtoVersions(versions []*grpcapi.Version) []Version {
+func fromProtoVersions(versions []*grpcapi.Version) ([]Version, error) {
 	if len(versions) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]Version, len(versions))
 	for i, version := range versions {
+		qv, err := fromProtoQuantized(version.GetQuantized())
+		if err != nil {
+			return nil, err
+		}
+		children, err := fromProtoChildVectors(version.GetChildren())
+		if err != nil {
+			return nil, err
+		}
 		out[i] = Version{
-			Quantized:    fromWALQuantized(fromProtoQuantized(version.GetQuantized())),
+			Quantized:    fromWALQuantized(qv),
 			RawHash:      append([]byte(nil), version.GetRawHash()...),
 			Sparse:       fromWALSparse(fromProtoSparseBlock(version.GetSparse())),
-			Children:     fromWALChildren(fromProtoChildVectors(version.GetChildren())),
+			Children:     fromWALChildren(children),
 			Text:         version.GetText(),
 			Metadata:     cloneMetadata(version.GetMetadata()),
 			LamportClock: version.GetLamportClock(),
@@ -1013,7 +1051,7 @@ func fromProtoVersions(versions []*grpcapi.Version) []Version {
 			Tombstone:    version.GetTombstone(),
 		}
 	}
-	return out
+	return out, nil
 }
 
 func toProtoPullEntriesResponse(resp RPCPullEntriesResponse) *grpcapi.PullEntriesResponse {
@@ -1045,28 +1083,36 @@ func toProtoPullEntriesResponse(resp RPCPullEntriesResponse) *grpcapi.PullEntrie
 	return out
 }
 
-func fromProtoPullEntriesResponse(resp *grpcapi.PullEntriesResponse) RPCPullEntriesResponse {
+func fromProtoPullEntriesResponse(resp *grpcapi.PullEntriesResponse) (RPCPullEntriesResponse, error) {
 	if resp == nil {
-		return RPCPullEntriesResponse{}
+		return RPCPullEntriesResponse{}, nil
 	}
 	out := RPCPullEntriesResponse{
 		LatestClock: resp.GetLatestClock(),
 		HasMore:     resp.GetHasMore(),
 	}
 	if len(resp.GetEntries()) == 0 {
-		return out
+		return out, nil
 	}
 	out.Entries = make([]RPCReplicaEntry, len(resp.GetEntries()))
 	for i, entry := range resp.GetEntries() {
+		qv, err := fromProtoQuantized(entry.GetQuantized())
+		if err != nil {
+			return RPCPullEntriesResponse{}, err
+		}
+		children, err := fromProtoChildVectors(entry.GetChildren())
+		if err != nil {
+			return RPCPullEntriesResponse{}, err
+		}
 		out.Entries[i] = RPCReplicaEntry{
 			Kind:         uint8(entry.GetKind()),
 			CollectionID: entry.GetCollectionId(),
 			VectorID:     entry.GetVectorId(),
-			Quantized:    fromProtoQuantized(entry.GetQuantized()),
+			Quantized:    qv,
 			Dim:          int(entry.GetDim()),
 			RawHash:      append([]byte(nil), entry.GetRawHash()...),
 			Sparse:       fromProtoSparseBlock(entry.GetSparse()),
-			Children:     fromProtoChildVectors(entry.GetChildren()),
+			Children:     children,
 			Text:         entry.GetText(),
 			Metadata:     cloneMetadata(entry.GetMetadata()),
 			LamportClock: entry.GetLamportClock(),
@@ -1074,7 +1120,7 @@ func fromProtoPullEntriesResponse(resp *grpcapi.PullEntriesResponse) RPCPullEntr
 			WallClock:    fromProtoTimestamp(entry.GetWallClock()),
 		}
 	}
-	return out
+	return out, nil
 }
 
 func toProtoPullSnapshotResponse(resp RPCPullSnapshotResponse) *grpcapi.PullSnapshotResponse {
@@ -1115,9 +1161,9 @@ func toProtoPullSnapshotResponse(resp RPCPullSnapshotResponse) *grpcapi.PullSnap
 	return out
 }
 
-func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSnapshotResponse {
+func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) (RPCPullSnapshotResponse, error) {
 	if resp == nil {
-		return RPCPullSnapshotResponse{}
+		return RPCPullSnapshotResponse{}, nil
 	}
 	out := RPCPullSnapshotResponse{
 		Collection:    resp.GetCollection(),
@@ -1129,7 +1175,7 @@ func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSn
 		SparseEnabled: resp.GetSparseEnabled(),
 	}
 	if len(resp.GetRecords()) == 0 {
-		return out
+		return out, nil
 	}
 	out.Records = make([]RPCSnapshotRecord, len(resp.GetRecords()))
 	for i, record := range resp.GetRecords() {
@@ -1138,12 +1184,20 @@ func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSn
 			Versions: make([]RPCSnapshotVersion, len(record.GetVersions())),
 		}
 		for j, version := range record.GetVersions() {
+			qv, err := fromProtoQuantized(version.GetQuantized())
+			if err != nil {
+				return RPCPullSnapshotResponse{}, err
+			}
+			children, err := fromProtoChildVectors(version.GetChildren())
+			if err != nil {
+				return RPCPullSnapshotResponse{}, err
+			}
 			item.Versions[j] = RPCSnapshotVersion{
-				Quantized:    fromProtoQuantized(version.GetQuantized()),
+				Quantized:    qv,
 				Dim:          int(resp.GetDim()),
 				RawHash:      append([]byte(nil), version.GetRawHash()...),
 				Sparse:       fromProtoSparseBlock(version.GetSparse()),
-				Children:     fromProtoChildVectors(version.GetChildren()),
+				Children:     children,
 				Text:         version.GetText(),
 				Metadata:     cloneMetadata(version.GetMetadata()),
 				LamportClock: version.GetLamportClock(),
@@ -1154,7 +1208,7 @@ func fromProtoPullSnapshotResponse(resp *grpcapi.PullSnapshotResponse) RPCPullSn
 		}
 		out.Records[i] = item
 	}
-	return out
+	return out, nil
 }
 
 func toProtoTimestamp(ts time.Time) *timestamppb.Timestamp {

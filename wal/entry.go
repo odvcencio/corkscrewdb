@@ -14,7 +14,11 @@ import (
 
 const (
 	walMagic   = uint16(0x4357)
-	walVersion = uint8(5) // v0.3.0 floor
+	walVersion = uint8(6) // v6 adds QuantizedVector.Norm (true-MIPS migration)
+
+	// walMinVersion is the oldest wire version ReadEntry still accepts.
+	// Versions below this floor predate v0.3.0 and are rejected outright.
+	walMinVersion = uint8(5)
 )
 
 // maxEntryFieldBytes bounds any single length-prefixed field (ActorID,
@@ -57,6 +61,7 @@ type QuantizedVector struct {
 	MSE     []byte
 	Signs   []byte
 	ResNorm float32
+	Norm    float32 // L2 norm of the original input vector (turboquant.IPQuantized.Norm)
 }
 
 // SparseBlock is a sparse channel persisted in the WAL/snapshot.
@@ -137,6 +142,9 @@ func (e Entry) Encode(w io.Writer) error {
 		if err := write(math.Float32bits(e.Quantized.ResNorm)); err != nil {
 			return err
 		}
+		if err := write(math.Float32bits(e.Quantized.Norm)); err != nil {
+			return err
+		}
 	} else if err := write(uint8(0)); err != nil {
 		return err
 	}
@@ -193,6 +201,9 @@ func (e Entry) Encode(w io.Writer) error {
 				return err
 			}
 			if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+				return err
+			}
+			if err := write(math.Float32bits(child.Quantized.Norm)); err != nil {
 				return err
 			}
 		} else if err := write(uint8(0)); err != nil {
@@ -281,9 +292,15 @@ func ReadEntry(r io.Reader) (Entry, error) {
 	if err := read(&version); err != nil {
 		return entry, err
 	}
-	if version != 5 {
+	if version < walMinVersion {
 		return entry, fmt.Errorf("wal: %w: version %d", ErrFormatTooOld, version)
 	}
+	if version > walVersion {
+		return entry, fmt.Errorf("wal: unsupported version %d (max known %d)", version, walVersion)
+	}
+	// v5 predates QuantizedVector.Norm; decoded v5 payloads default Norm to 1,
+	// preserving their old unit-space (cosine) scoring until re-quantized.
+	hasNorm := version >= 6
 	if err := read(&entry.Kind); err != nil {
 		return entry, err
 	}
@@ -327,10 +344,25 @@ func ReadEntry(r io.Reader) (Entry, error) {
 		if err := read(&resNormBits); err != nil {
 			return entry, err
 		}
+		norm := float32(1) // v5 default: unit norm (legacy cosine semantics)
+		if hasNorm {
+			var normBits uint32
+			if err := read(&normBits); err != nil {
+				return entry, err
+			}
+			norm = math.Float32frombits(normBits)
+			// m1: reject NaN/Inf/negative, matching turboquant's own wire codec
+			// (wire.go:144). A negative norm silently inverts ScoreUpperBound into
+			// a lower bound and drops real top-k members.
+			if math.IsNaN(float64(norm)) || math.IsInf(float64(norm), 0) || norm < 0 {
+				return entry, fmt.Errorf("wal: invalid norm %v", norm)
+			}
+		}
 		entry.Quantized = &QuantizedVector{
 			MSE:     append([]byte(nil), mse...),
 			Signs:   append([]byte(nil), signs...),
 			ResNorm: math.Float32frombits(resNormBits),
+			Norm:    norm,
 		}
 	}
 	var dim uint32
@@ -406,10 +438,25 @@ func ReadEntry(r io.Reader) (Entry, error) {
 			if err := read(&resNormBits); err != nil {
 				return entry, err
 			}
+			childNorm := float32(1) // v5 default: unit norm (legacy cosine semantics)
+			if hasNorm {
+				var normBits uint32
+				if err := read(&normBits); err != nil {
+					return entry, err
+				}
+				childNorm = math.Float32frombits(normBits)
+				// m1: reject NaN/Inf/negative, matching turboquant's own wire codec
+				// (wire.go:144). A negative norm silently inverts ScoreUpperBound
+				// into a lower bound and drops real top-k members.
+				if math.IsNaN(float64(childNorm)) || math.IsInf(float64(childNorm), 0) || childNorm < 0 {
+					return entry, fmt.Errorf("wal: invalid child norm %v", childNorm)
+				}
+			}
 			child.Quantized = &QuantizedVector{
 				MSE:     append([]byte(nil), mse...),
 				Signs:   append([]byte(nil), signs...),
 				ResNorm: math.Float32frombits(resNormBits),
+				Norm:    childNorm,
 			}
 		}
 		var childDim uint32

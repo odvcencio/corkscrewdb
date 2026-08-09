@@ -2,6 +2,9 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
+	"math"
 	"testing"
 	"time"
 )
@@ -158,5 +161,120 @@ func TestEntryFloorGuardRejectsV4(t *testing.T) {
 	_, err := ReadEntry(bytes.NewReader(buf))
 	if err == nil {
 		t.Fatal("expected floor guard error for v4")
+	}
+}
+
+// TestEntryV5LegacyLoadsNormDefaultOne proves the true-MIPS migration's
+// backward-compat contract: a v5 payload (predates QuantizedVector.Norm)
+// loads with Norm defaulted to 1 (unit-space/cosine semantics), leaving
+// ResNorm/MSE/Signs untouched. It simulates a v5 payload by encoding a
+// current (v6) entry, splicing out the 4-byte Norm field that immediately
+// follows ResNorm in the v6 wire layout, downgrading the version byte, and
+// recomputing the CRC trailer over the shortened body.
+func TestEntryV5LegacyLoadsNormDefaultOne(t *testing.T) {
+	e := Entry{
+		Kind:         EntryPut,
+		CollectionID: "c",
+		VectorID:     "v",
+		Quantized:    &QuantizedVector{MSE: []byte{1, 2}, Signs: []byte{3}, ResNorm: 0.75, Norm: 3.5},
+		Dim:          4,
+		ActorID:      "a",
+		LamportClock: 1,
+	}
+	data, err := e.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Locate the 4-byte ResNorm bit pattern; the v6 layout writes Norm
+	// immediately after it.
+	var resNormBytes [4]byte
+	binary.LittleEndian.PutUint32(resNormBytes[:], math.Float32bits(0.75))
+	idx := bytes.Index(data, resNormBytes[:])
+	if idx < 0 {
+		t.Fatal("could not locate ResNorm bit pattern in the v6-encoded entry")
+	}
+	var normBytes [4]byte
+	binary.LittleEndian.PutUint32(normBytes[:], math.Float32bits(3.5))
+	if !bytes.Equal(data[idx+4:idx+8], normBytes[:]) {
+		t.Fatal("Norm bytes are not immediately after ResNorm bytes as the v6 layout requires")
+	}
+
+	// Splice out the Norm field and downgrade the version byte (offset 2,
+	// after the 2-byte magic) to simulate a genuine v5 payload.
+	legacy := append([]byte{}, data[:idx+4]...)
+	legacy = append(legacy, data[idx+8:]...)
+	legacy[2] = walMinVersion
+	body := legacy[:len(legacy)-4]
+	binary.LittleEndian.PutUint32(legacy[len(legacy)-4:], crc32.ChecksumIEEE(body))
+
+	got, err := ReadEntry(bytes.NewReader(legacy))
+	if err != nil {
+		t.Fatalf("ReadEntry(legacy v5): %v", err)
+	}
+	if got.Quantized == nil {
+		t.Fatal("Quantized payload missing after legacy v5 load")
+	}
+	if got.Quantized.Norm != 1 {
+		t.Fatalf("legacy v5 load: Norm = %v, want 1 (unit-space default)", got.Quantized.Norm)
+	}
+	if got.Quantized.ResNorm != 0.75 {
+		t.Fatalf("legacy v5 load: ResNorm = %v, want 0.75 (unaffected by the splice)", got.Quantized.ResNorm)
+	}
+}
+
+// TestReadEntryRejectsInvalidNorm proves m1's decode-time validation: a
+// NaN/Inf/negative Norm is rejected, matching turboquant's own wire codec
+// (wire.go:144). A negative norm silently inverts ScoreUpperBound into a
+// lower bound and drops real top-k members, so untrusted/corrupt input must
+// never decode into a QuantizedVector carrying one. Covers both the
+// top-level Quantized field and a packed child's Quantized field.
+func TestReadEntryRejectsInvalidNorm(t *testing.T) {
+	invalidNorms := []struct {
+		name string
+		norm float32
+	}{
+		{"NaN", float32(math.NaN())},
+		{"+Inf", float32(math.Inf(1))},
+		{"-Inf", float32(math.Inf(-1))},
+		{"negative", -1.0},
+	}
+	for _, tc := range invalidNorms {
+		t.Run("top-level/"+tc.name, func(t *testing.T) {
+			e := Entry{
+				Kind:         EntryPut,
+				CollectionID: "c",
+				VectorID:     "v",
+				Quantized:    &QuantizedVector{MSE: []byte{1, 2}, Signs: []byte{3}, ResNorm: 0.5, Norm: tc.norm},
+				Dim:          4,
+				ActorID:      "a",
+			}
+			data, err := e.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary: %v", err)
+			}
+			if _, err := ReadEntry(bytes.NewReader(data)); err == nil {
+				t.Fatalf("ReadEntry(norm=%v): want error, got nil", tc.norm)
+			}
+		})
+		t.Run("child/"+tc.name, func(t *testing.T) {
+			e := Entry{
+				Kind:         EntryPut,
+				CollectionID: "c",
+				VectorID:     "parent",
+				Dim:          4,
+				Children: []ChildVector{
+					{ID: "c0", Quantized: &QuantizedVector{MSE: []byte{1}, Signs: []byte{2}, ResNorm: 0.5, Norm: tc.norm}, Dim: 4},
+				},
+				ActorID: "a",
+			}
+			data, err := e.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary: %v", err)
+			}
+			if _, err := ReadEntry(bytes.NewReader(data)); err == nil {
+				t.Fatalf("ReadEntry(child norm=%v): want error, got nil", tc.norm)
+			}
+		})
 	}
 }
