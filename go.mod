@@ -8,7 +8,7 @@ require (
 	google.golang.org/protobuf v1.36.11
 	lukechampine.com/blake3 v1.4.1
 	m31labs.dev/eos v0.2.1-0.20260629152717-af61a9313c41
-	m31labs.dev/turboquant v0.2.0
+	m31labs.dev/turboquant v0.2.1
 )
 
 require (
