@@ -40,9 +40,12 @@ func newGPUScorer(q *turboquant.IPQuantizer, corpus []turboquant.IPQuantized) (S
 
 // gpuCorpusFingerprint computes a cheap rolling hash over the corpus so that
 // in-place mutations (same cardinality, changed codes) are detected. It folds
-// each entry's ResNorm bits and a sample of the Signs bytes into a 64-bit
-// accumulator using rotate-xor — fast enough for a per-SetCorpus call on the
-// GPU path (SetCorpus is not on the query hot path).
+// each entry's ResNorm and Norm bits and a sample of the Signs bytes into a
+// 64-bit accumulator using rotate-xor — fast enough for a per-SetCorpus call
+// on the GPU path (SetCorpus is not on the query hot path). Norm must be
+// folded in: InnerProductPrepared scales its result by qx.Norm, so a
+// norm-only change (e.g. after a re-quantize) that left the fingerprint
+// unchanged would let the device-resident scorer serve stale scores.
 func gpuCorpusFingerprint(corpus []turboquant.IPQuantized) uint64 {
 	h := uint64(len(corpus)) * 0x9e3779b97f4a7c15 // seed with cardinality
 	for i := range corpus {
@@ -50,6 +53,9 @@ func gpuCorpusFingerprint(corpus []turboquant.IPQuantized) uint64 {
 		// Fold ResNorm (float32 bit pattern).
 		h ^= bits.RotateLeft64(uint64(math.Float32bits(c.ResNorm)), 17)
 		h *= 0x517cc1b727220a95
+		// Fold Norm (float32 bit pattern).
+		h ^= bits.RotateLeft64(uint64(math.Float32bits(c.Norm)), 41)
+		h *= 0x9e3779b97f4a7c15
 		// Sample Signs bytes: first, middle, last (if they exist).
 		if n := len(c.Signs); n > 0 {
 			h ^= bits.RotateLeft64(uint64(c.Signs[0]), 31)

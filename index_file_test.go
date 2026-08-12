@@ -1,13 +1,18 @@
 package corkscrewdb
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"m31labs.dev/turboquant"
 )
 
 func TestIndexFileRoundTrip(t *testing.T) {
@@ -132,5 +137,102 @@ func TestIndexFileV2RejectsForgedOldVersion(t *testing.T) {
 	_, _, err = loadIndexFile(path)
 	if !errors.Is(err, ErrFormatTooOld) {
 		t.Fatalf("expected ErrFormatTooOld, got: %v", err)
+	}
+}
+
+// TestIndexFileV3LegacyLoadsNormDefaultOne proves the true-MIPS migration's
+// backward-compat contract: a v3 .tqi payload (predates IPQuantized.Norm)
+// loads with Norm defaulted to 1 (unit-space/cosine semantics), leaving
+// ResNorm/MSE/Signs untouched. It simulates a v3 payload by marshaling a
+// current (v4) index file, splicing out the 4-byte Norm field that
+// immediately follows ResNorm in the v4 wire layout, downgrading the version
+// byte, and recomputing the CRC trailer over the shortened body.
+func TestIndexFileV3LegacyLoadsNormDefaultOne(t *testing.T) {
+	idx := newIndex(8, 2, 1)
+	rng := rand.New(rand.NewSource(7))
+	v := randVec(rng, 8)
+	idx.Add("x", v, "tx", nil, 1)
+
+	data, err := marshalIndexFile(idx, 1, false, false)
+	if err != nil {
+		t.Fatalf("marshalIndexFile: %v", err)
+	}
+
+	// The real Norm/ResNorm the quantizer computed for "x" tells us exactly
+	// which bit pattern to locate and splice out.
+	qv := idx.entries[0].qv
+	var resNormBytes [4]byte
+	binary.LittleEndian.PutUint32(resNormBytes[:], math.Float32bits(qv.ResNorm))
+	pos := bytes.Index(data, resNormBytes[:])
+	if pos < 0 {
+		t.Fatal("could not locate ResNorm bit pattern in the v4-encoded index file")
+	}
+	var normBytes [4]byte
+	binary.LittleEndian.PutUint32(normBytes[:], math.Float32bits(qv.Norm))
+	if !bytes.Equal(data[pos+4:pos+8], normBytes[:]) {
+		t.Fatal("Norm bytes are not immediately after ResNorm bytes as the v4 layout requires")
+	}
+
+	// Splice out the Norm field and downgrade the version byte (offset 4,
+	// after the 4-byte magic) to simulate a genuine v3 payload.
+	legacy := append([]byte{}, data[:pos+4]...)
+	legacy = append(legacy, data[pos+8:]...)
+	legacy[4] = indexMinVersion
+	body := legacy[:len(legacy)-4]
+	binary.LittleEndian.PutUint32(legacy[len(legacy)-4:], crc32.ChecksumIEEE(body))
+
+	path := filepath.Join(t.TempDir(), "legacy-v3.tqi")
+	if err := os.WriteFile(path, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, _, _, _, err := loadIndexFileV3(path)
+	if err != nil {
+		t.Fatalf("loadIndexFileV3(legacy v3): %v", err)
+	}
+	if len(loaded.entries) != 1 {
+		t.Fatalf("entries = %+v, want 1", loaded.entries)
+	}
+	got := loaded.entries[0].qv
+	if got.Norm != 1 {
+		t.Fatalf("legacy v3 load: Norm = %v, want 1 (unit-space default)", got.Norm)
+	}
+	if got.ResNorm != qv.ResNorm {
+		t.Fatalf("legacy v3 load: ResNorm = %v, want %v (unaffected by the splice)", got.ResNorm, qv.ResNorm)
+	}
+}
+
+// TestLoadIndexFileV3RejectsInvalidNorm proves m1's decode-time validation:
+// a NaN/Inf/negative Norm is rejected, matching turboquant's own wire codec
+// (wire.go:144). A negative norm silently inverts ScoreUpperBound into a
+// lower bound and drops real top-k members, so untrusted/corrupt input must
+// never decode into an IPQuantized carrying one.
+func TestLoadIndexFileV3RejectsInvalidNorm(t *testing.T) {
+	invalidNorms := []struct {
+		name string
+		norm float32
+	}{
+		{"NaN", float32(math.NaN())},
+		{"+Inf", float32(math.Inf(1))},
+		{"-Inf", float32(math.Inf(-1))},
+		{"negative", -1.0},
+	}
+	for _, tc := range invalidNorms {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := newIndex(8, 2, 1)
+			idx.addQuantized("x", turboquant.IPQuantized{MSE: []byte{1}, Signs: []byte{2}, ResNorm: 0.5, Norm: tc.norm}, "tx", nil, 1)
+
+			data, err := marshalIndexFile(idx, 1, false, false)
+			if err != nil {
+				t.Fatalf("marshalIndexFile: %v", err)
+			}
+			path := filepath.Join(t.TempDir(), "invalid-norm.tqi")
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, _, err := loadIndexFileV3(path); err == nil {
+				t.Fatalf("loadIndexFileV3(norm=%v): want error, got nil", tc.norm)
+			}
+		})
 	}
 }

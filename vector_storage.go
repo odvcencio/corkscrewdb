@@ -35,6 +35,7 @@ func toWALQuantized(qv *turboquant.IPQuantized) *walpkg.QuantizedVector {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 }
 
@@ -48,6 +49,7 @@ func cloneWALQuantized(qv *walpkg.QuantizedVector) *walpkg.QuantizedVector {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 }
 
@@ -88,6 +90,7 @@ func fromWALQuantized(qv *walpkg.QuantizedVector) *turboquant.IPQuantized {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 	return &out
 }
@@ -151,6 +154,7 @@ func toSnapshotQuantized(qv *turboquant.IPQuantized) *snap.QuantizedVector {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 }
 
@@ -162,6 +166,7 @@ func fromSnapshotQuantized(qv *snap.QuantizedVector) *turboquant.IPQuantized {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 	return &out
 }

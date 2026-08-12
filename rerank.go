@@ -26,13 +26,20 @@ type candidate struct {
 }
 
 // byteEqualQuantized compares two IPQuantized values for byte-level equality.
-// ResNorm is compared BITWISE via math.Float32bits per §5.2 — this is
-// load-bearing for NaN/-0 bit-pattern correctness. Two values are equal iff
-// their MSE bytes, Signs bytes, AND ResNorm bit patterns are all identical.
+// ResNorm and Norm are compared BITWISE via math.Float32bits per §5.2 — this
+// is load-bearing for NaN/-0 bit-pattern correctness. Two values are equal
+// iff their MSE bytes, Signs bytes, ResNorm bit patterns, AND Norm bit
+// patterns are all identical. Norm must be included: it is the true-MIPS
+// magnitude scale (turboquant scales every score by qx.Norm), so a legacy
+// stored code (Norm defaulted to 1 on load) must NOT be reported as matching
+// a freshly re-quantized code carrying the real norm — doing so would mix a
+// true-magnitude exact score into a top-k otherwise ranked in the legacy
+// record's unit/cosine space.
 func byteEqualQuantized(a, b *turboquant.IPQuantized) bool {
 	return bytes.Equal(a.MSE, b.MSE) &&
 		bytes.Equal(a.Signs, b.Signs) &&
-		math.Float32bits(a.ResNorm) == math.Float32bits(b.ResNorm)
+		math.Float32bits(a.ResNorm) == math.Float32bits(b.ResNorm) &&
+		math.Float32bits(a.Norm) == math.Float32bits(b.Norm)
 }
 
 // rerankContext is the minimal context that coldFloatsCollection and rerankExact need.

@@ -25,6 +25,7 @@ func TestProtoRoundTripCodeCarrying(t *testing.T) {
 		Mse:     []byte{1, 2, 3, 4},
 		Signs:   []byte{0xAA, 0x55},
 		ResNorm: 1.5,
+		Norm:    proto.Float32(3.25),
 	}
 	sparse := &grpcapi.SparseBlock{
 		Indices: []uint32{1, 3, 7},
@@ -33,14 +34,14 @@ func TestProtoRoundTripCodeCarrying(t *testing.T) {
 	children := []*grpcapi.ChildVector{
 		{
 			Id:        "child-0",
-			Quantized: &grpcapi.QuantizedVector{Mse: []byte{9}, Signs: []byte{1}, ResNorm: 0.25},
+			Quantized: &grpcapi.QuantizedVector{Mse: []byte{9}, Signs: []byte{1}, ResNorm: 0.25, Norm: proto.Float32(2.0)},
 			Dim:       8,
 			Text:      "c0",
 			Metadata:  map[string]string{"k": "v0"},
 		},
 		{
 			Id:        "child-1",
-			Quantized: &grpcapi.QuantizedVector{Mse: []byte{8, 8}, Signs: []byte{2}, ResNorm: 0.75},
+			Quantized: &grpcapi.QuantizedVector{Mse: []byte{8, 8}, Signs: []byte{2}, ResNorm: 0.75, Norm: proto.Float32(0.5)},
 			Dim:       8,
 			Text:      "c1",
 			Metadata:  map[string]string{"k": "v1"},
@@ -194,4 +195,48 @@ func TestProtoRoundTripRebalanceAndRaw(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProtoQuantizedVectorNormPresence verifies the wire-level presence
+// semantics of QuantizedVector.norm (B1): it is `optional float`, backed by
+// a synthetic oneof, so proto.Marshal/Unmarshal must distinguish "field
+// never set" (old peer, pre-B1) from "field set to the zero value" (a
+// genuine zero vector) — a plain (non-optional) proto3 float cannot make
+// this distinction, since unmarshal always yields the Go zero value for an
+// absent field. Presence is what lets corkscrewdb's transport layer
+// (fromProtoQuantized) default an ABSENT norm to 1 while trusting a PRESENT
+// 0 as a real zero-vector norm.
+func TestProtoQuantizedVectorNormPresence(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		msg := &grpcapi.QuantizedVector{Mse: []byte{1}, Signs: []byte{2}, ResNorm: 0.5}
+		data, err := proto.Marshal(msg)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		got := &grpcapi.QuantizedVector{}
+		if err := proto.Unmarshal(data, got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.Norm != nil {
+			t.Fatalf("Norm = %v, want nil (absent, not sent on the wire)", *got.Norm)
+		}
+	})
+
+	t.Run("present zero", func(t *testing.T) {
+		msg := &grpcapi.QuantizedVector{Mse: []byte{1}, Signs: []byte{2}, ResNorm: 0.5, Norm: proto.Float32(0)}
+		data, err := proto.Marshal(msg)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		got := &grpcapi.QuantizedVector{}
+		if err := proto.Unmarshal(data, got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.Norm == nil {
+			t.Fatal("Norm = nil, want present (a genuine zero vector must transmit presence=true, value 0)")
+		}
+		if *got.Norm != 0 {
+			t.Fatalf("Norm = %v, want 0", *got.Norm)
+		}
+	})
 }

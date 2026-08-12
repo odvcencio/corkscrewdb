@@ -16,7 +16,11 @@ import (
 
 const (
 	snapshotMagic   = uint32(0x43534442)
-	snapshotVersion = uint8(6) // v0.3.0 floor
+	snapshotVersion = uint8(7) // v7 adds QuantizedVector.Norm (true-MIPS migration)
+
+	// snapshotMinVersion is the oldest wire version read() still accepts.
+	// Versions below this floor predate v0.3.0 and are rejected outright.
+	snapshotMinVersion = uint8(6)
 
 	childEncodingLegacy                  = uint8(0)
 	childEncodingCompactQuantizedOrdinal = uint8(1)
@@ -63,6 +67,7 @@ type QuantizedVector struct {
 	MSE     []byte
 	Signs   []byte
 	ResNorm float32
+	Norm    float32 // L2 norm of the original input vector (turboquant.IPQuantized.Norm)
 }
 
 // SparseBlock is a sparse channel persisted in the snapshot.
@@ -205,6 +210,9 @@ func marshal(data Data) ([]byte, error) {
 				if err := write(math.Float32bits(version.Quantized.ResNorm)); err != nil {
 					return nil, err
 				}
+				if err := write(math.Float32bits(version.Quantized.Norm)); err != nil {
+					return nil, err
+				}
 			} else if err := write(uint8(0)); err != nil {
 				return nil, err
 			}
@@ -314,6 +322,9 @@ func writeLegacyChildren(
 			if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
 				return err
 			}
+			if err := write(math.Float32bits(child.Quantized.Norm)); err != nil {
+				return err
+			}
 		} else if err := write(uint8(0)); err != nil {
 			return err
 		}
@@ -390,6 +401,11 @@ func writeCompactQuantizedOrdinalChildren(
 	}
 	for _, child := range children {
 		if err := write(math.Float32bits(child.Quantized.ResNorm)); err != nil {
+			return err
+		}
+	}
+	for _, child := range children {
+		if err := write(math.Float32bits(child.Quantized.Norm)); err != nil {
 			return err
 		}
 	}

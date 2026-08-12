@@ -893,7 +893,7 @@ func (h *hnswIndex) searchCandidates(query []float32, k int, filters []FilterOpt
 			continue
 		}
 		if resultHeap.Len() == k {
-			bound, prunable := pq.ScoreUpperBound(entry.qv.ResNorm)
+			bound, prunable := pq.ScoreUpperBound(entry.qv.Norm, entry.qv.ResNorm)
 			if prunable && bound <= (*resultHeap)[0].Score {
 				continue
 			}
@@ -1023,7 +1023,7 @@ func (h *hnswIndex) Search(query []float32, k int, filters []FilterOption) []Sea
 			continue
 		}
 		if resultHeap.Len() == k { // heap full: proven upper-bound early-out (D3)
-			bound, prunable := pq.ScoreUpperBound(entry.qv.ResNorm)
+			bound, prunable := pq.ScoreUpperBound(entry.qv.Norm, entry.qv.ResNorm)
 			if prunable && bound <= (*resultHeap)[0].Score {
 				continue // exact <= bound <= kthBest: cannot displace the k-th member
 			}

@@ -14,11 +14,46 @@ import (
 	"m31labs.dev/eos/runtime/backends/metal"
 )
 
+const importedBGECandidateProviderID = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
+
 // LoadEosProvider loads a Eos embedding package from disk.
 func LoadEosProvider(artifactPath string) (EmbeddingProvider, error) {
 	return loadEosProvider(loadEosConfig{
 		ArtifactPath: artifactPath,
 	})
+}
+
+// ImportedBGECandidateProviderID is the stable CorkScrewDB provider ID exposed
+// by LoadImportedBGECandidateProvider.
+const ImportedBGECandidateProviderID = importedBGECandidateProviderID
+
+// LoadImportedBGECandidateProvider loads the verified Eos imported-BGE
+// eos-embed-v1 candidate as a non-default CorkScrewDB provider. Encode uses
+// the BGE query role; EncodeBatch uses the BGE document role.
+func LoadImportedBGECandidateProvider(packagePath string) (EmbeddingProvider, error) {
+	if strings.TrimSpace(packagePath) == "" {
+		return nil, fmt.Errorf("corkscrewdb: imported BGE candidate package path is required")
+	}
+	rt := eosruntime.New(cuda.New(), metal.New())
+	embedder, err := eosruntime.LoadImportedBERTEmbedderCandidate(context.Background(), packagePath, rt)
+	if err != nil {
+		return nil, err
+	}
+	dim := embedder.NativeDim()
+	if dim <= 0 {
+		probe, _, err := embedder.EmbedTextBatchWithRole(context.Background(), []string{"dimension probe"}, eosruntime.EmbeddingRoleDocument)
+		if err != nil {
+			return nil, err
+		}
+		if len(probe) != 1 || len(probe[0]) == 0 {
+			return nil, fmt.Errorf("corkscrewdb: imported BGE candidate returned invalid dimension probe")
+		}
+		dim = len(probe[0])
+	}
+	return &importedBGECandidateProvider{
+		embedder: embedder,
+		dim:      dim,
+	}, nil
 }
 
 // LoadEosProviderWithID loads a Eos embedding package from disk and exposes it
@@ -43,6 +78,105 @@ type eosProvider struct {
 	closeMu sync.Mutex
 	tempDir string
 	closed  bool
+}
+
+type importedBGECandidateProvider struct {
+	embedder *eosruntime.PretrainedBERTTextEmbedder
+	dim      int
+	mu       sync.Mutex
+}
+
+func (p *importedBGECandidateProvider) Encode(text string) ([]float32, error) {
+	if p == nil {
+		return nil, fmt.Errorf("corkscrewdb: nil imported BGE candidate provider")
+	}
+	if strings.TrimSpace(text) == "" {
+		return make([]float32, p.dim), nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	vecs, _, err := p.embedder.EmbedTextBatchWithRole(context.Background(), []string{text}, eosruntime.EmbeddingRoleQuery)
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != 1 || len(vecs[0]) != p.dim {
+		return nil, fmt.Errorf("corkscrewdb: imported BGE query embedding shape rows=%d dim=%d, want rows=1 dim=%d", len(vecs), firstEmbeddingDim(vecs), p.dim)
+	}
+	return append([]float32(nil), vecs[0]...), nil
+}
+
+func (p *importedBGECandidateProvider) EncodeBatch(texts []string) ([][]float32, error) {
+	if p == nil {
+		return nil, fmt.Errorf("corkscrewdb: nil imported BGE candidate provider")
+	}
+	out := make([][]float32, len(texts))
+	nonblank := make([]string, 0, len(texts))
+	positions := make([]int, 0, len(texts))
+	for i, text := range texts {
+		if strings.TrimSpace(text) == "" {
+			out[i] = make([]float32, p.dim)
+			continue
+		}
+		nonblank = append(nonblank, text)
+		positions = append(positions, i)
+	}
+	if len(nonblank) == 0 {
+		return out, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	vecs, _, err := p.embedder.EmbedTextBatchWithRole(context.Background(), nonblank, eosruntime.EmbeddingRoleDocument)
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != len(nonblank) {
+		return nil, fmt.Errorf("corkscrewdb: imported BGE document embedding rows=%d, want %d", len(vecs), len(nonblank))
+	}
+	for i, vec := range vecs {
+		if len(vec) != p.dim {
+			return nil, fmt.Errorf("corkscrewdb: imported BGE document embedding dim=%d, want %d", len(vec), p.dim)
+		}
+		out[positions[i]] = append([]float32(nil), vec...)
+	}
+	return out, nil
+}
+
+func (p *importedBGECandidateProvider) Dim() int {
+	if p == nil {
+		return 0
+	}
+	return p.dim
+}
+
+func (p *importedBGECandidateProvider) Close() error { return nil }
+
+func (p *importedBGECandidateProvider) ProviderID() string {
+	if p == nil {
+		return ""
+	}
+	return ImportedBGECandidateProviderID
+}
+
+func (p *importedBGECandidateProvider) Deterministic() bool { return true }
+
+func (p *importedBGECandidateProvider) BackendFingerprint() string {
+	if p == nil {
+		return ""
+	}
+	return importedBGECandidateBackendFingerprint()
+}
+
+func importedBGECandidateBackendFingerprint() string {
+	return "eos-imported-bge:" +
+		eosruntime.ImportedBERTEmbedderCandidatePackageSHA256 + ":" +
+		eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256
+}
+
+func firstEmbeddingDim(vecs [][]float32) int {
+	if len(vecs) == 0 {
+		return 0
+	}
+	return len(vecs[0])
 }
 
 type loadEosConfig struct {

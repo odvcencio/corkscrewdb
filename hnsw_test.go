@@ -247,19 +247,39 @@ func addFlatVec(h *hnswIndex, id string, v []float32) int32 {
 
 func TestSelectNeighborsHeuristicRNGDrops(t *testing.T) {
 	dim := 8
-	// bit width 4: fine enough quantization that the candidate ordering by sim-to-q
-	// matches the float layout (r before its near-duplicate c1), so the RNG
-	// domination (sim(c1,r) > sim(c1,q)) is exercised deterministically.
+	// bit width 4: the fixture below uses wide (>=0.28) true-cosine margins on
+	// every comparison so the candidate ordering by sim-to-q (r before its
+	// near-duplicate c1) and the RNG domination (sim(c1,r) > sim(c1,q)) are
+	// both exercised deterministically despite bitWidth=4/dim=8 quantization
+	// noise.
 	h := newHNSWIndex(dim, 4, 1, defaultHNSWParams())
 
 	// q is the inserted node's query position.
 	q := []float32{1, 0, 0, 0, 0, 0, 0, 0}
-	// r is already a strong candidate near q.
-	r := []float32{0.9, 0.1, 0, 0, 0, 0, 0, 0}
-	// c1 is a near-duplicate of r (so sim(c1,r) > sim(c1,q)) -> RNG-dominated by r.
-	c1 := []float32{0.88, 0.12, 0, 0, 0, 0, 0, 0}
-	// c2 is diverse / far from r but still has some sim to q -> kept.
-	c2 := []float32{0.2, 0, 0.9, 0, 0, 0, 0, 0}
+	// r is a strong candidate near q: cos(r,q) = 0.90.
+	r := []float32{0.9, 0.4358899, 0, 0, 0, 0, 0, 0}
+	// c1 is a near-duplicate of r (cos(c1,r) = 0.889, well above cos(c1,q) =
+	// 0.60) -> RNG-dominated by r.
+	c1 := []float32{0.6, 0.8, 0, 0, 0, 0, 0, 0}
+	// c2 is diverse / far from r (cos(c2,r) < 0) but still has some sim to q
+	// (cos(c2,q) = 0.30) -> not dominated, kept.
+	c2 := []float32{0.3, -0.9, 0.316228, 0, 0, 0, 0, 0}
+	// turboquant v0.2.0 InnerProductPrepared/Dequantize scale by the stored
+	// vector's true L2 norm (true-MIPS, not cosine). This test's RNG-domination
+	// assertion is defined purely in terms of directional similarity ("sim"),
+	// so normalize every fixture to unit length: that makes each entry's Norm
+	// ~1, which reduces true-MIPS scoring back to the cosine-space comparison
+	// the test's relationships (near-duplicate / diverse) were designed around,
+	// isolating direction from the unrelated magnitude dimension. The vectors
+	// above were also chosen for a wide (>=0.28) true-cosine margin on every
+	// comparison the test makes: bitWidth=4/dim=8 quantization noise measured
+	// up to ~0.1 in absolute score terms, so the original fixture's ~0.009
+	// true-cosine gap was already noise-dominated and flipped by any change
+	// to the exact floating-point path (Norm-scaling included).
+	normalizeVector(q)
+	normalizeVector(r)
+	normalizeVector(c1)
+	normalizeVector(c2)
 
 	rIdx := addFlatVec(h, "r", r)
 	c1Idx := addFlatVec(h, "c1", c1)

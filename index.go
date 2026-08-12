@@ -246,6 +246,7 @@ func cloneQuantized(qv turboquant.IPQuantized) turboquant.IPQuantized {
 		MSE:     append([]byte(nil), qv.MSE...),
 		Signs:   append([]byte(nil), qv.Signs...),
 		ResNorm: qv.ResNorm,
+		Norm:    qv.Norm,
 	}
 }
 

@@ -7,15 +7,15 @@ require (
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 	lukechampine.com/blake3 v1.4.1
-	m31labs.dev/eos v0.1.5-0.20260617183712-aefe4211dbee
-	m31labs.dev/turboquant v0.2.1-0.20260618054117-90ea3cf6af00
+	m31labs.dev/eos v0.2.1-0.20260629152717-af61a9313c41
+	m31labs.dev/turboquant v0.2.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/text v0.2.0 // indirect
-	github.com/odvcencio/gotreesitter v0.20.1 // indirect
+	github.com/odvcencio/gotreesitter v0.20.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect

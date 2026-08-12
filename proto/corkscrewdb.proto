@@ -52,6 +52,8 @@ message QuantizedVector {
   bytes mse      = 1; // packed MSE indices ((b-1) bits/coord)
   bytes signs    = 2; // packed QJL sign bits (1 bit/coord)
   float res_norm = 3; // L2 norm of residual
+  optional float norm = 4; // L2 norm of the original input vector; presence-aware so a rolling
+                            // upgrade can tell "old peer didn't set it" from a genuine 0 (zero vector)
 }
 
 // SparseBlock mirrors wal.SparseBlock.
