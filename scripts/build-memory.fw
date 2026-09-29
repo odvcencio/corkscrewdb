@@ -1,12 +1,13 @@
 package main
 
-// Build, tag, and push the memory image to Harbor.
+// Build, tag, and push the memory image to your container registry.
 //
 // Usage:
 //   ferrous-wheel run scripts/build-memory.fw            # build + push
 //   ferrous-wheel run scripts/build-memory.fw --no-push  # build only (no push)
 //
-// Registry:  harbor.draco.quest/m31labs/memory
+// Registry:  set CORKSCREWDB_MEMORY_IMAGE to the image repository (for example
+//            registry.example.com/team/memory)
 // Tag:       git describe --tags --always --dirty
 // Context:   repo root (.), Dockerfile at cmd/memory/Dockerfile, plus named
 //            build-context mll=../mll for the local `replace` in go.mod.
@@ -21,7 +22,6 @@ import (
 
 const (
 	repoRel    = "."
-	image      = "harbor.draco.quest/m31labs/memory"
 	mllCtx     = "mll=../mll"
 	dockerfile = "cmd/memory/Dockerfile"
 )
@@ -68,7 +68,15 @@ func repoRoot() string {
 	return cwd
 }
 
+// image is the image repository to build and push; it comes from the environment
+// so no registry host is checked in.
+var image = os.Getenv("CORKSCREWDB_MEMORY_IMAGE")
+
 func main() {
+	if image == "" {
+		fmt.Fprintln(os.Stderr, "set CORKSCREWDB_MEMORY_IMAGE to the image repository, for example registry.example.com/team/memory")
+		os.Exit(1)
+	}
 	let mut noPush = false
 	for a in os.Args[1:] {
 		if a == "--no-push" {
