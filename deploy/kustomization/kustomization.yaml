@@ -12,7 +12,11 @@ resources:
   - memory-service.yaml
   - bootstrap-job.yaml
 images:
-  - name: harbor.draco.quest/m31labs/corkscrewdb
+  # The base manifests use the bare image names below. Point newName at your
+  # registry (or run `kustomize edit set image corkscrewdb=<registry>/corkscrewdb:<tag>`).
+  - name: corkscrewdb
+    newName: registry.example.com/team/corkscrewdb
     newTag: v0.3.0
-  - name: harbor.draco.quest/m31labs/memory
+  - name: memory
+    newName: registry.example.com/team/memory
     newTag: v0.3.0

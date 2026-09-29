@@ -55,7 +55,7 @@ out-of-band `kubectl create secret` path.
 
 ```
 kubectl -n m31labs create secret docker-registry harbor-m31labs \
-  --docker-server=harbor.draco.quest \
+  --docker-server=registry.example.com \
   --docker-username=<user> \
   --docker-password=<password> \
   --docker-email=<email>
@@ -82,7 +82,7 @@ kubectl -n m31labs port-forward svc/corkscrewdb-rw 4040:4040
 
 ```
 kubectl -n m31labs set image sts/corkscrewdb \
-  corkscrewdb=harbor.draco.quest/m31labs/corkscrewdb:<new-tag>
+  corkscrewdb=registry.example.com/team/corkscrewdb:<new-tag>
 ```
 
 Note: CorkScrewDB runs a single writer replica (RW pod). Expect roughly
@@ -95,5 +95,5 @@ Equivalent upgrade for the Memory service:
 
 ```
 kubectl -n m31labs set image deploy/memory \
-  memory=harbor.draco.quest/m31labs/memory:<new-tag>
+  memory=registry.example.com/team/memory:<new-tag>
 ```
